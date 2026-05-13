@@ -6,9 +6,10 @@ import httpx
 
 
 class OpenAIResponsesClient:
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(self, api_key: str, model: str, timeout_seconds: float = 120.0) -> None:
         self.api_key = api_key
         self.model = model
+        self.timeout_seconds = timeout_seconds
 
     async def create_response(
         self,
@@ -27,7 +28,7 @@ class OpenAIResponsesClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(
                 "https://api.openai.com/v1/responses",
                 headers=headers,

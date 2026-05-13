@@ -23,3 +23,10 @@ plex_client_identifier.txt
 
 plexorcist.egg-info/
 .DS_Store
+
+# Local scratch space for user/agent artifacts; never commit or deploy
+artifacts/
+
+# Local deploy helpers with private host/path details
+deploy.local.sh
+AGENTS.md

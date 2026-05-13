@@ -9,7 +9,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.agent import ConciergeAgent
 from backend.auth_context import (
@@ -45,7 +46,16 @@ from tools.registry import ToolRegistry
 from tools.request_tools import RequestTools
 
 app = FastAPI(title="Plexorcist Concierge")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 _MEMORY_SWEEP_TASK: asyncio.Task | None = None
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico() -> FileResponse:
+    for candidate in ("static/favicon.png", "static/images/Plexorcist-icon.png"):
+        if Path(candidate).is_file():
+            return FileResponse(candidate, media_type="image/png")
+    raise HTTPException(status_code=404, detail="favicon not found")
 
 
 def _load_plex_client_identifier(settings: Settings) -> str:
@@ -457,6 +467,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
             registry,
             model=settings.openai_model,
             openai_api_key=settings.openai_api_key,
+            openai_timeout_seconds=float(max(30, int(settings.openai_request_timeout_seconds))),
             ombi_continue_url=settings.ombi_continue_url,
             admin_label=settings.admin_display_name or "the admin",
             prowl=prowl,
@@ -483,6 +494,83 @@ def _render_auth_greeting(user: UserContext | None, settings: Settings) -> str:
 
 def _plex_cookie_provider(settings: Settings) -> PlexOAuthUserContextProvider:
     return PlexOAuthUserContextProvider(settings)
+
+
+async def _maybe_send_login_notice(
+    *,
+    settings: Settings,
+    user_id: str,
+    username: str,
+    display_name: str,
+    is_admin: bool,
+    request: Request,
+) -> None:
+    audit = AuditLogger()
+    if not settings.login_notify_enabled:
+        audit.log(
+            "login_notify_skipped",
+            {"user_id": user_id, "username": username, "reason": "disabled"},
+        )
+        return
+    scope = (settings.login_notify_scope or "all").strip().lower()
+    if scope == "none":
+        audit.log(
+            "login_notify_skipped",
+            {"user_id": user_id, "username": username, "reason": "scope_none"},
+        )
+        return
+    if scope == "admin_only" and not is_admin:
+        audit.log(
+            "login_notify_skipped",
+            {"user_id": user_id, "username": username, "reason": "scope_admin_only"},
+        )
+        return
+    if not settings.prowl_api_key:
+        audit.log(
+            "login_notify_skipped",
+            {"user_id": user_id, "username": username, "reason": "missing_api_key"},
+        )
+        return
+
+    ip_text = ""
+    if settings.login_notify_include_ip:
+        forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        client_ip = forwarded_for or (request.client.host if request.client else "")
+        if client_ip:
+            ip_text = f" | ip={client_ip}"
+
+    summary = (
+        f"Login: {display_name or username} (@{username})"
+        f" | user_id={user_id}"
+        f" | admin={str(is_admin).lower()}"
+        f" | auth=plex-oauth"
+        f" | at={datetime.utcnow().isoformat()}Z"
+        f"{ip_text}"
+    )
+    prowl = ProwlClient(settings.prowl_api_key)
+    result = await prowl.send_notice(summary=summary, event="Plexorcist Login", priority=0)
+    if result.get("ok"):
+        audit.log(
+            "login_notify_sent",
+            {
+                "user_id": user_id,
+                "username": username,
+                "scope": scope,
+                "event": "Plexorcist Login",
+                "status_code": result.get("status_code"),
+            },
+        )
+        return
+    audit.log(
+        "login_notify_failed",
+        {
+            "user_id": user_id,
+            "username": username,
+            "scope": scope,
+            "error": result.get("error"),
+            "status_code": result.get("status_code"),
+        },
+    )
 
 
 def _parse_json_from_text(text: str) -> dict:
@@ -599,7 +687,11 @@ async def _summarize_inactive_conversation(
         user.user_id,
         recent_notes_limit=settings.memory_recent_notes_limit,
     )
-    client = OpenAIResponsesClient(settings.openai_api_key, settings.openai_model)
+    client = OpenAIResponsesClient(
+        settings.openai_api_key,
+        settings.openai_model,
+        timeout_seconds=float(max(30, int(settings.openai_request_timeout_seconds))),
+    )
     instructions = (
         "Summarize this completed user interaction into durable memory JSON.\n"
         "Return strict JSON only with keys: rolling_summary, preferences, familiarity_notes, notes.\n"
@@ -990,10 +1082,13 @@ async def index(
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{settings.app_name}</title>
+    <link rel="icon" type="image/png" href="/favicon.ico?v=5">
+    <link rel="shortcut icon" type="image/png" href="/favicon.ico?v=5">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap');
       :root {{
         --bg: #0d1117;
         --bg-soft: #131923;
@@ -1009,7 +1104,7 @@ async def index(
       }}
       body {{
         margin: 0;
-        font-family: "IBM Plex Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         background:
           radial-gradient(circle at 12% 8%, rgba(56, 189, 248, 0.16), transparent 28%),
           radial-gradient(circle at 88% 0%, rgba(125, 211, 252, 0.08), transparent 24%),
@@ -1062,6 +1157,41 @@ async def index(
       .hero {{
         padding: 18px 20px 16px;
         background: linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(17, 24, 39, 0.8));
+      }}
+      .hero-brand {{
+        display: grid;
+        grid-template-columns: 84px minmax(0, 1fr);
+        gap: 14px;
+        align-items: center;
+      }}
+      .hero-logo {{
+        width: 84px;
+        height: 84px;
+        border-radius: 18px;
+        border: none;
+        box-shadow: none;
+        object-fit: cover;
+        background: transparent;
+      }}
+      .hero-text p {{
+        margin: 0;
+      }}
+      .hero-text h1 {{
+        font-family: "Space Grotesk", "Inter", system-ui, sans-serif;
+        font-weight: 600;
+      }}
+      .brand-title {{
+        margin: 0 0 8px;
+        font-family: "Space Grotesk", "Inter", system-ui, sans-serif;
+        font-size: 32px;
+        font-weight: 700;
+        letter-spacing: -0.035em;
+        color: #d6e2ec;
+        line-height: 1.05;
+      }}
+      .brand-title .muted {{
+        font-weight: 500;
+        color: #b7c4d0;
       }}
       .hero::after {{
         content: "";
@@ -1220,34 +1350,84 @@ async def index(
       h1 {{
         margin: 0 0 8px;
         font-size: 2.2rem;
-        font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+        font-family: "Space Grotesk", "Inter", system-ui, sans-serif;
         letter-spacing: -0.03em;
       }}
       p {{
         color: var(--ink-soft);
         line-height: 1.5;
       }}
-      textarea {{
+      .composer-input {{
         width: 100%;
-        min-height: 54px;
-        max-height: 180px;
+        min-height: 42px;
+        height: 42px;
         border-radius: 18px;
         border: 1px solid rgba(148, 163, 184, 0.18);
-        padding: 14px;
+        padding: 10px 14px;
+        line-height: 1.35;
         font: inherit;
-        resize: vertical;
         box-sizing: border-box;
+        resize: none;
+        overflow-y: hidden;
         background: rgba(8, 15, 28, 0.9);
         color: var(--ink);
         outline: none;
         transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
       }}
-      textarea::placeholder {{
+      .composer-input::placeholder {{
         color: rgba(184, 196, 214, 0.62);
       }}
-      textarea:focus {{
+      .composer-input:focus {{
         border-color: rgba(125, 211, 252, 0.65);
         box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
+      }}
+      .starter-card {{
+        margin: 84px auto 24px;
+        width: min(100%, 560px);
+        border-radius: 24px;
+        padding: 20px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background:
+          linear-gradient(180deg, rgba(12, 20, 35, 0.84), rgba(10, 16, 30, 0.92)),
+          linear-gradient(120deg, rgba(56, 189, 248, 0.06), transparent 35%);
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.2);
+      }}
+      .starter-card h3 {{
+        margin: 0 0 8px;
+        font-size: 1.8rem;
+        font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+        letter-spacing: -0.02em;
+        text-align: center;
+      }}
+      .starter-emblem {{
+        width: 64px;
+        height: 64px;
+        display: block;
+        margin: 2px auto 12px;
+        object-fit: contain;
+        filter: drop-shadow(0 8px 24px rgba(56, 189, 248, 0.22));
+      }}
+      .starter-card p {{
+        margin: 0 0 14px;
+      }}
+      .starter-chips {{
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }}
+      .starter-chip {{
+        border-radius: 14px;
+        border: 1px solid rgba(56, 189, 248, 0.34);
+        background: rgba(14, 24, 42, 0.78);
+        color: var(--ink);
+        padding: 10px 12px;
+        text-align: left;
+        font-weight: 500;
+        box-shadow: none;
+      }}
+      .starter-chip:hover {{
+        border-color: rgba(125, 211, 252, 0.6);
+        background: rgba(18, 31, 54, 0.9);
       }}
       .composer {{
         display: flex;
@@ -1295,6 +1475,18 @@ async def index(
         margin-top: 10px;
         flex-wrap: wrap;
       }}
+      .composer-meta-actions {{
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }}
+      .composer-meta-actions a {{
+        padding: 9px 14px;
+        line-height: 1.15;
+        font-size: 0.92rem;
+        display: inline-flex;
+        align-items: center;
+      }}
       @media (max-width: 640px) {{
         main {{
           padding: 12px 10px 16px;
@@ -1312,26 +1504,34 @@ async def index(
         button {{
           width: 100%;
         }}
+        .starter-chips {{
+          grid-template-columns: 1fr;
+        }}
       }}
     </style>
   </head>
   <body>
     <main>
       <div class="panel hero">
-        <h1>Plexorcist Concierge</h1>
-        <p>{hero_copy}</p>
+        <div class="hero-brand">
+          <img class="hero-logo" src="/static/images/Plexorcist-icon.png?v=3" alt="Plexorcist icon">
+          <div class="hero-text">
+            <h1 class="brand-title">Plexorcist <span class="muted">Concierge</span></h1>
+            <p>{hero_copy}</p>
+          </div>
+        </div>
       </div>
 {dev_panel_html}
 {auth_panel_html}
       <div id="transcript" class="panel chat"></div>
       <div class="panel">
         <div class="composer">
-          <textarea id="message" placeholder="Add Breaking Bad.&#10;&#10;Oak Island broken?" {composer_disabled_attr}></textarea>
+          <textarea id="message" class="composer-input" rows="1" placeholder="What media should I summon for you?" {composer_disabled_attr}></textarea>
           <button id="send" {send_disabled_attr}>Send</button>
         </div>
         <div class="composer-meta">
-          <p>{("Press Enter to send. Shift+Enter adds a new line." if authenticated else "Sign in with Plex to start chatting.")}</p>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <p>{("Press Enter to send. Shift+Enter for a new line." if authenticated else "Sign in with Plex to start chatting.")}</p>
+          <div class="composer-meta-actions">
             <a href="{settings.ombi_continue_url}">Continue to Ombi</a>
             {('<a href="/auth/logout">Log out</a>' if authenticated and settings.is_plex_oauth_mode() else '')}
           </div>
@@ -1342,16 +1542,54 @@ async def index(
       const transcript = document.getElementById("transcript");
       const messageBox = document.getElementById("message");
       const sendButton = document.getElementById("send");
+      const composerBaseHeight = 42;
       let conversationId = null;
       let isSending = false;
       const isAuthenticated = {str(authenticated).lower()};
 {dev_panel_js}
+
+      function autoResizeComposer() {{
+        if (!messageBox) return;
+        messageBox.style.height = "auto";
+        const nextHeight = Math.max(composerBaseHeight, messageBox.scrollHeight);
+        messageBox.style.height = `${{nextHeight}}px`;
+      }}
 
       async function loadGreeting() {{
         if (!isAuthenticated) return;
         const res = await fetch("/api/welcome");
         const data = await res.json();
         renderTranscript([{{ role: "assistant", content: data.message }}]);
+      }}
+
+      function renderStarterCard(messages) {{
+        const hasUserMessage = messages.some((message) => message.role === "user");
+        if (hasUserMessage || !isAuthenticated) return;
+        const card = document.createElement("div");
+        card.className = "starter-card";
+        card.innerHTML = `
+          <img class="starter-emblem" src="/static/images/star-icon.png?v=1" alt="">
+          <h3>I'm here to help with your media.</h3>
+          <p>Ask for a movie, show, episode, recommendation, or help with something missing.</p>
+          <div class="starter-chips">
+            <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now by listing the most popular movies and most popular TV shows from Tautulli.">What’s popular right now?</button>
+            <button type="button" class="starter-chip" data-prompt="Recommend three movies based on what I watch, and keep at least one weird pick.">Smart recommendations</button>
+            <button type="button" class="starter-chip" data-prompt="Check if my shows are missing episodes in Plex, and tell me exactly what’s missing.">Find missing episodes</button>
+            <button type="button" class="starter-chip" data-prompt="Search for a title and request it if it is missing.">Search and request</button>
+            <button type="button" class="starter-chip" data-prompt="Give me a quick health check of my pending requests and anything stuck.">Request health check</button>
+            <button type="button" class="starter-chip" data-prompt="Summarize what I watched recently and suggest what to watch tonight.">What should I watch tonight?</button>
+          </div>
+        `;
+        transcript.appendChild(card);
+        for (const chip of card.querySelectorAll(".starter-chip")) {{
+          chip.addEventListener("click", () => {{
+            if (isSending || !isAuthenticated) return;
+            const prompt = chip.getAttribute("data-prompt") || "";
+            messageBox.value = prompt;
+            autoResizeComposer();
+            sendMessage();
+          }});
+        }}
       }}
 
       function renderTranscript(messages) {{
@@ -1372,6 +1610,7 @@ async def index(
           wrapper.appendChild(body);
           transcript.appendChild(wrapper);
         }}
+        renderStarterCard(messages);
         transcript.scrollTop = transcript.scrollHeight;
       }}
 
@@ -1413,6 +1652,8 @@ async def index(
         optimisticMessages.push({{ role: "user", content: message }});
         renderTranscript(optimisticMessages);
         renderLoadingMessage();
+        messageBox.value = "";
+        autoResizeComposer();
 
         try {{
           const res = await fetch("/api/chat", {{
@@ -1432,7 +1673,6 @@ async def index(
             throw new Error("Chat response missing message transcript");
           }}
           renderTranscript(messages);
-          messageBox.value = "";
         }} catch (error) {{
           console.error(error);
           renderTranscript([
@@ -1450,12 +1690,14 @@ async def index(
       }}
 
       sendButton.addEventListener("click", sendMessage);
+      messageBox.addEventListener("input", autoResizeComposer);
       messageBox.addEventListener("keydown", (event) => {{
         if (event.key === "Enter" && !event.shiftKey) {{
           event.preventDefault();
           sendMessage();
         }}
       }});
+      autoResizeComposer();
 
 {startup_js}
     </script>
@@ -1579,6 +1821,25 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
             auth_source="plex-oauth",
         )
     )
+    try:
+        await _maybe_send_login_notice(
+            settings=settings,
+            user_id=user_id,
+            username=username,
+            display_name=display_name or username,
+            is_admin=is_admin,
+            request=request,
+        )
+    except Exception as exc:  # noqa: BLE001
+        AuditLogger().log(
+            "login_notify_failed",
+            {
+                "user_id": user_id,
+                "username": username,
+                "scope": settings.login_notify_scope,
+                "error": f"exception:{type(exc).__name__}",
+            },
+        )
     response = RedirectResponse("/", status_code=303)
     response.set_cookie("plexorcist_session", cookie_provider.sign_cookie(session_id), httponly=True, samesite="lax")
     response.delete_cookie("plexorcist_pending_pin")
@@ -1678,27 +1939,6 @@ async def chat(
 ) -> ChatResponse:
     agent, store, audit = build_agent(settings, user)
     state = store.get_or_create(user.user_id, payload.conversation_id)
-    inactivity_delta = datetime.utcnow() - state.updated_at
-    inactivity_threshold = timedelta(minutes=max(1, int(settings.memory_inactivity_minutes)))
-    stale_cutoff = datetime.utcnow() - inactivity_threshold
-
-    timeout_seconds = float(max(5, int(settings.memory_compaction_timeout_seconds)))
-    stale_states = store.list_stale_conversations(
-        user.user_id,
-        older_than=stale_cutoff,
-        exclude_conversation_id=state.conversation_id,
-        limit=1,
-    )
-    for stale_state in stale_states:
-        await _compact_conversation_once(
-            settings=settings,
-            store=store,
-            audit=audit,
-            state=stale_state,
-            source="request_stale_sweep",
-            timeout_seconds=timeout_seconds,
-        )
-
     state.support_context["long_term_memory"] = store.get_user_memory_context(
         user.user_id,
         recent_notes_limit=settings.memory_recent_notes_limit,

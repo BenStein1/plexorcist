@@ -1,0 +1,2 @@
+# Keep local-only workspace content out of server sync
+- /artifacts/

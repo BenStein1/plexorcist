@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     plex_auth_product_name: str = env_field(default="Plexorcist Concierge", env="PLEX_AUTH_PRODUCT_NAME")
     ombi_continue_url: str = env_field(default="http://localhost:5000", env="OMBI_CONTINUE_URL")
     openai_model: str = env_field(default="gpt-5-mini", env="OPENAI_MODEL")
+    openai_request_timeout_seconds: int = env_field(default=120, env="OPENAI_REQUEST_TIMEOUT_SECONDS")
     log_level: str = "INFO"
     database_url: str = env_field(default="sqlite:///./plexorcist.db", env="DATABASE_URL")
     dev_user_id: str = env_field(default="dev-user-1", env="DEV_USER_ID")
@@ -71,6 +72,9 @@ class Settings(BaseSettings):
     transmission_password: str | None = env_field(default=None, env="TRANSMISSION_PASSWORD")
     prowl_api_key: str | None = env_field(default=None, env="PROWL_API_KEY")
     openai_api_key: str | None = env_field(default=None, env="OPENAI_API_KEY")
+    login_notify_enabled: bool = env_field(default=True, env="LOGIN_NOTIFY_ENABLED")
+    login_notify_scope: Literal["all", "admin_only", "none"] = env_field(default="all", env="LOGIN_NOTIFY_SCOPE")
+    login_notify_include_ip: bool = env_field(default=False, env="LOGIN_NOTIFY_INCLUDE_IP")
 
     long_show_episode_threshold: int = 50
     huge_show_episode_threshold: int = 100

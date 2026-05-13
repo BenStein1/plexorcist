@@ -30,6 +30,7 @@ In `AUTH_MODE=dev_impersonate`, the app impersonates one fixed development user 
 
 Real deployment should switch to `AUTH_MODE=plex_oauth` and use the Plex sign-in flow. The home page will show a Plex login button until the session is established.
 
+
 ## Architecture
 
 `backend/`
