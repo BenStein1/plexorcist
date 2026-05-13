@@ -1,0 +1,22 @@
+[project]
+name = "plexorcist"
+version = "0.1.0"
+description = "Conversational concierge for Plex and Ombi request workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0,<0.120.0",
+  "gunicorn>=23.0.0",
+  "httpx>=0.28.0",
+  "pydantic>=1.10.15,<2",
+  "python-dotenv>=1.0.0",
+  "uvicorn>=0.32.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*", "clients*", "tools*"]
