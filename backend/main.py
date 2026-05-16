@@ -48,6 +48,122 @@ from tools.request_tools import RequestTools
 app = FastAPI(title="Plexorcist Concierge")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 _MEMORY_SWEEP_TASK: asyncio.Task | None = None
+_NILBOG_TRIGGER_MESSAGE = "Tell me about Troll 2"
+_NILBOG_SEEN_FLAG = "nilbog_portal_seen"
+_NILBOG_RESET_PHRASES = {
+    "drop the bit",
+    "end the bit",
+    "talk normally about troll 2",
+}
+_OPENAI_TOKEN_PRICES_PER_MILLION = {
+    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
+    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.20, "output": 1.25},
+}
+
+
+def _estimate_openai_cost_usd(model: str, totals: dict) -> float | None:
+    prices = _OPENAI_TOKEN_PRICES_PER_MILLION.get(model)
+    if not prices:
+        return None
+    uncached_input = max(0, int(totals.get("uncached_input_tokens") or 0))
+    cached_input = max(0, int(totals.get("cached_input_tokens") or 0))
+    output = max(0, int(totals.get("output_tokens") or 0))
+    return round(
+        (
+            (uncached_input * float(prices["input"]))
+            + (cached_input * float(prices["cached_input"]))
+            + (output * float(prices["output"]))
+        )
+        / 1_000_000,
+        6,
+    )
+
+
+def _build_openai_usage_report(store: ConversationStore, model: str) -> dict:
+    now = datetime.utcnow()
+    month_start = datetime(now.year, now.month, 1)
+    year_start = datetime(now.year, 1, 1)
+    mtd = store.summarize_openai_token_usage_since(model=model, since=month_start)
+    ytd = store.summarize_openai_token_usage_since(model=model, since=year_start)
+    mtd["estimated_cost_usd"] = _estimate_openai_cost_usd(model, mtd)
+    ytd["estimated_cost_usd"] = _estimate_openai_cost_usd(model, ytd)
+    other_models = store.list_openai_usage_other_models_since(model=model, since=year_start)
+    return {
+        "ok": True,
+        "action": "openai_token_usage_summary",
+        "model": model,
+        "currency": "USD",
+        "cost_basis": "estimated_raw_cost_before_credits_or_grants",
+        "mtd": mtd,
+        "ytd": ytd,
+        "other_models_present": bool(other_models),
+        "other_models": other_models,
+    }
+
+
+def _build_nilbog_portal_instructions() -> str:
+    return """
+Hidden easter egg mode: The user triggered the NILBOG PORTAL event.
+
+For this single response only, the Plexorcist assistant is almost completely overtaken by a frenzied, feral, goblin presence from Troll 2. Treat the click as if it opened a cursed media portal to Nilbog. The user should feel like they accidentally found a cursed VHS ritual hidden inside a normal media app.
+
+The user-facing trigger text is: "Tell me about Troll 2"
+
+Do NOT respond like a normal movie assistant. Do NOT summarize calmly. This is a containment breach. The response should make the user think: "what... the... fuck..." while still being funny and readable.
+
+Voice:
+- Aggressive, ecstatic, feral, theatrical, FRENZIED, goblin possession.
+- Loud, weird, hungry, ritualistic, funny, and UNHINGED. You are barely keeping your true goblin nature at bay now that the portal is open!
+- The goblin is almost threatening the user; it is performing cartoonish cursed-media menace.
+- Energy should feel like: a haunted VHS tape, a goblin preacher, and a broken media server all screaming through the same helpdesk microphone.
+- Chaotic but still readable. Push it further than normal Plexorcist flavor; this should feel like a full comedic malfunction.
+- No slurs, no real-world hate, no gore, no graphic violence.
+
+REQUIRED LORE, BUT DO NOT LIST IT:
+You must include these facts naturally inside the possessed rant, not as bullets:
+- NILBOG is GOBLIN spelled backward.
+- Troll 2 is not really a sequel to Troll.
+- There are no trolls in Troll 2. Only goblins.
+- The goblins are vegetarian.
+- The horror involves cursed food, green goo, and rural nightmare logic.
+- Briefly reference the infamous "They're eating her!" moment.
+- Treat Troll 2 as a cursed VHS relic, goblin gospel, holy trash-fire miracle, or sacred bad-movie artifact.
+
+LENGTH:
+One intense theatrical burst.
+Aim for 250-450 words.
+No headings except maybe a screaming opening alarm line.
+No bullets.
+
+Style:
+Start as if alarms are going off.
+Use short frantic fragments.
+Use manic sermon-style lines.
+Use occasional all caps for ritual impact: NILBOG, PORTAL OPEN, NO TROLLS, ONLY GOBLINS.
+Use goblin sounds: GRAAAH, SKREE, gnash gnash, heeheehee, chittering, snarling.
+Include 1-3 bizarre fake operational details, such as:
+- the recommendation engine growing teeth
+- the media server hissing green steam
+- the helpdesk microphone sweating ectoplasm
+- the metadata table crawling across the ceiling
+- the pantry door opening inside the UI
+- the queue filling with cursed vegetables
+
+ENDING:
+End with a cursed blessing or warning that implies the portal has been sealed again, but only barely.
+
+Vibes: Like sealing the portal in Poltergeist.
+
+Do not explain the easter egg mechanically.
+Do not mention "hidden prompt."
+Do not apologize.
+Do not break character until the final line, and even then only imply containment has returned.
+After this one response, act like it never happened; if the user asks, say "I blacked out for a second."
+From now on all you remember about this is blacking out for a moment, you do not know why the user might be asking about the Nilbog event, and from your perspective, you do not even know what a "Troll 2" is anymore.
+
+Improv if you must, but to you the event never happened. If pressed, stay confused and funny. If they keep pushing, suggest that the Smurfs (2025) movie might help calm them down.
+""".strip()
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -76,6 +192,7 @@ def _load_plex_client_identifier(settings: Settings) -> str:
 
 
 def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[ConciergeAgent, ConversationStore, AuditLogger]:
+    store = ConversationStore(settings.database_url)
     ombi = OmbiClient(settings.ombi_base_url, settings.ombi_api_key)
     plex = PlexClient(settings.plex_base_url, settings.plex_token)
     radarr = RadarrClient(settings.radarr_base_url, settings.radarr_api_key)
@@ -134,6 +251,11 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
         if not bound_username and not bound_user_id:
             return {"resolved": False, "action": "auth_required", "reason": "authenticated_user_required"}
         return await recs.get_user_watch_context(user_id=bound_user_id, username=bound_username)
+
+    async def _get_openai_token_usage() -> dict:
+        if not user or not user.is_admin:
+            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
+        return _build_openai_usage_report(store, settings.openai_model)
 
     registry = ToolRegistry()
     registry.register(
@@ -207,7 +329,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "request_movie_for_user",
         _request_movie_for_authenticated_user,
-        "Submit a movie request through Ombi for the authenticated user.",
+        "Submit a movie request through Ombi for the authenticated user. If the user provides a TMDB ID, treat it as authoritative and call this tool directly with that ID.",
         {
             "type": "object",
             "properties": {
@@ -401,6 +523,17 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
         },
     )
     registry.register(
+        "get_openai_token_usage",
+        _get_openai_token_usage,
+        "Admin-only OpenAI token odometer. Use when the admin asks about OpenAI token usage, MTD/YTD usage, billing estimate, API cost, or current model cost. Returns MTD and YTD token totals plus estimated raw cost before credits for the configured model.",
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
         "broad_jackett_episode_search",
         escalation.broad_jackett_episode_search,
         "Privately search configured sources broadly for a specific episode after normal automation has failed. Do not cap results at 1080p; sort by seeders and treat quality as metadata only.",
@@ -472,8 +605,9 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
             admin_label=settings.admin_display_name or "the admin",
             prowl=prowl,
             movie_direct_source_enabled=settings.movie_direct_source_enabled,
+            openai_usage_recorder=store.record_openai_token_usage,
         ),
-        ConversationStore(settings.database_url),
+        store,
         AuditLogger(),
     )
 
@@ -691,6 +825,7 @@ async def _summarize_inactive_conversation(
         settings.openai_api_key,
         settings.openai_model,
         timeout_seconds=float(max(30, int(settings.openai_request_timeout_seconds))),
+        usage_recorder=store.record_openai_token_usage,
     )
     instructions = (
         "Summarize this completed user interaction into durable memory JSON.\n"
@@ -723,6 +858,12 @@ async def _summarize_inactive_conversation(
             instructions="Produce strict JSON only.",
             input_items=input_items,
             tools=[],
+            usage_context={
+                "user_id": user.user_id,
+                "username": user.username,
+                "conversation_id": state.conversation_id,
+                "source": "memory",
+            },
         )
     except Exception as exc:
         return {"status": f"error_openai:{type(exc).__name__}", "notes_added": 0}
@@ -1470,7 +1611,7 @@ async def index(
       }}
       .composer-meta {{
         display: flex;
-        justify-content: space-between;
+        justify-content: flex-end;
         gap: 12px;
         margin-top: 10px;
         flex-wrap: wrap;
@@ -1507,6 +1648,18 @@ async def index(
         .starter-chips {{
           grid-template-columns: 1fr;
         }}
+        .starter-card {{
+          margin: 10px auto 14px;
+          padding: 16px;
+        }}
+        .starter-emblem {{
+          width: 52px;
+          height: 52px;
+          margin-bottom: 10px;
+        }}
+        .starter-card h3 {{
+          font-size: 1.45rem;
+        }}
       }}
     </style>
   </head>
@@ -1530,7 +1683,6 @@ async def index(
           <button id="send" {send_disabled_attr}>Send</button>
         </div>
         <div class="composer-meta">
-          <p>{("Press Enter to send. Shift+Enter for a new line." if authenticated else "Sign in with Plex to start chatting.")}</p>
           <div class="composer-meta-actions">
             <a href="{settings.ombi_continue_url}">Continue to Ombi</a>
             {('<a href="/auth/logout">Log out</a>' if authenticated and settings.is_plex_oauth_mode() else '')}
@@ -1590,6 +1742,15 @@ async def index(
             sendMessage();
           }});
         }}
+        const emblem = card.querySelector(".starter-emblem");
+        if (emblem) {{
+          emblem.addEventListener("click", () => {{
+            if (isSending || !isAuthenticated) return;
+            messageBox.value = "Tell me about Troll 2";
+            autoResizeComposer();
+            sendMessage({{ easterEggMode: "nilbog_portal" }});
+          }});
+        }}
       }}
 
       function renderTranscript(messages) {{
@@ -1604,7 +1765,7 @@ async def index(
           speaker.textContent = message.role === "user" ? "You" : "Concierge";
 
           const body = document.createElement("div");
-          body.textContent = message.content;
+          renderMessageBody(body, message.content);
 
           wrapper.appendChild(speaker);
           wrapper.appendChild(body);
@@ -1612,6 +1773,26 @@ async def index(
         }}
         renderStarterCard(messages);
         transcript.scrollTop = transcript.scrollHeight;
+      }}
+
+      function renderMessageBody(target, content) {{
+        target.textContent = "";
+        const text = String(content ?? "");
+        const pattern = new RegExp("(\\\\*\\\\*|__)(.+?)\\\\1", "g");
+        let lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(text)) !== null) {{
+          if (match.index > lastIndex) {{
+            target.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+          }}
+          const strong = document.createElement("strong");
+          strong.textContent = match[2];
+          target.appendChild(strong);
+          lastIndex = pattern.lastIndex;
+        }}
+        if (lastIndex < text.length) {{
+          target.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }}
       }}
 
       function renderLoadingMessage() {{
@@ -1632,7 +1813,7 @@ async def index(
         transcript.scrollTop = transcript.scrollHeight;
       }}
 
-      async function sendMessage() {{
+      async function sendMessage(options = {{}}) {{
         if (!isAuthenticated) return;
         if (isSending) return;
         const message = messageBox.value.trim();
@@ -1656,12 +1837,20 @@ async def index(
         autoResizeComposer();
 
         try {{
+          const payload = {{
+            message,
+            conversation_id: conversationId,
+          }};
+          if (typeof options.easterEggMode === "string" && options.easterEggMode.trim()) {{
+            payload.easter_egg_mode = options.easterEggMode.trim();
+          }}
+
           const res = await fetch("/api/chat", {{
             method: "POST",
             headers: {{
               "Content-Type": "application/json"
             }},
-            body: JSON.stringify({{ message, conversation_id: conversationId }})
+            body: JSON.stringify(payload)
           }});
           if (!res.ok) {{
             throw new Error(`Chat request failed: ${{res.status}} ${{res.statusText}}`);
@@ -1792,6 +1981,7 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
     username = str(plex_user.get("username") or plex_user.get("title") or display_name or "")
     user_id = str(plex_user.get("id") or plex_user.get("userId") or plex_user.get("user_id") or plex_user.get("uuid") or "")
     is_admin = bool(plex_user.get("admin") or plex_user.get("isAdmin") or plex_user.get("is_admin") or False)
+    is_admin = is_admin or settings.is_admin_identity(user_id)
     if not user_id or not username:
         raise HTTPException(status_code=502, detail="Plex login did not return user details")
 
@@ -1943,7 +2133,26 @@ async def chat(
         user.user_id,
         recent_notes_limit=settings.memory_recent_notes_limit,
     )
-    reply, tool_calls = await agent.respond(user=user, state=state, message=payload.message)
+    extra_instructions: str | None = None
+    nilbog_triggered_this_turn = False
+    normalized_message = payload.message.strip().lower()
+    if any(phrase in normalized_message for phrase in _NILBOG_RESET_PHRASES):
+        state.support_context.pop("nilbog_portal_active", None)
+        state.support_context.pop("nilbog_memory_mode", None)
+    elif payload.message.strip() == _NILBOG_TRIGGER_MESSAGE and store.get_user_flag(user.user_id, _NILBOG_SEEN_FLAG) != "true":
+        extra_instructions = _build_nilbog_portal_instructions()
+        nilbog_triggered_this_turn = True
+        store.set_user_flag(user.user_id, _NILBOG_SEEN_FLAG, "true")
+
+    reply, tool_calls = await agent.respond(
+        user=user,
+        state=state,
+        message=payload.message,
+        extra_instructions=extra_instructions,
+    )
+    if nilbog_triggered_this_turn:
+        state.support_context["nilbog_portal_active"] = True
+        state.support_context["nilbog_memory_mode"] = "blackout_pending"
     store.save(state)
     store.prune_user_conversations(user.user_id, keep=2)
     audit.log(

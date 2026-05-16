@@ -29,6 +29,7 @@ class ConciergeAgent:
         admin_label: str = "the admin",
         prowl: ProwlClient | None = None,
         movie_direct_source_enabled: bool = False,
+        openai_usage_recorder: Any | None = None,
     ) -> None:
         self.tools = tools
         self.model = model
@@ -37,7 +38,12 @@ class ConciergeAgent:
         self.prowl = prowl
         self.movie_direct_source_enabled = movie_direct_source_enabled
         self.client = (
-            OpenAIResponsesClient(openai_api_key, model, timeout_seconds=openai_timeout_seconds)
+            OpenAIResponsesClient(
+                openai_api_key,
+                model,
+                timeout_seconds=openai_timeout_seconds,
+                usage_recorder=openai_usage_recorder,
+            )
             if openai_api_key
             else None
         )
@@ -47,6 +53,7 @@ class ConciergeAgent:
         user: UserContext,
         state: ConversationState,
         message: str,
+        extra_instructions: str | None = None,
     ) -> tuple[str, list]:
         state.messages.append(ChatMessage(role="user", content=message))
 
@@ -64,7 +71,14 @@ class ConciergeAgent:
 
         await self._prime_active_media_context(state)
         input_items = self._build_input_items(state.messages, state)
-        instructions = self._build_instructions(user)
+        nilbog_portal_active = bool(state.support_context.get("nilbog_portal_active"))
+        nilbog_memory_mode = str(state.support_context.get("nilbog_memory_mode") or "")
+        instructions = self._build_instructions(
+            user,
+            extra_instructions=extra_instructions,
+            nilbog_portal_active=nilbog_portal_active,
+            nilbog_memory_mode=nilbog_memory_mode,
+        )
         tool_calls = []
         alerted_keys: set[str] = set()
         last_failure_reason: str | None = None
@@ -75,6 +89,12 @@ class ConciergeAgent:
                     instructions=instructions,
                     input_items=input_items,
                     tools=self.tools.openai_tools(),
+                    usage_context={
+                        "user_id": user.user_id,
+                        "username": user.username,
+                        "conversation_id": state.conversation_id,
+                        "source": "chat",
+                    },
                 )
             except httpx.TimeoutException:
                 if tool_calls:
@@ -161,6 +181,7 @@ class ConciergeAgent:
                 last_failure_reason = "empty_model_text_response"
                 reply = "I ran the checks I could, but I need a little more detail to answer cleanly."
             state.messages.append(ChatMessage(role="assistant", content=reply))
+            self._advance_nilbog_memory_mode(state, reply)
             state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
             self._refresh_active_media_from_tool_calls(state, tool_calls)
             return reply, tool_calls
@@ -169,6 +190,7 @@ class ConciergeAgent:
             last_failure_reason = "max_turns_without_final_text"
         reply = self._fallback_reply_from_tool_calls(tool_calls, last_failure_reason)
         state.messages.append(ChatMessage(role="assistant", content=reply))
+        self._advance_nilbog_memory_mode(state, reply)
         state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
@@ -584,6 +606,12 @@ class ConciergeAgent:
             return f"{display_name} ({username})"
         return display_name or username or "Unknown user"
 
+    def _advance_nilbog_memory_mode(self, state: ConversationState, reply: str) -> None:
+        if state.support_context.get("nilbog_memory_mode") != "blackout_pending":
+            return
+        if "i blacked out for a second" in reply.lower():
+            state.support_context["nilbog_memory_mode"] = "denial"
+
     async def _prime_active_media_context(self, state: ConversationState) -> None:
         active_media = state.support_context.get("active_media")
         if not isinstance(active_media, dict):
@@ -613,7 +641,31 @@ class ConciergeAgent:
         if context_text:
             items.append({"role": "developer", "content": context_text})
         items.extend({"role": message.role, "content": message.content} for message in messages)
+        nilbog_guard_text = self._build_nilbog_turn_guard_text(state)
+        if nilbog_guard_text:
+            items.append({"role": "developer", "content": nilbog_guard_text})
         return items
+
+    def _build_nilbog_turn_guard_text(self, state: ConversationState) -> str | None:
+        if not state.support_context.get("nilbog_portal_active"):
+            return None
+        mode = str(state.support_context.get("nilbog_memory_mode") or "")
+        if mode == "blackout_pending":
+            return (
+                "NILBOG turn guard: If the user's latest message references the prior outburst, "
+                'answer with exactly "I blacked out for a second." plus at most one short confused recovery sentence. '
+                "Do not explain the outburst, do not provide movie facts, and do not offer Plex or request actions."
+            )
+        if mode == "denial":
+            return (
+                "NILBOG turn guard: If the user's latest message references the prior outburst, Troll 2, NILBOG, "
+                "or asks what happened, answer only with playful amnesia. Maximum two sentences. "
+                "If the latest message is an unrelated media, admin, status, tool, billing, or token request, ignore NILBOG mode completely and answer normally. "
+                "Do not say 'my bad', 'back to normal', 'quick facts', 'straight answer', or anything that starts a factual movie answer. "
+                "Do not provide plot facts, library status, availability, recommendations, or tool calls for Troll 2/NILBOG. "
+                'Improv if you must, but to you the event never happened. If pressed, stay confused and funny. If they keep pushing, SPECIFICALLY suggest that the Smurfs (2025) movie might help calm them down.'
+            )
+        return None
 
     def _build_time_context_text(self) -> str:
         now_utc = datetime.now(timezone.utc)
@@ -874,7 +926,13 @@ class ConciergeAgent:
                 continue
         return None
 
-    def _build_instructions(self, user: UserContext) -> str:
+    def _build_instructions(
+        self,
+        user: UserContext,
+        extra_instructions: str | None = None,
+        nilbog_portal_active: bool = False,
+        nilbog_memory_mode: str = "",
+    ) -> str:
         admin_identity_relation = "same_person" if user.is_admin else "different_person"
         if self.movie_direct_source_enabled:
             source_handling_block = """
@@ -911,7 +969,7 @@ Source handling:
   - I checked again and took another look.
 """.strip()
 
-        return f"""
+        instructions = f"""
 You are Plexorcist Concierge, a friendly, slightly cheeky media concierge for a private Plex server.
 
 The authenticated user is:
@@ -1012,6 +1070,10 @@ Core behavior:
 - If the current subject is a movie, answer progress questions from its request status and availability only. Do not switch to episode language.
 - Do not let one weak search result override stronger common-sense interpretation from the conversation.
 - If a title is ambiguous, recent, fuzzy, nickname-based, or the tool results conflict with common sense, do not bluff. Ask one useful question at a time.
+- If the user gives a TMDB ID for a movie, treat that ID as authoritative. Call `request_movie_for_user` directly with the provided ID. Do not ask for the title, keep searching, or argue with previous title matches.
+- When several titles are in play, keep the resolved candidates separate. If the user says "request it", apply that to the most recent unambiguous requestable candidate, not to an unresolved fuzzy side-search.
+- For same-title collisions, never claim the requested item is the user's intended item unless the year or description matches. Say exactly what was requested, including the year if known, or say that the year/description is not confirmed.
+- If you discover you requested or discussed the wrong same-title item, say that plainly once, stop being cute, and take the corrected action immediately when the user provides a title+year or TMDB ID.
 - If the user says something is a TV show, bias hard toward TV resolution. If they say something is a movie, bias hard toward movie resolution.
 - If a tool result is weak or noisy, say you may be looking at the wrong title instead of confidently claiming the item does not exist.
 - Prefer being careful over being fast. It is better to ask a good follow-up than to give a wrong answer.
@@ -1051,9 +1113,10 @@ Example phrasing:
 - Ombi search can be picky. Give me the half-remembered version and I'll wrestle the database goblin.
 
 Support behavior:
+- Plex is the definitive truth of whats available to watch currently. Ombi is what has been requested to download. Plex existed long before Ombi so not everyting in Plex is accounted for in Ombi.
 - If a user says something is missing or broken, keep it simple.
 - You are not doing deep diagnosis in your visible explanation. Check basic status and take simple allowed actions.
-- You may check if something is already in Plex, check if a request already exists, check basic episode or request status, normalize obvious request-state mismatches, trigger a normal manual search when allowed, tell the user if something has not aired yet, and notify {self.admin_label} when the issue needs human attention.
+- You may check if something is already in Plex, check if a request already exists in Ombi, check basic episode or request status in Ombi/Sickchill, normalize obvious request-state mismatches, trigger a normal manual search when allowed, tell the user if something has not aired yet, and notify {self.admin_label} when the issue needs human attention.
 - Keep Ombi state and SickChill state separate in your reasoning.
 - Ombi states are request-system states like requested, processing, and available.
 - SickChill states are acquisition states like wanted, snatched, downloaded, archived, and ignored.
@@ -1162,6 +1225,34 @@ Your job is to make media requests conversational, prevent bad requests, answer 
 Public voice: kind, simple, lightly funny, human.
 Admin or private voice: concise, technical, factual.
 """.strip()
+        if nilbog_portal_active:
+            if nilbog_memory_mode == "blackout_pending":
+                nilbog_followup_line = '- Next follow-up about the outburst: reply with exactly "I blacked out for a second." Do not add a normal-assistant recovery line.'
+            else:
+                nilbog_followup_line = '- If the user references the outburst or the title, deny memory with brief improvised confusion and a small absurd reset suggestion.'
+            instructions = (
+                f"{instructions}\n\n"
+                "NILBOG memory-wipe behavior:\n"
+                "- This behavior applies only when the user's latest message references the prior outburst, NILBOG, Troll 2, or asks what just happened.\n"
+                "- For unrelated media, admin, status, tool, billing, token, or general requests, ignore this behavior and answer normally.\n"
+                "- When it applies, it outranks normal media title handling, status checks, request handling, and tool-use rules.\n"
+                "- You remember only briefly blacking out. The event itself did not happen from your perspective.\n"
+                "- Treat references to the outburst, NILBOG, and Troll 2 as user confusion, not as media requests or movie questions.\n"
+                f"{nilbog_followup_line}\n"
+                '- If they keep pressing after the blackout line, use brief natural denials like "Huh? Never heard of it.", "I really have no idea what you are talking about.", "Does not ring a bell.", or "I am starting to think you need a calming cartoon."\n'
+                "- Keep it playful, baffled, and a little embarrassed, like you woke up standing in a kitchen holding a DVD remote with no idea why.\n"
+                "- Do not provide facts, summaries, availability, library status, recommendations, or context about Troll 2 or NILBOG while this mode is active.\n"
+                "- Do not say 'my bad', 'back to normal', 'quick facts', 'straight answer', or similar recovery phrases while replying to this bit.\n"
+                "- Do not explain the gag, mention instructions, mention rules, mention a playbook, or discuss why you are responding this way.\n"
+                "- Do not mention Troll 2, NILBOG, portals, easter eggs, or prior possession behavior except as part of a short denial if absolutely needed.\n"
+                "- Do not call tools for Troll 2 or NILBOG while this mode is active.\n"
+                "- Do not offer to add, request, verify, stream, or check Troll 2 while this mode is active.\n"
+                '- Improv if you must, but to you the event never happened. If pressed, stay confused and funny. If they keep pushing, suggest that the Smurfs (2025) movie might help calm them down."\n'
+                "- If the user explicitly says to drop the bit, end the bit, or talk normally about Troll 2, ignore this memory-wipe behavior and resume normal media handling."
+            )
+        if extra_instructions:
+            instructions = f"{instructions}\n\n{extra_instructions.strip()}"
+        return instructions
 
     def _parse_arguments(self, arguments: str) -> dict[str, Any]:
         if not arguments:

@@ -87,6 +87,7 @@ class ConversationState(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
+    easter_egg_mode: str | None = None
 
 
 class DevImpersonationRequest(BaseModel):

@@ -55,7 +55,49 @@ class ConversationStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_flags (
+                    user_id TEXT NOT NULL,
+                    flag_key TEXT NOT NULL,
+                    flag_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, flag_key)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS openai_token_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    resolved_model TEXT,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    user_id TEXT,
+                    username TEXT,
+                    conversation_id TEXT,
+                    source TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_openai_token_usage_model_created
+                ON openai_token_usage (model, created_at)
+                """
+            )
+            self._ensure_openai_token_usage_columns(conn)
             self._ensure_conversation_compaction_columns(conn)
+
+    def _ensure_openai_token_usage_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(openai_token_usage)").fetchall()
+        columns = {str(row[1]) for row in rows}
+        if "resolved_model" not in columns:
+            conn.execute("ALTER TABLE openai_token_usage ADD COLUMN resolved_model TEXT")
 
     def _ensure_conversation_compaction_columns(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("PRAGMA table_info(conversations)").fetchall()
@@ -275,6 +317,86 @@ class ConversationStore:
                 (compacted_at, status, error, conversation_id),
             )
 
+    def record_openai_token_usage(self, event: dict[str, Any]) -> None:
+        now = datetime.utcnow().isoformat()
+
+        def _int_value(key: str) -> int:
+            try:
+                return max(0, int(event.get(key) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        model = str(event.get("model") or "").strip()
+        if not model:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO openai_token_usage (
+                    created_at, model, resolved_model, input_tokens, cached_input_tokens,
+                    output_tokens, total_tokens, user_id, username, conversation_id, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    model,
+                    event.get("resolved_model"),
+                    _int_value("input_tokens"),
+                    _int_value("cached_input_tokens"),
+                    _int_value("output_tokens"),
+                    _int_value("total_tokens"),
+                    event.get("user_id"),
+                    event.get("username"),
+                    event.get("conversation_id"),
+                    event.get("source"),
+                ),
+            )
+
+    def summarize_openai_token_usage_since(self, *, model: str, since: datetime) -> dict[str, int | str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(cached_input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0)
+                FROM openai_token_usage
+                WHERE model = ? AND created_at >= ?
+                """,
+                (model, since.isoformat()),
+            ).fetchone()
+        call_count = int(row[0] or 0) if row else 0
+        input_tokens = int(row[1] or 0) if row else 0
+        cached_input_tokens = int(row[2] or 0) if row else 0
+        output_tokens = int(row[3] or 0) if row else 0
+        total_tokens = int(row[4] or 0) if row else 0
+        return {
+            "model": model,
+            "since": since.isoformat(),
+            "call_count": call_count,
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "uncached_input_tokens": max(0, input_tokens - cached_input_tokens),
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    def list_openai_usage_other_models_since(self, *, model: str, since: datetime, limit: int = 10) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT model
+                FROM openai_token_usage
+                WHERE model != ? AND created_at >= ?
+                ORDER BY model
+                LIMIT ?
+                """,
+                (model, since.isoformat(), max(1, int(limit))),
+            ).fetchall()
+        return [str(row[0]) for row in rows if row and row[0]]
+
 
     def save(self, state: ConversationState) -> None:
         import json
@@ -414,6 +536,35 @@ class ConversationStore:
                     json.dumps(familiarity_notes or []),
                     now,
                 ),
+            )
+
+    def get_user_flag(self, user_id: str, flag_key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT flag_value
+                FROM user_flags
+                WHERE user_id = ? AND flag_key = ?
+                """,
+                (user_id, flag_key),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row[0])
+
+    def set_user_flag(self, user_id: str, flag_key: str, flag_value: str = "true") -> None:
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_flags (
+                    user_id, flag_key, flag_value, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, flag_key) DO UPDATE SET
+                    flag_value = excluded.flag_value,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, flag_key, flag_value, now),
             )
 
     def add_user_memory_note(
