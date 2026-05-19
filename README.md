@@ -87,7 +87,7 @@ OpenAI token usage is recorded in SQLite by model, resolved model, input tokens,
 The model is configured with:
 
 ```bash
-OPENAI_MODEL=gpt-5-mini
+OPENAI_MODEL=gpt-5.4-mini
 ```
 
 ## Run Locally
