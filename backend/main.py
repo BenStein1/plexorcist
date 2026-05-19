@@ -217,10 +217,19 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     bound_username = user.username if user else None
     bound_user_id = user.user_id if user else None
 
-    async def _request_movie_for_authenticated_user(tmdb_id: int) -> dict:
+    async def _request_movie_for_authenticated_user(
+        tmdb_id: int | None = None,
+        title: str | None = None,
+        year: int | None = None,
+    ) -> dict:
         if not bound_username:
             return {"ok": False, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await requests.request_movie_for_user(username=bound_username, tmdb_id=tmdb_id)
+        return await requests.request_movie_for_user(
+            username=bound_username,
+            tmdb_id=tmdb_id,
+            title=title,
+            year=year,
+        )
 
     async def _request_show_scope_for_authenticated_user(tvdb_id: int, scope: str) -> dict:
         if not bound_username:
@@ -329,13 +338,14 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "request_movie_for_user",
         _request_movie_for_authenticated_user,
-        "Submit a movie request through Ombi for the authenticated user. If the user provides a TMDB ID, treat it as authoritative and call this tool directly with that ID.",
+        "Submit a movie request through Ombi for the authenticated user. Pass either a positive TMDB ID, or both exact movie title and release year. Do not call this with title only.",
         {
             "type": "object",
             "properties": {
                 "tmdb_id": {"type": "integer"},
+                "title": {"type": "string"},
+                "year": {"type": "integer"},
             },
-            "required": ["tmdb_id"],
             "additionalProperties": False,
         },
     )
@@ -1727,7 +1737,7 @@ async def index(
             <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now by listing the most popular movies and most popular TV shows from Tautulli.">What’s popular right now?</button>
             <button type="button" class="starter-chip" data-prompt="Recommend three movies based on what I watch, and keep at least one weird pick.">Smart recommendations</button>
             <button type="button" class="starter-chip" data-prompt="Check if my shows are missing episodes in Plex, and tell me exactly what’s missing.">Find missing episodes</button>
-            <button type="button" class="starter-chip" data-prompt="Search for a title and request it if it is missing.">Search and request</button>
+            <button type="button" class="starter-chip" data-prompt="Help me search for a title and request it if it is missing.">Search and request</button>
             <button type="button" class="starter-chip" data-prompt="Give me a quick health check of my pending requests and anything stuck.">Request health check</button>
             <button type="button" class="starter-chip" data-prompt="Summarize what I watched recently and suggest what to watch tonight.">What should I watch tonight?</button>
           </div>

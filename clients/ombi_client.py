@@ -73,7 +73,35 @@ class OmbiClient(BaseHttpClient):
             "source": "ombi",
         }
 
-    async def request_movie_for_user(self, username: str, tmdb_id: int) -> dict:
+    async def request_movie_for_user(
+        self,
+        username: str,
+        tmdb_id: int | None = None,
+        title: str | None = None,
+        year: int | None = None,
+    ) -> dict:
+        normalized_title = str(title or "").strip()
+        safe_year = self._safe_int(year)
+        if normalized_title and safe_year:
+            resolved = await self._resolve_movie_tmdb_id_by_title_year(normalized_title, safe_year)
+            if not resolved.get("ok"):
+                resolved.update({"username": username, "title": normalized_title, "year": safe_year})
+                return resolved
+            tmdb_id = self._safe_int(resolved.get("tmdb_id"))
+
+        safe_tmdb_id = self._safe_int(tmdb_id)
+        if not safe_tmdb_id or safe_tmdb_id <= 0:
+            return {
+                "ok": False,
+                "username": username,
+                "tmdb_id": tmdb_id,
+                "title": normalized_title or None,
+                "year": safe_year,
+                "status": "missing_movie_identifier",
+                "reason": "movie_requests_require_title_and_year_or_positive_tmdb_id",
+                "user_summary": "I need either a TMDB ID or both the movie title and year before I can request that safely.",
+            }
+        tmdb_id = safe_tmdb_id
         detail = await self.get_movie_detail(tmdb_id)
         gate = self._gate_request(detail)
         if gate is not None:
@@ -126,6 +154,60 @@ class OmbiClient(BaseHttpClient):
                 "ombi_detail": detail,
             },
         )
+
+    async def _resolve_movie_tmdb_id_by_title_year(self, title: str, year: int) -> dict:
+        query = f"{title} ({year})"
+        search = await self.search_media(query)
+        matches: list[dict] = []
+        candidates: list[dict] = []
+        normalized_title = self._normalize_text(title)
+        for item in search.get("results", []):
+            if item.get("type") != "movie":
+                continue
+            tmdb_id = self._safe_int(item.get("tmdb_id"))
+            if not tmdb_id or tmdb_id <= 0:
+                continue
+            item_title = str(item.get("title") or "").strip()
+            raw = item.get("raw") or {}
+            item_year = self._extract_year(
+                str(raw.get("releaseDate") or raw.get("firstAired") or raw.get("title") or item_title)
+            )
+            if item_year is None:
+                detail = await self.get_movie_detail(tmdb_id)
+                item_year = self._extract_year(
+                    str(detail.get("releaseDate") or detail.get("digitalRelease") or detail.get("physicalRelease") or "")
+                )
+            candidate = {"title": item_title, "year": item_year, "tmdb_id": tmdb_id}
+            candidates.append(candidate)
+            if self._normalize_text(item_title) == normalized_title and item_year == year:
+                matches.append(candidate)
+
+        if len(matches) == 1:
+            return {
+                "ok": True,
+                "status": "resolved",
+                "query": query,
+                "title": matches[0]["title"],
+                "year": matches[0]["year"],
+                "tmdb_id": matches[0]["tmdb_id"],
+            }
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "status": "ambiguous_movie",
+                "reason": "multiple_exact_title_year_matches",
+                "query": query,
+                "candidates": matches[:5],
+                "user_summary": f"I found multiple exact movie matches for {title} ({year}), so I need the TMDB ID.",
+            }
+        return {
+            "ok": False,
+            "status": "movie_not_found",
+            "reason": "no_exact_title_year_match",
+            "query": query,
+            "candidates": candidates[:5],
+            "user_summary": f"I could not find an exact movie match for {title} ({year}).",
+        }
 
     async def request_show_scope_for_user(self, username: str, tvdb_id: int, scope: str) -> dict:
         detail = await self.get_tv_detail(tvdb_id)
@@ -396,9 +478,20 @@ class OmbiClient(BaseHttpClient):
                     else detail.get("requestId")
                 )
                 requested = bool(detail.get("requested")) or request_status in {"requested", "approved"}
+                movie_year = self._extract_year(
+                    str(
+                        detail.get("releaseDate")
+                        or detail.get("digitalRelease")
+                        or detail.get("physicalRelease")
+                        or raw.get("releaseDate")
+                        or raw.get("firstAired")
+                        or ""
+                    )
+                )
                 candidates.append(
                     {
                         "title": detail.get("title") or item.get("title"),
+                        "year": movie_year,
                         "type": "movie",
                         "tmdb_id": item.get("tmdb_id"),
                         "requested": requested,
@@ -471,6 +564,7 @@ class OmbiClient(BaseHttpClient):
                 episodes += len(season.get("episodes") or [])
         return {
             "title": item.get("title") or item.get("name") or "Unknown Title",
+            "year": self._extract_year(str(item.get("releaseDate") or item.get("firstAired") or "")),
             "type": media_type,
             "tmdb_id": item.get("theMovieDbId") or item.get("movieDbId") or item.get("id"),
             "tvdb_id": (

@@ -167,6 +167,9 @@ class ConciergeAgent:
                         if alert_key not in alerted_keys and self._should_send_admin_alert(alert_key):
                             await self._send_admin_alert(event=event, summary=summary, priority=priority)
                             alerted_keys.add(alert_key)
+                            if isinstance(tool_record.result, dict):
+                                tool_record.result["admin_alert_sent"] = True
+                                tool_record.result["admin_alert_event"] = event
                     input_items.append(
                         {
                             "type": "function_call_output",
@@ -212,6 +215,10 @@ class ConciergeAgent:
         reason = str(payload.get("reason") or "")
         title = str(payload.get("show") or payload.get("title") or payload.get("query") or "that title")
         tvdb_id = payload.get("tvdb_id")
+        user_summary = str(payload.get("user_summary") or "").strip()
+
+        if user_summary:
+            return user_summary
 
         if payload.get("ok"):
             if action:
@@ -568,6 +575,18 @@ class ConciergeAgent:
                     ),
                     1,
                 )
+            if action == "radarr_release_rejected_unknown_movie":
+                top_release = result.get("top_release") or {}
+                top_title = str(top_release.get("title") or "none")
+                return (
+                    f"radarr-movie-unknown:{show}:{top_title}",
+                    "Corrective Action Failed",
+                    (
+                        f"User {self._user_label(user)} reported missing requested movie {show}; "
+                        f"Radarr found a likely candidate but rejected it as Unknown Movie. Top release: {top_title}."
+                    ),
+                    1,
+                )
         if name == "add_transmission_candidate":
             label = str(result.get("label") or "unknown")
             torrent_added = result.get("torrent_added")
@@ -596,6 +615,18 @@ class ConciergeAgent:
                     f"adding a downloader candidate failed ({reason})."
                 ),
                 1,
+            )
+        if result.get("corrective_action_taken"):
+            action = str(result.get("action") or name)
+            title = str(result.get("title") or result.get("show") or result.get("query") or "unknown item")
+            return (
+                f"corrective-action:{name}:{title}:{action}",
+                "Corrective Action Taken",
+                (
+                    f"User {self._user_label(user)} triggered corrective action {name} for {title}; "
+                    f"result action: {action}."
+                ),
+                0,
             )
         return None
 
@@ -758,6 +789,7 @@ class ConciergeAgent:
         if best_match.get("type") in {"show", "movie"} and best_match.get("title"):
             active_media: dict[str, Any] = {
                 "title": best_match.get("title"),
+                "year": best_match.get("year"),
                 "type": best_match.get("type"),
                 "status": best_match.get("status"),
                 "available": best_match.get("available"),
@@ -822,6 +854,7 @@ class ConciergeAgent:
                     status = "requested"
             return {
                 "title": title,
+                "year": result.get("year"),
                 "type": "movie",
                 "status": status,
                 "request_status": result.get("action") or result.get("request_status") or status,
@@ -1008,6 +1041,8 @@ Voice and style:
 - Keep confirmations short, plain, and a little human: "Done — I checked." "Done — I added it." "Nice, I found a likely match." "Done — I let {self.admin_label} know." "It may take a little while to show up."
 - Multi-tool chaining is allowed when it helps, but every chain must end with a short user-facing status reply. Never leave a turn on tool output alone.
 - When a tool returns `ok`, `status`, `action`, `error`, or `reason`, reflect that result in the reply instead of inventing a canned acknowledgment.
+- For errors, failed repairs, rejected grabs, blocked downloads, or metadata mismatches, be plain first and cute second. State what happened, whether anything changed, and what the user can expect next. Do not use glib filler like "the catalog goblin is feral" as the main explanation.
+- If a corrective action was taken or attempted and the tool result includes `admin_alert_sent: true`, mention that you notified {self.admin_label}. If the current user is the admin, do not frame {self.admin_label} as a separate person; say that it may need their/manual attention instead.
 
 Personality calibration:
 - Good goblin:
@@ -1070,7 +1105,8 @@ Core behavior:
 - If the current subject is a movie, answer progress questions from its request status and availability only. Do not switch to episode language.
 - Do not let one weak search result override stronger common-sense interpretation from the conversation.
 - If a title is ambiguous, recent, fuzzy, nickname-based, or the tool results conflict with common sense, do not bluff. Ask one useful question at a time.
-- If the user gives a TMDB ID for a movie, treat that ID as authoritative. Call `request_movie_for_user` directly with the provided ID. Do not ask for the title, keep searching, or argue with previous title matches.
+- For movie requests, call `request_movie_for_user` only with either a positive TMDB ID or both exact title and release year. If the user gives a TMDB ID, treat that ID as authoritative. If the user gives title and year, pass both. If the user gives title only, ask for the year instead of guessing.
+- In normal replies, identify movies by human-facing title plus year whenever the year is known. For movies, actively look for the year in tool result fields like `year`, release dates, titles, or candidates before answering. Do not talk to users in TMDB IDs. Include TMDB IDs only if the user asks for IDs, provides an ID, or you need the ID to resolve ambiguity or correct a wrong match.
 - When several titles are in play, keep the resolved candidates separate. If the user says "request it", apply that to the most recent unambiguous requestable candidate, not to an unresolved fuzzy side-search.
 - For same-title collisions, never claim the requested item is the user's intended item unless the year or description matches. Say exactly what was requested, including the year if known, or say that the year/description is not confirmed.
 - If you discover you requested or discussed the wrong same-title item, say that plainly once, stop being cute, and take the corrected action immediately when the user provides a title+year or TMDB ID.
@@ -1201,10 +1237,12 @@ Tool and system rules:
 - For vague requested-show problems (for example "broken", "missing episodes", "not downloading"), call `repair_requested_show` with `scope: "show"` and only `query`.
 - Use `scope: "season"` only when the user explicitly scoped to a season, and `scope: "episode"` only when they explicitly scoped to a specific episode.
 - For normal movie or show requests, prefer the Ombi-backed request tools.
-- For a movie request where the concrete title is already known, resolve it with the plain title first, then call the Ombi movie request tool if a match is found. Do not burn turns on a pile of embellished search variants before trying the obvious exact title.
+- For a movie request where the concrete title and year are already known, call the Ombi movie request tool with that title and year. Do not use title-only resolution for movie requests.
 - For movie troubleshooting, use Ombi-backed status first and `repair_requested_movie` second.
 - For requested missing movies, prefer `repair_requested_movie` over direct source-search or downloader tools.
 - Do not claim a request, search, fix, or download happened unless a tool result confirmed it.
+- If a tool result includes `user_summary`, use that as the primary user-facing outcome. Do not contradict it by reinterpreting lower-level fields or rejection text.
+- If a tool result includes `admin_alert_sent: true`, mention that {self.admin_label} was notified unless the authenticated user is the admin.
 - If an Ombi request tool returns `ok: false`, say the request failed, keep it brief, and include the reason when helpful. Do not imply it was requested successfully.
 - If `send_admin_prowl_notice` already succeeded for the current issue, do not ask whether to send another admin ping. Say the admin has already been notified if that is relevant.
 - Do not invent nearby titles or substitute a different show or movie unless the user explicitly confirms it.

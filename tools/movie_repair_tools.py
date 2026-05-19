@@ -129,6 +129,7 @@ class MovieRepairTools:
                 None,
             )
             if queued_release is not None:
+                release_title = str(queued_release.get("title") or title)
                 return {
                     "ok": True,
                     "query": query,
@@ -138,6 +139,12 @@ class MovieRepairTools:
                     "available": available,
                     "action": "radarr_replacement_already_queued",
                     "reason": "replacement_already_queued_in_radarr",
+                    "corrective_action_taken": True,
+                    "download_in_progress": True,
+                    "user_summary": (
+                        f"Radarr already has a download working for {title}: "
+                        f"'{release_title}'. It should arrive after that download/import completes."
+                    ),
                     "radarr_movie_id": movie_id,
                     "release_count": len(torrent_releases),
                     "approved_count": len(approved),
@@ -220,6 +227,12 @@ class MovieRepairTools:
             "requested": requested,
             "available": available,
             "action": "radarr_release_grab_submitted",
+            "corrective_action_taken": True,
+            "download_in_progress": True,
+            "user_summary": (
+                f"Submitted a Radarr download for {title}: '{selected['title']}'. "
+                "It should arrive after that download/import completes."
+            ),
             "radarr_movie_id": movie_id,
             "release_count": len(torrent_releases),
             "approved_count": len(approved),
