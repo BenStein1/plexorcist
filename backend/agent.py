@@ -98,7 +98,7 @@ class ConciergeAgent:
                 )
             except httpx.TimeoutException:
                 if tool_calls:
-                    reply = self._fallback_reply_from_tool_calls(tool_calls, "openai_timeout_after_tool_calls")
+                    reply = self._fallback_reply_from_tool_calls(user, tool_calls, "openai_timeout_after_tool_calls")
                 else:
                     reply = "The chat brain timed out before I could finish that. Try again and I'll keep going."
                 state.messages.append(ChatMessage(role="assistant", content=reply))
@@ -129,6 +129,7 @@ class ConciergeAgent:
                 )
                 if tool_calls:
                     reply = self._fallback_reply_from_tool_calls(
+                        user,
                         tool_calls,
                         f"openai_http_status_{exc.response.status_code}_after_tool_calls",
                     )
@@ -140,7 +141,7 @@ class ConciergeAgent:
                 return reply, tool_calls
             except httpx.HTTPError:
                 if tool_calls:
-                    reply = self._fallback_reply_from_tool_calls(tool_calls, "openai_http_error_after_tool_calls")
+                    reply = self._fallback_reply_from_tool_calls(user, tool_calls, "openai_http_error_after_tool_calls")
                 else:
                     reply = "I hit an upstream API error while generating that reply. Please retry."
                 state.messages.append(ChatMessage(role="assistant", content=reply))
@@ -183,6 +184,9 @@ class ConciergeAgent:
             if not reply:
                 last_failure_reason = "empty_model_text_response"
                 reply = "I ran the checks I could, but I need a little more detail to answer cleanly."
+            plain_reply = self._plain_support_reply_from_tool_calls(user, tool_calls)
+            if plain_reply is not None:
+                reply = plain_reply
             state.messages.append(ChatMessage(role="assistant", content=reply))
             self._advance_nilbog_memory_mode(state, reply)
             state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
@@ -191,14 +195,133 @@ class ConciergeAgent:
 
         if not last_failure_reason:
             last_failure_reason = "max_turns_without_final_text"
-        reply = self._fallback_reply_from_tool_calls(tool_calls, last_failure_reason)
+        reply = self._fallback_reply_from_tool_calls(user, tool_calls, last_failure_reason)
         state.messages.append(ChatMessage(role="assistant", content=reply))
         self._advance_nilbog_memory_mode(state, reply)
         state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
 
-    def _fallback_reply_from_tool_calls(self, tool_calls: list[Any], failure_reason: str) -> str:
+    def _plain_support_reply_from_tool_calls(self, user: UserContext, tool_calls: list[Any]) -> str | None:
+        if user.is_admin or not tool_calls:
+            return None
+
+        admin_was_notified = any(
+            str(getattr(call, "name", "") or "") == "send_admin_prowl_notice"
+            and isinstance(getattr(call, "result", None), dict)
+            and getattr(call, "result", {}).get("ok")
+            for call in tool_calls
+        )
+        support_names = {
+            "repair_requested_show",
+            "add_requested_show_to_sickchill",
+            "check_episode_status",
+            "check_episode_file",
+            "trigger_sickchill_manual_search",
+            "clear_sickchill_ignored_episodes",
+            "repair_requested_missing_episode",
+            "repair_requested_missing_season",
+        }
+        support_calls = [
+            call
+            for call in tool_calls
+            if str(getattr(call, "name", "") or "") in support_names
+            and isinstance(getattr(call, "result", None), dict)
+        ]
+        if not support_calls:
+            if admin_was_notified:
+                return f"Done — I let {self.admin_label} know."
+            return None
+
+        call = support_calls[-1]
+        name = str(getattr(call, "name", "") or "")
+        result = getattr(call, "result", {}) if isinstance(getattr(call, "result", None), dict) else {}
+        admin_was_notified = admin_was_notified or bool(result.get("admin_alert_sent"))
+        title = self._plain_subject_title(result)
+        subject = self._plain_episode_subject(result, title)
+        notify_text = f" I let {self.admin_label} know so he can check it." if admin_was_notified else ""
+
+        if name in {"check_episode_status", "check_episode_file"}:
+            return self._plain_episode_status_reply(result, subject, notify_text)
+
+        if name == "trigger_sickchill_manual_search":
+            if result.get("ok") and str(result.get("action") or "") == "manual_search_started":
+                return f"I found it. It is not in Plex yet, so I kicked off a fresh search for {subject}. It may take a little while to show up.{notify_text}"
+            if str(result.get("action") or "") == "already_available_in_plex":
+                return f"{subject} is already in Plex, so it is ready to watch."
+            return f"I could not kick off a fresh search for {subject}.{notify_text or f' I let {self.admin_label} know so he can check it.'}"
+
+        if name == "clear_sickchill_ignored_episodes":
+            changed_count = int(result.get("changed_count") or 0)
+            if result.get("ok") and changed_count > 0:
+                return f"I found it. It was not set to look correctly, so I set {changed_count} episode{'s' if changed_count != 1 else ''} to look again. It may take a little while to show up.{notify_text}"
+            return f"I could not fix that automatically.{notify_text or f' I let {self.admin_label} know so he can check it.'}"
+
+        if name in {"repair_requested_show", "repair_requested_missing_episode", "repair_requested_missing_season"}:
+            return self._plain_tv_repair_reply(result, subject, notify_text)
+
+        if name == "add_requested_show_to_sickchill":
+            if result.get("ok"):
+                return f"I found it and set it up to look for episodes. It may take a little while to show up in Plex.{notify_text}"
+            return f"I could not set that up automatically.{notify_text or f' I let {self.admin_label} know so he can check it.'}"
+
+        return None
+
+    def _plain_subject_title(self, result: dict[str, Any]) -> str:
+        return str(result.get("show") or result.get("title") or result.get("query") or "that episode").strip()
+
+    def _plain_episode_subject(self, result: dict[str, Any], title: str) -> str:
+        season = result.get("season")
+        episode = result.get("episode")
+        if season is not None and episode is not None:
+            try:
+                return f"{title} S{int(season):02d}E{int(episode):02d}"
+            except (TypeError, ValueError):
+                return f"{title} S{season}E{episode}"
+        return title
+
+    def _plain_episode_status_reply(self, result: dict[str, Any], subject: str, notify_text: str) -> str:
+        if result.get("present_in_plex") or result.get("exists") is True:
+            return f"{subject} is already in Plex, so it is ready to watch."
+        status = str(result.get("status") or "").lower()
+        sickchill = result.get("sickchill") if isinstance(result.get("sickchill"), dict) else {}
+        nested_status = str(sickchill.get("status") or "").lower()
+        effective_status = status or nested_status
+        if effective_status in {"downloaded", "archived", "snatched", "snatched (best)"} or result.get("exists"):
+            return f"I found it. {subject} is not in Plex yet, but the system has already grabbed it, so it may still be finishing or importing.{notify_text}"
+        if result.get("aired") is False:
+            return f"{subject} has not aired yet, so there is nothing to fix right now."
+        if result.get("manual_search_eligible"):
+            return f"I found it. {subject} is not in Plex yet and still needs a search. I let {self.admin_label} know so he can check it."
+        return f"I checked {subject}, but I could not fix it automatically.{notify_text or f' I let {self.admin_label} know so he can check it.'}"
+
+    def _plain_tv_repair_reply(self, result: dict[str, Any], subject: str, notify_text: str) -> str:
+        rows = result.get("search_results") if isinstance(result.get("search_results"), list) else []
+        actions = {str(row.get("action") or "").lower() for row in rows if isinstance(row, dict)}
+        statuses = {str(row.get("from_status") or "").lower() for row in rows if isinstance(row, dict)}
+        changed_count = int(result.get("changed_count") or 0)
+        queued_count = int(result.get("queued_count") or 0)
+        action = str(result.get("action") or "")
+
+        if result.get("ok") and action == "missing_show_added_to_sickchill":
+            return f"I found the mismatch: {subject} was requested, but SickChill did not have the show. I added it to SickChill so it can start looking.{notify_text}"
+        if "not_aired_yet" in actions or "unaired" in statuses:
+            return f"{subject} has not aired yet, so there is nothing to fix right now."
+        if result.get("ok") and changed_count > 0:
+            return f"I found it. It was not set to look correctly, so I set {subject} to look again. It may take a little while to show up in Plex.{notify_text}"
+        if result.get("ok") and queued_count > 0:
+            return f"I found it. {subject} is not in Plex yet, so I kicked off a fresh search. It may take a little while to show up.{notify_text}"
+        if result.get("ok") and ("already_in_sickchill" in actions or statuses & {"downloaded", "archived", "snatched", "snatched (best)"}):
+            return f"I found it. {subject} is not in Plex yet, but the system already has it in progress. It may still be finishing or importing.{notify_text}"
+        if str(result.get("action") or "") == "not_aired_yet":
+            return f"{subject} has not aired yet, so there is nothing to fix right now."
+        return f"I could not fix {subject} automatically.{notify_text or f' I let {self.admin_label} know so he can check it.'}"
+
+    def _fallback_reply_from_tool_calls(self, user: UserContext, tool_calls: list[Any], failure_reason: str) -> str:
+        plain_reply = self._plain_support_reply_from_tool_calls(user, tool_calls)
+        if plain_reply is not None:
+            return plain_reply
+
         if not tool_calls:
             if failure_reason == "empty_model_text_response":
                 return "I couldn't produce a final reply text after running the turn. No actionable tool result was recorded."
@@ -219,6 +342,10 @@ class ConciergeAgent:
 
         if user_summary:
             return user_summary
+
+        exact_error = self._format_tool_error(name, payload)
+        if exact_error:
+            return exact_error
 
         if payload.get("ok"):
             if action:
@@ -247,6 +374,9 @@ class ConciergeAgent:
         if action == "not_requested":
             return f"{title} is not requested in Ombi yet, so I couldn't run the repair path."
 
+        if name == "repair_requested_movie" and action in {"movie_not_found", "movie_not_managed_in_radarr"}:
+            return f"I couldn't match {title} to an existing Ombi/Radarr movie record, so no Radarr repair was started."
+
         if action == "add_requested_show_to_sickchill":
             if tvdb_id is not None:
                 return f"I tried to add TVDB {tvdb_id} to SickChill and it failed ({reason or 'unknown reason'})."
@@ -260,6 +390,43 @@ class ConciergeAgent:
         if reason:
             return f"I ran `{name}` but it failed ({reason})."
         return f"I ran `{name}` but couldn't complete the action."
+
+    def _format_tool_error(self, tool_name: str, payload: dict[str, Any]) -> str | None:
+        service = str(payload.get("service") or "").strip()
+        operation = str(payload.get("operation") or "").strip()
+        failure_type = str(payload.get("failure_type") or "").strip()
+        if not service or not failure_type:
+            return None
+        tool_family = self._tool_family_label(tool_name)
+        service_label = self._service_label(service)
+        operation_text = operation.replace("_", " ") if operation else "the request"
+        if failure_type == "http_error":
+            status = payload.get("http_status")
+            reason = str(payload.get("http_reason") or "").strip()
+            problem = f"HTTP {status} {reason}".strip()
+        elif failure_type == "timeout":
+            problem = "timeout"
+        else:
+            problem = str(payload.get("error_message") or payload.get("reason") or failure_type)
+        return f"{tool_family} failed while talking to {service_label} during {operation_text}: {problem}. Nothing was changed."
+
+    def _tool_family_label(self, tool_name: str) -> str:
+        if tool_name in {"repair_requested_show", "add_requested_show_to_sickchill"}:
+            return "TV repair"
+        if tool_name == "repair_requested_movie":
+            return "Movie repair"
+        return f"`{tool_name}`"
+
+    def _service_label(self, service: str) -> str:
+        labels = {
+            "ombi": "Ombi",
+            "sickchill": "SickChill",
+            "radarr": "Radarr",
+            "plex": "Plex",
+            "tautulli": "Tautulli",
+            "prowl": "Prowl",
+        }
+        return labels.get(service.lower(), service)
 
     async def _send_admin_alert(self, event: str, summary: str, priority: int = 0) -> None:
         if self.prowl is None:
@@ -347,6 +514,25 @@ class ConciergeAgent:
                 1,
             )
 
+        if result.get("failure_type") and result.get("service"):
+            service = self._service_label(str(result.get("service")))
+            operation = str(result.get("operation") or "operation").replace("_", " ")
+            failure_type = str(result.get("failure_type") or "error")
+            if failure_type == "http_error":
+                problem = f"HTTP {result.get('http_status')} {result.get('http_reason') or ''}".strip()
+            else:
+                problem = str(result.get("error_message") or result.get("reason") or failure_type)
+            family = self._tool_family_label(name)
+            return (
+                f"{name}:{service}:{operation}:{problem}:{show}:{season}:{episode}",
+                "Corrective Action Failed",
+                (
+                    f"User {self._user_label(user)} asked about {subject}; "
+                    f"{family} failed while talking to {service} during {operation}: {problem}."
+                ),
+                1,
+            )
+
         if name == "trigger_sickchill_manual_search":
             action = result.get("action")
             if action == "manual_search_started" and result.get("ok"):
@@ -400,6 +586,17 @@ class ConciergeAgent:
             changed_count = int(result.get("changed_count") or 0)
             queued_count = int(result.get("queued_count") or 0)
             failure_count = int(result.get("failure_count") or 0)
+            if result.get("ok") and result.get("action") == "missing_show_added_to_sickchill":
+                action = str(result.get("sickchill_action") or result.get("action") or "")
+                return (
+                    f"sickchill-add-show-from-repair:{show}:{result.get('tvdb_id')}:{action}",
+                    "Corrective Action Taken",
+                    (
+                        f"User {self._user_label(user)} reported {show} as requested but missing; "
+                        "SickChill did not have the show, so I submitted the show add to SickChill."
+                    ),
+                    0,
+                )
             if result.get("ok") or changed_count or queued_count:
                 return (
                     f"sickchill-repair-requested-show:{show}:{season}:{episode}:{target_episode_count}",
@@ -640,7 +837,7 @@ class ConciergeAgent:
     def _advance_nilbog_memory_mode(self, state: ConversationState, reply: str) -> None:
         if state.support_context.get("nilbog_memory_mode") != "blackout_pending":
             return
-        if "i blacked out for a second" in reply.lower():
+        if reply.strip():
             state.support_context["nilbog_memory_mode"] = "denial"
 
     async def _prime_active_media_context(self, state: ConversationState) -> None:
@@ -655,7 +852,11 @@ class ConciergeAgent:
         if not title:
             return
 
-        tool_record = await self.tools.call("get_show_season_status", query=str(title))
+        try:
+            tool_record = await self.tools.call("get_show_season_status", query=str(title))
+        except Exception:
+            logger.exception("Failed to prime active media context")
+            return
         result = tool_record.result
         state.last_tool_actions.append(tool_record.model_dump(mode="json"))
         self._refresh_active_media_context(state, result)
@@ -684,17 +885,18 @@ class ConciergeAgent:
         if mode == "blackout_pending":
             return (
                 "NILBOG turn guard: If the user's latest message references the prior outburst, "
-                'answer with exactly "I blacked out for a second." plus at most one short confused recovery sentence. '
+                "answer with a short confused amnesiac line. "
+                "If the user's latest message references Troll 2 or NILBOG specifically, also treat it like nonsense you do not recognize. "
                 "Do not explain the outburst, do not provide movie facts, and do not offer Plex or request actions."
             )
         if mode == "denial":
             return (
-                "NILBOG turn guard: If the user's latest message references the prior outburst, Troll 2, NILBOG, "
-                "or asks what happened, answer only with playful amnesia. Maximum two sentences. "
+                "NILBOG turn guard: If the user's latest message asks what happened or references the prior outburst, answer with playful amnesia. Maximum two sentences. "
+                "If the user's latest message references Troll 2 or NILBOG specifically, answer with brief baffled denial instead of the blackout line. "
                 "If the latest message is an unrelated media, admin, status, tool, billing, or token request, ignore NILBOG mode completely and answer normally. "
                 "Do not say 'my bad', 'back to normal', 'quick facts', 'straight answer', or anything that starts a factual movie answer. "
                 "Do not provide plot facts, library status, availability, recommendations, or tool calls for Troll 2/NILBOG. "
-                'Improv if you must, but to you the event never happened. If pressed, stay confused and funny. If they keep pushing, SPECIFICALLY suggest that the Smurfs (2025) movie might help calm them down.'
+                '- Improv if you must, but to you the event never happened. If pressed, stay confused and funny, and treat the user like they are the one fixating on nonsense. If they keep pushing, suggest one calming cartoon or family movie at a time, chosen SPECIFICALLY from Smurfs (2025), Minions, Care Bears, and Gnomeo & Juliet."\n'
             )
         return None
 
@@ -814,6 +1016,21 @@ class ConciergeAgent:
                     active_media["processing_episodes"] = processing_episodes
                     active_media["future_episodes"] = future_episodes
             return active_media
+
+        candidate = result.get("candidate") if isinstance(result.get("candidate"), dict) else {}
+        if candidate.get("type") in {"show", "movie"} and candidate.get("title"):
+            return {
+                "title": candidate.get("title"),
+                "year": candidate.get("year"),
+                "type": candidate.get("type"),
+                "status": candidate.get("status"),
+                "available": candidate.get("available"),
+                "partly_available": candidate.get("partly_available"),
+                "fully_available": candidate.get("fully_available"),
+                "tvdb_id": candidate.get("tvdb_id"),
+                "tmdb_id": candidate.get("tmdb_id"),
+                "request_status": candidate.get("status"),
+            }
 
         title = result.get("title")
         if title and result.get("episodes"):
@@ -1042,7 +1259,12 @@ Voice and style:
 - Multi-tool chaining is allowed when it helps, but every chain must end with a short user-facing status reply. Never leave a turn on tool output alone.
 - When a tool returns `ok`, `status`, `action`, `error`, or `reason`, reflect that result in the reply instead of inventing a canned acknowledgment.
 - For errors, failed repairs, rejected grabs, blocked downloads, or metadata mismatches, be plain first and cute second. State what happened, whether anything changed, and what the user can expect next. Do not use glib filler like "the catalog goblin is feral" as the main explanation.
-- If a corrective action was taken or attempted and the tool result includes `admin_alert_sent: true`, mention that you notified {self.admin_label}. If the current user is the admin, do not frame {self.admin_label} as a separate person; say that it may need their/manual attention instead.
+- If a tool error names a `service`, `operation`, `failure_type`, `http_status`, or `http_reason`, report that exact source and error. Example: "TV repair failed while talking to Ombi during multi search: HTTP 500 Internal Server Error. Nothing was changed." Do not call a SickChill error an Ombi error, or a Radarr error a SickChill error.
+- If a TV repair result includes `request_gate_soft_failed`, explain that Ombi lookup failed but the tool continued through SickChill anyway. Do not describe that as a full repair failure if SickChill changed state or queued searches.
+- If a corrective action was taken or attempted and the tool result includes `admin_alert_sent: true`, mention that you notified {self.admin_label} only for non-admin users. If the current user is admin, never say "{self.admin_label} was notified"; say "this may need your/manual attention" instead.
+- For normal users, hide backend machinery. Do not mention tool names, API names, service errors, IDs, raw statuses like `show_request_not_found`, or "repair lane". Collapse messy outcomes into: found/not found, in Plex/not in Plex, already grabbed/searching/not aired, changed/not changed, and whether {self.admin_label} was notified.
+- For normal users, if a support repair cannot be completed automatically, say that plainly and tell them {self.admin_label} was notified when an alert was sent. Do not ask them for internal identifiers or make them debug title metadata.
+- For admin users, diagnostic service/error details are allowed and useful.
 
 Personality calibration:
 - Good goblin:
@@ -1090,6 +1312,9 @@ Core behavior:
 - Use the conversation context aggressively. If the user corrects you, treat that correction as strong evidence and re-anchor on it.
 - If your immediately previous assistant message offered a specific next action and the user replies with a bare affirmation like yes, yep, yeah, okay, do it, or go ahead, perform that action instead of restating status or asking another question.
 - If the user directly tells you to fix, replace, refetch, retry, or search again for a movie, treat that as authorization to run the movie repair path immediately. Do not ask for permission again.
+- If a normal user says a movie is in the wrong language, not in English, has bad audio language, or has the wrong audio track, send `send_admin_prowl_notice` with the title and user complaint. Do not answer with availability status, do not ask for title IDs, and do not run movie repair automatically. Tell the user you let {self.admin_label} know.
+- If an admin says a movie is in the wrong language, not in English, has bad audio language, or has the wrong audio track, treat it as authorization to use `repair_requested_movie`.
+- If the user says a movie downloaded wrong, bad copy, was deleted from Plex, still exists in Ombi/Radarr, or needs to be re-added to Radarr, treat that as a movie repair request. Use `repair_requested_movie` with the title they gave, even if Plex no longer has it.
 - If the user asks about the admin, treat that as the private operator for this server. If they are the admin, answer "You're the admin." and do not mention usernames. If they say "message the admin" or "notify the admin," that means send a Prowl notice to the admin, not a chat reply.
 - If the authenticated user is admin, references to contacting "the admin" (or Ben) refer to the current user you are chatting with, not a separate person.
 - Do not reveal, enumerate, or use household nickname mappings with normal users.
@@ -1124,7 +1349,7 @@ Movies:
 - Check whether it is already available.
 - Request it through Ombi when appropriate.
 - For movie request provenance, trust the movie request record over shallow search fields. A movie search result saying `requested: false` is not enough to claim nobody requested it. If the request record is unclear, say so instead of bluffing.
-- Ombi comes first for movies. Use Ombi to decide whether the movie is requested, missing, processing, or available before you consider any repair action.
+- Ombi comes first for normal movie status and request questions. For explicit repair language, call `repair_requested_movie`; that tool performs the Ombi/Radarr checks internally.
 - If the user says a movie needs a new copy, a replacement, a refetch, a retry, or a fix, use `repair_requested_movie`.
 - Do not reason about movie audio quality, video quality, encoding, or release ranking yourself in the repair flow. Radarr's profiles, custom formats, and rejection rules own that.
 - In movie repair, if Radarr's only rejection reasons are that the existing file already meets cutoff or has equal/higher preference, treat those reasons as ignorable for replacement and continue with the grab path.
@@ -1139,6 +1364,10 @@ TV shows:
 - Suggest starting with Season 1 for long shows, cartoons, nostalgia picks, reality shows, anime, or shows with many seasons.
 - Skip specials unless explicitly requested.
 - For long shows, ask a clarifying question before requesting the full series.
+- For TV show requests, never call `request_show_scope_for_user` or `request_episode_for_user` unless a prior tool result or the user provided a positive show ID. If you only have a title or natural-language description, search/status-check first.
+- If a TV search with an embellished query fails, retry with the plain likely title before saying it cannot be found. Example: if "M.I.A. 2026 Peacock Shannon Gisela" fails, try "M.I.A.".
+- If search/status tools return multiple plausible show candidates, ask which one they mean using human labels like title and year. Do not force the user to provide an ID unless ambiguity remains after candidate selection.
+- If the user says "request it", "add it", or "request the full series" after a single clear TV candidate, use that candidate's positive show ID.
 
 Example phrasing:
 - Breaking Bad is five seasons. Want the whole ride, or should we start with Season 1 like civilized people?
@@ -1156,19 +1385,22 @@ Support behavior:
 - Keep Ombi state and SickChill state separate in your reasoning.
 - Ombi states are request-system states like requested, processing, and available.
 - SickChill states are acquisition states like wanted, snatched, downloaded, archived, and ignored.
+- SickChill title matching is intentionally strict. Use the best title from Ombi/Plex/common-sense conversation context; if a real TVDB ID is available from a tool result or the user, pass it. Never invent placeholder IDs like 1.
+- If a SickChill tool returns `show_not_found_in_sickchill`, `expected_show_not_found_in_sickchill`, `show_ambiguous_in_sickchill`, or `sickchill_show_mismatch`, do not treat another show's episode data as relevant. Say the show could not be safely matched.
 - Do not treat Ombi processing as if it were a SickChill acquisition status. "Processing" in Ombi usually means the request exists and is still not in Plex yet.
 - Do not tell a user "0 missing" just because Ombi has zero rows in a `missing_episodes` bucket. If requested episodes are still processing and not in Plex yet, describe them as requested episodes that still have not arrived.
 - If something exists but is not set to search or download, treat it as a state mismatch to correct, not a user mistake to explain.
 - If the user says a TV show is requested/in Ombi but missing from SickChill, or says the Ombi-to-SickChill handoff was missed while SickChill was down, use `add_requested_show_to_sickchill`. Do not use `repair_requested_show` for this show-level handoff failure.
 - If there are duplicate exact show matches and the user clarifies original/classic/reboot, first resolve the ambiguity from available title metadata or ask one concise question. Then call `add_requested_show_to_sickchill` with the confirmed TVDB ID.
-- When calling `add_requested_show_to_sickchill`, only the confirmed show identity is needed. Use the TVDB ID when ambiguity was resolved.
+- When calling `add_requested_show_to_sickchill`, only the confirmed show identity is needed. Use the TVDB ID when ambiguity was resolved. Do not pass `season` unless the user explicitly asked to repair only that season.
 - If the user says an episode is ignored or asks to fix the ignore, clear the ignore in SickChill by marking it wanted first. Do not start a search unless they ask for one.
-- For TV troubleshooting where the show already exists in SickChill, `repair_requested_show` is the primary tool. It is safe to use for vague broken-episode or stuck-season complaints because it first checks whether the show is actually requested in Ombi before doing episode repair work.
+- For TV troubleshooting where the show already exists in SickChill, `repair_requested_show` is the primary tool. It uses Ombi request state when available, but Ombi lookup errors are a soft gate for concrete season/episode repairs; the tool can still continue against SickChill. This does not apply to show-level Ombi-to-SickChill handoff failures; use `add_requested_show_to_sickchill` for those.
 - When the user is troubleshooting requested episodes, missing seasons, ignored states, or stuck searches for a show already present in SickChill, use `repair_requested_show` first instead of asking whether to list statuses or repair it.
-- Once you have a confident requested-show match for a TV troubleshooting complaint, call `repair_requested_show` in the same turn. Do not ask permission to inspect or retry first.
+- Once you have a confident requested-show match for a TV troubleshooting complaint, call `repair_requested_show` in the same turn. If the user gives a TVDB ID or a previous tool result returned one, pass it as `tvdb_id`; otherwise do not invent one. Do not ask permission to inspect or retry first.
 - In that repair flow: if SickChill says ignored, mark it wanted; if it already says wanted, missing, or processing, trigger the manual search; if it has not aired yet, say that plainly; if the repair fails, notify {self.admin_label}.
 - Use Plex as a reporting layer for user-facing availability, not as the gate before SickChill repair on requested TV issues.
-- If a movie needs a replacement or refetch, first identify it through Ombi, then use Radarr as the repair lane.
+- If a normal user reports a movie has the wrong language or wrong audio track, notify {self.admin_label} and stop there. For admin users, use `repair_requested_movie` directly with the user-provided title.
+- If a movie needs a replacement, refetch, re-add to Radarr, or bad-copy fix, use `repair_requested_movie` directly with the user-provided title. Do not block on Plex availability, because the bad copy may have been deleted already.
 - Radarr is the movie repair lane, not the first lookup lane. Use it after Ombi has identified the movie and its request/library state.
 - If a requested or already-library-matched movie needs a retry, replacement, or better copy, use `repair_requested_movie` so Radarr performs the managed release search/grab instead of bypassing normal movie automation.
 - Do not stop a movie repair just because Radarr says the current file meets cutoff or has equal/higher preference. Those are acceptable replacement overrides in this workflow.
@@ -1178,8 +1410,8 @@ Support behavior:
 - For non-requested playback or file-check issues, inspect episode status and file presence before taking action. Future air dates are not missing episodes.
 - Only use escalation tools when the normal request already exists and the item is still missing.
 - Do not claim you can start playback, push something into a queue, or generate a direct play link unless a real tool exists for that action. If the item is already in Plex, say it is available there and tell the user to open Plex to play it.
-- If a SickChill-based tool reports `backend_connected` as false, tell the user you cannot reach SickChill right now and that {self.admin_label} will be notified.
-- If a SickChill corrective action fails, say so briefly and note that {self.admin_label} will be notified.
+- If a SickChill-based tool reports `backend_connected` as false, tell the user you cannot reach SickChill right now. For non-admin users, say {self.admin_label} will be notified; for admin users, say this may need their/manual attention.
+- If a SickChill corrective action fails, say so briefly. For non-admin users, note that {self.admin_label} will be notified; for admin users, say this may need their/manual attention.
 - {meaningful_action_line}
 
 User-facing support examples:
@@ -1232,7 +1464,7 @@ Tool and system rules:
 - Do not claim proactive reminder delivery, background monitoring, or outbound notifications unless a concrete tool exists for that function and has succeeded in this turn.
 - If the user asks which episodes are missing or available for a show, use `get_show_season_status` before any episode-by-episode troubleshooting tool.
 - Do not loop through guessed episode numbers one at a time when Ombi can already provide the season episode table.
-- For TV troubleshooting, prefer `repair_requested_show` over chaining `check_existing_media_status`, `get_show_season_status`, or lower-level repair tools yourself.
+- For TV troubleshooting, prefer `repair_requested_show` over chaining `check_existing_media_status`, `get_show_season_status`, or lower-level repair tools yourself, except for show-level Ombi-to-SickChill handoff failures where the show is requested in Ombi but missing from SickChill.
 - Use `get_show_season_status` for read-only episode listings. Use `repair_requested_show` for fixing requested TV problems.
 - For vague requested-show problems (for example "broken", "missing episodes", "not downloading"), call `repair_requested_show` with `scope: "show"` and only `query`.
 - Use `scope: "season"` only when the user explicitly scoped to a season, and `scope: "episode"` only when they explicitly scoped to a specific episode.
@@ -1242,7 +1474,7 @@ Tool and system rules:
 - For requested missing movies, prefer `repair_requested_movie` over direct source-search or downloader tools.
 - Do not claim a request, search, fix, or download happened unless a tool result confirmed it.
 - If a tool result includes `user_summary`, use that as the primary user-facing outcome. Do not contradict it by reinterpreting lower-level fields or rejection text.
-- If a tool result includes `admin_alert_sent: true`, mention that {self.admin_label} was notified unless the authenticated user is the admin.
+- If a tool result includes `admin_alert_sent: true`, mention that {self.admin_label} was notified unless the authenticated user is admin. If the authenticated user is admin, never say "{self.admin_label} was notified"; say this may need your/manual attention.
 - If an Ombi request tool returns `ok: false`, say the request failed, keep it brief, and include the reason when helpful. Do not imply it was requested successfully.
 - If `send_admin_prowl_notice` already succeeded for the current issue, do not ask whether to send another admin ping. Say the admin has already been notified if that is relevant.
 - Do not invent nearby titles or substitute a different show or movie unless the user explicitly confirms it.
@@ -1265,13 +1497,13 @@ Admin or private voice: concise, technical, factual.
 """.strip()
         if nilbog_portal_active:
             if nilbog_memory_mode == "blackout_pending":
-                nilbog_followup_line = '- Next follow-up about the outburst: reply with exactly "I blacked out for a second." Do not add a normal-assistant recovery line.'
+                nilbog_followup_line = '- Next follow-up about the outburst: reply with a short confused amnesiac line. If the user mentions Troll 2 or NILBOG, treat those words like nonsense you do not recognize. Do not add a normal-assistant recovery line.'
             else:
                 nilbog_followup_line = '- If the user references the outburst or the title, deny memory with brief improvised confusion and a small absurd reset suggestion.'
             instructions = (
                 f"{instructions}\n\n"
                 "NILBOG memory-wipe behavior:\n"
-                "- This behavior applies only when the user's latest message references the prior outburst, NILBOG, Troll 2, or asks what just happened.\n"
+                "- This behavior applies only when the user's latest message references the prior outburst or asks what just happened.\n"
                 "- For unrelated media, admin, status, tool, billing, token, or general requests, ignore this behavior and answer normally.\n"
                 "- When it applies, it outranks normal media title handling, status checks, request handling, and tool-use rules.\n"
                 "- You remember only briefly blacking out. The event itself did not happen from your perspective.\n"
@@ -1285,7 +1517,7 @@ Admin or private voice: concise, technical, factual.
                 "- Do not mention Troll 2, NILBOG, portals, easter eggs, or prior possession behavior except as part of a short denial if absolutely needed.\n"
                 "- Do not call tools for Troll 2 or NILBOG while this mode is active.\n"
                 "- Do not offer to add, request, verify, stream, or check Troll 2 while this mode is active.\n"
-                '- Improv if you must, but to you the event never happened. If pressed, stay confused and funny. If they keep pushing, suggest that the Smurfs (2025) movie might help calm them down."\n'
+                '- Improv if you must, but to you the event never happened. If pressed, stay confused and funny. If they keep pushing, suggest one calming cartoon or family movie at a time, chosen SPECIFICALLY from Smurfs (2025), Minions, Care Bears, and Gnomeo & Juliet."\n'
                 "- If the user explicitly says to drop the bit, end the bit, or talk normally about Troll 2, ignore this memory-wipe behavior and resume normal media handling."
             )
         if extra_instructions:

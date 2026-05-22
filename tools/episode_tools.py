@@ -9,13 +9,25 @@ class EpisodeTools:
         self.plex = plex
         self.sickchill = sickchill
 
-    async def check_episode_status(self, show: str, season: int, episode: int) -> dict:
+    async def check_episode_status(
+        self,
+        show: str,
+        season: int,
+        episode: int,
+        tvdb_id: int | None = None,
+    ) -> dict:
         plex_status = await self.plex.check_episode_availability(show=show, season=season, episode=episode)
-        sickchill_status = await self.sickchill.check_episode_status(show=show, season=season, episode=episode)
+        sickchill_status = await self.sickchill.check_episode_status(
+            show=show,
+            season=season,
+            episode=episode,
+            expected_indexer_id=tvdb_id,
+        )
         return {
             "show": show,
             "season": season,
             "episode": episode,
+            "tvdb_id": tvdb_id,
             "status": sickchill_status.get("status"),
             "aired": sickchill_status.get("aired"),
             "present_in_plex": plex_status.get("present"),

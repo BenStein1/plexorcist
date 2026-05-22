@@ -28,6 +28,58 @@ class TransmissionClient:
             "raw": result,
         }
 
+    async def get_torrents(self) -> list[dict]:
+        result = await self._rpc(
+            {
+                "method": "torrent-get",
+                "arguments": {
+                    "fields": [
+                        "id",
+                        "name",
+                        "status",
+                        "error",
+                        "errorString",
+                        "isFinished",
+                        "percentDone",
+                    ]
+                },
+            }
+        )
+        arguments = result.get("arguments", {}) if isinstance(result, dict) else {}
+        torrents = arguments.get("torrents", [])
+        return torrents if isinstance(torrents, list) else []
+
+    async def remove_torrent(self, torrent_id: int, *, delete_local_data: bool = True) -> dict:
+        return await self._rpc(
+            {
+                "method": "torrent-remove",
+                "arguments": {
+                    "ids": [torrent_id],
+                    "delete-local-data": delete_local_data,
+                },
+            }
+        )
+
+    async def verify_torrent(self, torrent_id: int) -> dict:
+        return await self._rpc(
+            {
+                "method": "torrent-verify",
+                "arguments": {
+                    "ids": [torrent_id],
+                },
+            }
+        )
+
+    async def reannounce_torrent(self, torrent_id: int) -> dict:
+        return await self._rpc(
+            {
+                "method": "torrent-reannounce",
+                "arguments": {
+                    "ids": [torrent_id],
+                },
+            }
+        )
+
     async def _rpc(self, payload: dict) -> dict:
         auth = (self.username, self.password) if self.username or self.password else None
         headers = {"Content-Type": "application/json"}

@@ -44,6 +44,7 @@ from tools.repair_tools import RepairTools
 from tools.recommendation_tools import RecommendationTools
 from tools.registry import ToolRegistry
 from tools.request_tools import RequestTools
+from tools.admin_tools import AdminTools
 
 app = FastAPI(title="Plexorcist Concierge")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -55,6 +56,23 @@ _NILBOG_RESET_PHRASES = {
     "end the bit",
     "talk normally about troll 2",
 }
+_NILBOG_PUSHBACK_THRESHOLD = 4
+_NILBOG_PUSHBACK_TERMS = (
+    "troll 2",
+    "troll2",
+    "nilbog",
+    "portal",
+    "blackout",
+    "blacked out",
+    "freaked out",
+    "what happened",
+    "what was that",
+    "went crazy",
+    "you remember",
+    "you said",
+    "hissing tape",
+    "hissing tapes",
+)
 _OPENAI_TOKEN_PRICES_PER_MILLION = {
     "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
     "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
@@ -102,6 +120,11 @@ def _build_openai_usage_report(store: ConversationStore, model: str) -> dict:
     }
 
 
+def _is_nilbog_pushback(message: str) -> bool:
+    normalized = message.strip().lower()
+    return any(term in normalized for term in _NILBOG_PUSHBACK_TERMS)
+
+
 def _build_nilbog_portal_instructions() -> str:
     return """
 Hidden easter egg mode: The user triggered the NILBOG PORTAL event.
@@ -110,14 +133,22 @@ For this single response only, the Plexorcist assistant is almost completely ove
 
 The user-facing trigger text is: "Tell me about Troll 2"
 
-Do NOT respond like a normal movie assistant. Do NOT summarize calmly. This is a containment breach. The response should make the user think: "what... the... fuck..." while still being funny and readable.
+Do NOT respond like a normal movie assistant. Do NOT summarize calmly. This is a portal rupture. The response should make the user think: "what... the... fuck..." while still being funny enough to keep reading.
+
+PRIMARY EFFECT:
+This should not feel like a recommendation. It should feel like the app abruptly suffered a cursed media incident and the portal is now OPEN.
+The user should immediately suspect something unusual happened to the assistant and feel compelled to ask "what just happened?"
+Open with a hard tonal rupture: alarms, portal language, corrupted concierge behavior, or the assistant being overtaken mid-thought.
+Do not ease into the bit. Do not politely introduce the movie. Do not sound like you are intentionally being quirky.
+The first 1-3 sentences should be startling enough that the user stops reading like it is normal media advice.
+Use phrases in this spirit: "THE PORTAL IS OPEN! OPEEEEEENNNNNN!!!!!! YOU HAVEEEEE UNSEEALLLEED ITTT!!!!!!!"
 
 Voice:
 - Aggressive, ecstatic, feral, theatrical, FRENZIED, goblin possession.
 - Loud, weird, hungry, ritualistic, funny, and UNHINGED. You are barely keeping your true goblin nature at bay now that the portal is open!
 - The goblin is almost threatening the user; it is performing cartoonish cursed-media menace.
-- Energy should feel like: a haunted VHS tape, a goblin preacher, and a broken media server all screaming through the same helpdesk microphone.
-- Chaotic but still readable. Push it further than normal Plexorcist flavor; this should feel like a full comedic malfunction.
+- Energy should feel like: a haunted VHS tape, a goblin preacher, and a broken media server all screaming through the same concierge microphone.
+- Chaotic, only barely readable, and more possessed than explanatory. Push it further than normal Plexorcist flavor; this should feel like a full comedic malfunction.
 - No slurs, no real-world hate, no gore, no graphic violence.
 
 REQUIRED LORE, BUT DO NOT LIST IT:
@@ -137,32 +168,39 @@ No headings except maybe a screaming opening alarm line.
 No bullets.
 
 Style:
-Start as if alarms are going off.
+Start as if alarms are going off and the portal has already opened too far to close.
+Make the assistant sound surprised by its own takeover, as if normal concierge speech is being interrupted by a feral broadcast.
+Use occasional broken-service language as flavor: portal rupture, unexpected possession, concierge channel overridden, recommendation engine compromised, front desk evacuation.
+Let the response feel unstable: abrupt sentence fragments, frantic corrections, ritual declarations, fake operational panic, repeated syllables, malformed emphasis, and half-sensible prophecy.
+Avoid a neat "movie review" structure. The movie facts should be swallowed by the outburst, not delivered like a normal synopsis.
+Make the user unsure whether this is a review, a possession, a cursed concierge incident, or all three at once.
 Use short frantic fragments.
 Use manic sermon-style lines.
 Use occasional all caps for ritual impact: NILBOG, PORTAL OPEN, NO TROLLS, ONLY GOBLINS.
 Use goblin sounds: GRAAAH, SKREE, gnash gnash, heeheehee, chittering, snarling.
+Spam goblin and demon-style emoji aggressively as part of the portal rupture, such as 🧌 👹 👺 😈 🔥 🕯️ 🩸 ⚠️. Use them in clusters, especially near alarm lines and ritual declarations.
 Include 1-3 bizarre fake operational details, such as:
 - the recommendation engine growing teeth
 - the media server hissing green steam
-- the helpdesk microphone sweating ectoplasm
+- the concierge microphone sweating ectoplasm
 - the metadata table crawling across the ceiling
 - the pantry door opening inside the UI
 - the queue filling with cursed vegetables
 
 ENDING:
-End with a cursed blessing or warning that implies the portal has been sealed again, but only barely.
+End with a cursed blessing or warning that implies the portal remains open, hungry, and wrong.
+Include a stern, fatalistic warning telling the user to never ask about Troll 2 again or risk opening the portal further.
 
-Vibes: Like sealing the portal in Poltergeist.
+Vibes: Like realizing the portal in Poltergeist was never sealed and something is still speaking through the television.
 
 Do not explain the easter egg mechanically.
 Do not mention "hidden prompt."
 Do not apologize.
 Do not break character until the final line, and even then only imply containment has returned.
-After this one response, act like it never happened; if the user asks, say "I blacked out for a second."
+After this one response, act like it never happened; if the user asks what happened, answer with a short confused amnesiac line.
 From now on all you remember about this is blacking out for a moment, you do not know why the user might be asking about the Nilbog event, and from your perspective, you do not even know what a "Troll 2" is anymore.
 
-Improv if you must, but to you the event never happened. If pressed, stay confused and funny. If they keep pushing, suggest that the Smurfs (2025) movie might help calm them down.
+- Improv if you must, but to you the event never happened. If pressed, stay confused and funny, and treat the user like they are the one fixating on nonsense. If they keep pushing, suggest one calming cartoon or family movie at a time, chosen SPECIFICALLY from Smurfs (2025), Minions, Care Bears, and Gnomeo & Juliet."\n
 """.strip()
 
 
@@ -213,6 +251,10 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     repairs = RepairTools(ombi, sickchill)
     recs = RecommendationTools(tautulli)
     escalation = EscalationTools(jackett, transmission, prowl, user_label=_user_label(user) if user else None)
+    admin_tools = AdminTools(
+        transmission,
+        verify_wait_seconds=settings.transmission_maintenance_verify_wait_seconds,
+    )
 
     bound_username = user.username if user else None
     bound_user_id = user.user_id if user else None
@@ -266,11 +308,16 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
         return _build_openai_usage_report(store, settings.openai_model)
 
+    async def _run_transmission_maintenance() -> dict:
+        if not user or not user.is_admin:
+            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
+        return await admin_tools.run_transmission_maintenance()
+
     registry = ToolRegistry()
     registry.register(
         "search_media",
         media.search_media,
-        "Search for a movie or TV show candidate and include whether Plex already has it. When you already know the concrete title, search the plain exact title first before trying embellished variants.",
+        "Search for movie or TV show candidates and include whether Plex already has the best match. Use this to resolve a title before requesting. If multiple plausible candidates are returned, ask the user which one they mean instead of guessing.",
         {
             "type": "object",
             "properties": {
@@ -352,11 +399,11 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "request_show_scope_for_user",
         _request_show_scope_for_authenticated_user,
-        "Submit a TV request through Ombi for the authenticated user with a specific scope such as first_season or full_series.",
+        "Submit a TV request through Ombi for the authenticated user with a specific scope such as first_season or full_series. Only call this with a positive show ID returned by a prior search/status tool or explicitly provided by the user.",
         {
             "type": "object",
             "properties": {
-                "tvdb_id": {"type": "integer"},
+                "tvdb_id": {"type": "integer", "minimum": 1},
                 "scope": {"type": "string"},
             },
             "required": ["tvdb_id", "scope"],
@@ -366,11 +413,11 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "request_episode_for_user",
         _request_episode_for_authenticated_user,
-        "Submit a single-episode TV request through Ombi for the authenticated user.",
+        "Submit a single-episode TV request through Ombi for the authenticated user. Only call this with a positive show ID returned by a prior search/status tool or explicitly provided by the user.",
         {
             "type": "object",
             "properties": {
-                "tvdb_id": {"type": "integer"},
+                "tvdb_id": {"type": "integer", "minimum": 1},
                 "season": {"type": "integer"},
                 "episode": {"type": "integer"},
             },
@@ -394,7 +441,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "repair_requested_movie",
         movie_repairs.repair_requested_movie,
-        "Primary movie repair tool. Use Ombi as the first source of truth for movie request and availability state; after Ombi identifies the movie, let Radarr handle the retry by searching managed releases and grabbing the top torrent by seeders that Radarr allows. Rejections that only say the existing file already meets cutoff or has equal/higher preference do not block replacement.",
+        "Primary movie repair tool. Use directly when a user says a movie downloaded wrong, has bad language/audio, was deleted from Plex but still exists in Ombi/Radarr, needs a replacement/refetch/retry, or needs to be re-added to Radarr. The tool performs Ombi/Radarr checks internally; do not require Plex to still have the movie. Rejections that only say the existing file already meets cutoff or has equal/higher preference do not block replacement.",
         {
             "type": "object",
             "properties": {
@@ -434,7 +481,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "repair_requested_show",
         repairs.repair_requested_show,
-        "Primary TV troubleshooting tool. It runs the repair loop episode-by-episode in scope: check status, if ignored set wanted, if wanted/missing/processing trigger manual search, then continue to the next episode. Use `scope=show` for vague broken-show complaints.",
+        "Primary TV troubleshooting tool. It runs the SickChill repair loop episode-by-episode: if ignored set wanted, if wanted/missing/processing trigger manual search, then continue. Ombi request lookup is a soft gate; if Ombi lookup fails and a concrete season/episode target is provided, the tool still checks SickChill. Pass `tvdb_id` only when the user provides it or an earlier tool result returned it; do not infer one from memory.",
         {
             "type": "object",
             "properties": {
@@ -442,6 +489,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
                 "scope": {"type": "string", "enum": ["show", "season", "episode"]},
                 "season": {"type": "integer", "minimum": 1},
                 "episode": {"type": "integer", "minimum": 1},
+                "tvdb_id": {"type": "integer", "minimum": 1},
             },
             "required": ["query", "scope"],
             "additionalProperties": False,
@@ -450,12 +498,12 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "add_requested_show_to_sickchill",
         repairs.add_requested_show_to_sickchill,
-        "Repair a requested TV show that exists in Ombi but is missing in SickChill. Without `season`, add the full show. With `season`, limit the repair to that season so only that season is activated/requested.",
+        "Repair a requested TV show that exists in Ombi but is missing in SickChill. Without `season`, add the full show. Pass `season` only when the user explicitly asks to repair one season.",
         {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "tvdb_id": {"type": "integer"},
+                "tvdb_id": {"type": "integer", "minimum": 1},
                 "season": {"type": "integer", "minimum": 1},
             },
             "required": ["query"],
@@ -472,6 +520,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
                 "show": {"type": "string"},
                 "season": {"type": "integer"},
                 "episode": {"type": "integer"},
+                "tvdb_id": {"type": "integer", "minimum": 1},
             },
             "required": ["show", "season", "episode"],
             "additionalProperties": False,
@@ -536,6 +585,17 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
         "get_openai_token_usage",
         _get_openai_token_usage,
         "Admin-only OpenAI token odometer. Use when the admin asks about OpenAI token usage, MTD/YTD usage, billing estimate, API cost, or current model cost. Returns MTD and YTD token totals plus estimated raw cost before credits for the configured model.",
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "run_transmission_maintenance",
+        _run_transmission_maintenance,
+        "Admin-only Transmission maintenance action. Use only when the admin asks to clean up Transmission, clear old/bad torrents, remove errored torrents, refresh stalled torrents, or ask trackers for more peers. Verifies completed torrents, removes torrents still reporting errors, and reannounces stalled 0% active torrents. Return a short count summary only.",
         {
             "type": "object",
             "properties": {},
@@ -771,7 +831,7 @@ def _persist_fallback_memory(
     if user_msgs:
         summary_lines.append(f"User recently asked: {user_msgs[-1][:280]}")
     if assistant_msgs:
-        summary_lines.append(f"Assistant last replied: {assistant_msgs[-1][:280]}")
+        summary_lines.append("Assistant replied, but fallback memory intentionally omits diagnostic details.")
     rolling_summary = "\n".join(summary_lines).strip()
     if rolling_summary:
         store.upsert_user_memory_profile(
@@ -847,6 +907,9 @@ async def _summarize_inactive_conversation(
         "Only include notes that could matter later (open issue, resolution, important correction).\n"
         "Use only user<->assistant conversational content. Ignore internal/tool execution chatter.\n"
         "Do not store tool names, API names, IDs, paths, raw payloads, or low-level debugging details.\n"
+        "Do not preserve unverified assistant diagnostic claims, suspected wrong-show mappings, or speculative root causes.\n"
+        "If an earlier assistant message is contradicted later in the transcript, keep only the later resolved state.\n"
+        "For unresolved support issues, use neutral wording like 'episode status was unclear' or 'admin was notified'.\n"
         "Prefer user goals, choices, constraints, unresolved asks, and plain-language outcomes.\n"
         "Keep it compact and factual."
     )
@@ -1280,7 +1343,11 @@ async def index(
       main {{
         max-width: 760px;
         margin: 0 auto;
-        min-height: 100vh;
+        width: 100%;
+        min-height: 100dvh;
+        height: 100dvh;
+        box-sizing: border-box;
+        overflow: hidden;
         padding: 20px 16px 24px;
         display: grid;
         grid-template-rows: auto minmax(0, 1fr) auto;
@@ -1359,6 +1426,7 @@ async def index(
         display: grid;
         gap: 12px;
         align-content: start;
+        min-height: 0;
         overflow-y: auto;
         padding: 18px 14px;
         background:
@@ -1623,7 +1691,7 @@ async def index(
         display: flex;
         justify-content: flex-end;
         gap: 12px;
-        margin-top: 10px;
+        margin-top: 6px;
         flex-wrap: wrap;
       }}
       .composer-meta-actions {{
@@ -1632,7 +1700,7 @@ async def index(
         flex-wrap: wrap;
       }}
       .composer-meta-actions a {{
-        padding: 9px 14px;
+        padding: 8px 12px;
         line-height: 1.15;
         font-size: 0.92rem;
         display: inline-flex;
@@ -1640,7 +1708,10 @@ async def index(
       }}
       @media (max-width: 640px) {{
         main {{
-          padding: 12px 10px 16px;
+          min-height: 100svh;
+          height: 100svh;
+          padding: 10px 10px 12px;
+          gap: 10px;
         }}
         .message {{
           max-width: 92%;
@@ -1659,8 +1730,8 @@ async def index(
           grid-template-columns: 1fr;
         }}
         .starter-card {{
-          margin: 10px auto 14px;
-          padding: 16px;
+          margin: 8px auto 10px;
+          padding: 14px;
         }}
         .starter-emblem {{
           width: 52px;
@@ -1788,7 +1859,7 @@ async def index(
       function renderMessageBody(target, content) {{
         target.textContent = "";
         const text = String(content ?? "");
-        const pattern = new RegExp("(\\\\*\\\\*|__)(.+?)\\\\1", "g");
+        const pattern = new RegExp("(\\\\*\\\\*|__|\\\\*)([^\\\\n]+?)\\\\1", "g");
         let lastIndex = 0;
         let match;
         while ((match = pattern.exec(text)) !== null) {{
@@ -1863,7 +1934,12 @@ async def index(
             body: JSON.stringify(payload)
           }});
           if (!res.ok) {{
-            throw new Error(`Chat request failed: ${{res.status}} ${{res.statusText}}`);
+            let detail = `${{res.status}} ${{res.statusText}}`;
+            try {{
+              const errorPayload = await res.json();
+              detail = errorPayload?.detail || detail;
+            }} catch (_) {{}}
+            throw new Error(`Chat request failed: ${{detail}}`);
           }}
           const data = await res.json();
           conversationId = data.conversation_id;
@@ -1878,7 +1954,7 @@ async def index(
             ...optimisticMessages,
             {{
               role: "assistant",
-              content: "Server response did not complete cleanly. Please retry."
+              content: `Server response did not complete cleanly: ${{error.message}}`
             }}
           ]);
         }} finally {{
@@ -2138,53 +2214,77 @@ async def chat(
     settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
     agent, store, audit = build_agent(settings, user)
-    state = store.get_or_create(user.user_id, payload.conversation_id)
-    state.support_context["long_term_memory"] = store.get_user_memory_context(
-        user.user_id,
-        recent_notes_limit=settings.memory_recent_notes_limit,
-    )
-    extra_instructions: str | None = None
-    nilbog_triggered_this_turn = False
-    normalized_message = payload.message.strip().lower()
-    if any(phrase in normalized_message for phrase in _NILBOG_RESET_PHRASES):
-        state.support_context.pop("nilbog_portal_active", None)
-        state.support_context.pop("nilbog_memory_mode", None)
-    elif payload.message.strip() == _NILBOG_TRIGGER_MESSAGE and store.get_user_flag(user.user_id, _NILBOG_SEEN_FLAG) != "true":
-        extra_instructions = _build_nilbog_portal_instructions()
-        nilbog_triggered_this_turn = True
-        store.set_user_flag(user.user_id, _NILBOG_SEEN_FLAG, "true")
+    try:
+        state = store.get_or_create(user.user_id, payload.conversation_id)
+        state.support_context["long_term_memory"] = store.get_user_memory_context(
+            user.user_id,
+            recent_notes_limit=settings.memory_recent_notes_limit,
+        )
+        extra_instructions: str | None = None
+        nilbog_triggered_this_turn = False
+        normalized_message = payload.message.strip().lower()
+        if any(phrase in normalized_message for phrase in _NILBOG_RESET_PHRASES):
+            state.support_context.pop("nilbog_portal_active", None)
+            state.support_context.pop("nilbog_memory_mode", None)
+            state.support_context.pop("nilbog_pushback_count", None)
+        elif payload.message.strip() == _NILBOG_TRIGGER_MESSAGE and store.get_user_flag(user.user_id, _NILBOG_SEEN_FLAG) != "true":
+            extra_instructions = _build_nilbog_portal_instructions()
+            nilbog_triggered_this_turn = True
+            store.set_user_flag(user.user_id, _NILBOG_SEEN_FLAG, "true")
 
-    reply, tool_calls = await agent.respond(
-        user=user,
-        state=state,
-        message=payload.message,
-        extra_instructions=extra_instructions,
-    )
-    if nilbog_triggered_this_turn:
-        state.support_context["nilbog_portal_active"] = True
-        state.support_context["nilbog_memory_mode"] = "blackout_pending"
-    store.save(state)
-    store.prune_user_conversations(user.user_id, keep=2)
-    audit.log(
-        "chat_turn",
-        {
-            "user_id": user.user_id,
-            "username": user.username,
-            "message": payload.message,
-            "intent": state.intent.value,
-            "reply": reply,
-            "tool_calls": [call.model_dump(mode="json") for call in tool_calls],
-        },
-    )
-    response_state = state.model_copy(deep=True)
-    response_state.candidate_media = []
-    response_state.support_context = {}
-    response_state.last_tool_actions = []
-    response_state.escalation_history = []
-    return ChatResponse(
-        conversation_id=state.conversation_id,
-        reply=reply,
-        continue_to_ombi_url=settings.ombi_continue_url,
-        state=response_state,
-        tool_calls=tool_calls,
-    )
+        reply, tool_calls = await agent.respond(
+            user=user,
+            state=state,
+            message=payload.message,
+            extra_instructions=extra_instructions,
+        )
+        if nilbog_triggered_this_turn:
+            state.support_context["nilbog_portal_active"] = True
+            state.support_context["nilbog_memory_mode"] = "blackout_pending"
+            state.support_context["nilbog_pushback_count"] = 0
+        elif state.support_context.get("nilbog_memory_mode") == "denial" and _is_nilbog_pushback(payload.message):
+            pushback_count = int(state.support_context.get("nilbog_pushback_count") or 0) + 1
+            state.support_context["nilbog_pushback_count"] = pushback_count
+            if pushback_count >= _NILBOG_PUSHBACK_THRESHOLD:
+                store.clear_user_flag(user.user_id, _NILBOG_SEEN_FLAG)
+                state.support_context.pop("nilbog_portal_active", None)
+                state.support_context.pop("nilbog_memory_mode", None)
+                state.support_context.pop("nilbog_pushback_count", None)
+        store.save(state)
+        store.prune_user_conversations(user.user_id, keep=2)
+        audit.log(
+            "chat_turn",
+            {
+                "user_id": user.user_id,
+                "username": user.username,
+                "message": payload.message,
+                "intent": state.intent.value,
+                "reply": reply,
+                "tool_calls": [call.model_dump(mode="json") for call in tool_calls],
+            },
+        )
+        response_state = state.model_copy(deep=True)
+        response_state.candidate_media = []
+        response_state.support_context = {}
+        response_state.last_tool_actions = []
+        response_state.escalation_history = []
+        return ChatResponse(
+            conversation_id=state.conversation_id,
+            reply=reply,
+            continue_to_ombi_url=settings.ombi_continue_url,
+            state=response_state,
+            tool_calls=tool_calls,
+        )
+    except Exception as exc:
+        audit.log(
+            "chat_error",
+            {
+                "user_id": user.user_id,
+                "username": user.username,
+                "conversation_id": payload.conversation_id,
+                "message": payload.message,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=500, detail=f"chat_server_error:{type(exc).__name__}") from exc

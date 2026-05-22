@@ -14,7 +14,14 @@ class MediaSearchTools:
         top = results["results"][0] if results["results"] else None
         plex_query = top.get("title") if isinstance(top, dict) and top.get("title") else query
         plex = await self.plex.check_availability(plex_query)
-        return {"query": query, "candidate": top, "plex": plex}
+        return {
+            "query": query,
+            "effective_query": results.get("effective_query") or query,
+            "attempted_queries": results.get("attempted_queries") or [query],
+            "candidate": top,
+            "candidates": results.get("results", [])[:5],
+            "plex": plex,
+        }
 
     async def check_movie_availability(self, title: str) -> dict:
         return await self.plex.check_movie_availability(title=title)

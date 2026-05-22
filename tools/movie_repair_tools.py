@@ -6,6 +6,7 @@ import httpx
 
 from clients.ombi_client import OmbiClient
 from clients.radarr_client import RadarrClient
+from tools.error_helpers import classify_http_error, service_action, user_error_summary
 
 
 class MovieRepairTools:
@@ -17,17 +18,27 @@ class MovieRepairTools:
         try:
             existing = await self.ombi.check_existing_media_status(query=query)
         except httpx.HTTPError as exc:
+            error = classify_http_error(service="ombi", operation="multi_search", exc=exc)
             return {
                 "ok": False,
+                "tool_name": "repair_requested_movie",
                 "query": query,
-                "action": "ombi_unreachable",
+                "action": service_action(error),
                 "reason": str(exc),
+                **error,
+                "user_summary": user_error_summary(
+                    tool_family="Movie repair",
+                    error=error,
+                    title=query,
+                    change_status="Radarr repair did not start; nothing was changed.",
+                ),
             }
 
         best_match = existing.get("best_match") or {}
         if best_match.get("type") != "movie" or not best_match.get("title"):
             return {
                 "ok": False,
+                "tool_name": "repair_requested_movie",
                 "query": query,
                 "action": "movie_not_found",
                 "reason": "movie_not_found",
@@ -42,6 +53,7 @@ class MovieRepairTools:
         if not requested and not available:
             return {
                 "ok": False,
+                "tool_name": "repair_requested_movie",
                 "query": query,
                 "title": title,
                 "tmdb_id": tmdb_id,
@@ -54,15 +66,24 @@ class MovieRepairTools:
         try:
             movies = await self.radarr.get_managed_movies()
         except httpx.HTTPError as exc:
+            error = classify_http_error(service="radarr", operation="managed_movie_lookup", exc=exc)
             return {
                 "ok": False,
+                "tool_name": "repair_requested_movie",
                 "query": query,
                 "title": title,
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
-                "action": "radarr_unreachable",
+                "action": service_action(error),
                 "reason": str(exc),
+                **error,
+                "user_summary": user_error_summary(
+                    tool_family="Movie repair",
+                    error=error,
+                    title=title,
+                    change_status="Nothing was changed.",
+                ),
             }
 
         managed_movie = self._find_managed_movie(movies, tmdb_id=tmdb_id, title=title)
@@ -95,6 +116,7 @@ class MovieRepairTools:
         try:
             releases = await self.radarr.get_releases(movie_id=movie_id)
         except httpx.HTTPError as exc:
+            error = classify_http_error(service="radarr", operation="release_search", exc=exc)
             return {
                 "ok": False,
                 "query": query,
@@ -102,9 +124,16 @@ class MovieRepairTools:
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
-                "action": "radarr_release_search_failed",
+                "action": service_action(error),
                 "reason": str(exc),
                 "radarr_movie_id": movie_id,
+                **error,
+                "user_summary": user_error_summary(
+                    tool_family="Movie repair",
+                    error=error,
+                    title=title,
+                    change_status="Nothing was changed.",
+                ),
             }
 
         normalized_releases = [self._normalize_release(item) for item in releases if isinstance(item, dict)]
@@ -205,6 +234,7 @@ class MovieRepairTools:
         try:
             grab_result = await self.radarr.grab_release(grab_payload)
         except httpx.HTTPError as exc:
+            error = classify_http_error(service="radarr", operation="release_grab", exc=exc)
             return {
                 "ok": False,
                 "query": query,
@@ -212,11 +242,18 @@ class MovieRepairTools:
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
-                "action": "radarr_grab_failed",
+                "action": service_action(error),
                 "reason": str(exc),
                 "radarr_movie_id": movie_id,
                 "selected_release": selected,
                 "grab_payload": grab_payload,
+                **error,
+                "user_summary": user_error_summary(
+                    tool_family="Movie repair",
+                    error=error,
+                    title=title,
+                    change_status="Nothing was changed.",
+                ),
             }
 
         return {

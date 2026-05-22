@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     transmission_host: str = env_field(default="http://localhost:9091", env="TRANSMISSION_HOST")
     transmission_user: str | None = env_field(default=None, env="TRANSMISSION_USER")
     transmission_password: str | None = env_field(default=None, env="TRANSMISSION_PASSWORD")
+    transmission_maintenance_verify_wait_seconds: int = env_field(
+        default=30,
+        env="TRANSMISSION_MAINTENANCE_VERIFY_WAIT_SECONDS",
+    )
     prowl_api_key: str | None = env_field(default=None, env="PROWL_API_KEY")
     openai_api_key: str | None = env_field(default=None, env="OPENAI_API_KEY")
     login_notify_enabled: bool = env_field(default=True, env="LOGIN_NOTIFY_ENABLED")

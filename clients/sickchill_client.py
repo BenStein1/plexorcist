@@ -89,8 +89,20 @@ class SickChillClient(BaseHttpClient):
             "reason": None if ok else payload.get("message") or "show_add_failed",
         }
 
-    async def check_episode_status(self, show: str, season: int, episode: int) -> dict:
-        show_info = await self._resolve_show(show)
+    async def check_episode_status(
+        self,
+        show: str,
+        season: int,
+        episode: int,
+        expected_indexer_id: int | None = None,
+    ) -> dict:
+        show_info = (
+            await self._resolve_show_by_indexer_id(expected_indexer_id)
+            if expected_indexer_id is not None
+            else None
+        )
+        if expected_indexer_id is None and not show_info:
+            show_info = await self._resolve_show(show)
         if isinstance(show_info, dict) and show_info.get("backend_connected") is False:
             return {
                 "show": show,
@@ -103,6 +115,20 @@ class SickChillClient(BaseHttpClient):
                 "backend_connected": False,
                 "reason": show_info.get("error") or "sickchill_unreachable",
             }
+        if self._is_show_resolution_error(show_info):
+            return {
+                "show": show,
+                "season": season,
+                "episode": episode,
+                "status": "unknown",
+                "aired": None,
+                "present_in_sickchill": False,
+                "manual_search_eligible": False,
+                "backend_connected": True,
+                "show_found": False,
+                "reason": show_info.get("reason"),
+                "candidates": show_info.get("candidates", []),
+            }
         if not show_info:
             return {
                 "show": show,
@@ -114,7 +140,10 @@ class SickChillClient(BaseHttpClient):
                 "manual_search_eligible": False,
                 "backend_connected": True,
                 "show_found": False,
-                "reason": "show_not_found_in_sickchill",
+                "expected_indexer_id": expected_indexer_id,
+                "reason": "expected_show_not_found_in_sickchill"
+                if expected_indexer_id is not None
+                else "show_not_found_in_sickchill",
             }
 
         indexer_id = self._show_indexer_id(show_info)
@@ -132,6 +161,7 @@ class SickChillClient(BaseHttpClient):
                 "show_info": show_info,
                 "reason": "show_missing_indexer_id",
             }
+        id_mismatch = expected_indexer_id is not None and expected_indexer_id != indexer_id
 
         episode_info = await self._get_episode(indexer_id, season, episode)
         if episode_info.get("error"):
@@ -165,6 +195,8 @@ class SickChillClient(BaseHttpClient):
             "backend_connected": True,
             "show_found": True,
             "show_info": show_info,
+            "expected_indexer_id": expected_indexer_id,
+            "indexer_id_mismatch": id_mismatch,
             "episode_info": episode_info,
         }
 
@@ -180,6 +212,18 @@ class SickChillClient(BaseHttpClient):
                 "backend_connected": False,
                 "show_found": False,
                 "reason": show_info.get("error") or "sickchill_unreachable",
+            }
+        if self._is_show_resolution_error(show_info):
+            return {
+                "ok": False,
+                "show": show,
+                "season": season,
+                "episode": episode,
+                "status": "unknown",
+                "backend_connected": True,
+                "show_found": False,
+                "reason": show_info.get("reason"),
+                "candidates": show_info.get("candidates", []),
             }
         if not show_info:
             return {
@@ -348,6 +392,17 @@ class SickChillClient(BaseHttpClient):
                 "show_found": False,
                 "reason": show_info.get("error") or "sickchill_unreachable",
             }
+        if self._is_show_resolution_error(show_info):
+            return {
+                "ok": False,
+                "show": show,
+                "season": season,
+                "action": "clear_ignored_episodes_unavailable",
+                "backend_connected": True,
+                "show_found": False,
+                "reason": show_info.get("reason"),
+                "candidates": show_info.get("candidates", []),
+            }
         if not show_info:
             return {
                 "ok": False,
@@ -456,7 +511,10 @@ class SickChillClient(BaseHttpClient):
         episodes: list[int],
         expected_indexer_id: int | None = None,
     ) -> dict:
-        show_info = await self._resolve_show(show)
+        original_expected_indexer_id = expected_indexer_id
+        show_info = await self._resolve_show_by_indexer_id(expected_indexer_id) if expected_indexer_id is not None else None
+        if expected_indexer_id is None and not show_info:
+            show_info = await self._resolve_show(show)
         if isinstance(show_info, dict) and show_info.get("backend_connected") is False:
             return {
                 "ok": False,
@@ -467,6 +525,17 @@ class SickChillClient(BaseHttpClient):
                 "show_found": False,
                 "reason": show_info.get("error") or "sickchill_unreachable",
             }
+        if self._is_show_resolution_error(show_info):
+            return {
+                "ok": False,
+                "show": show,
+                "season": season,
+                "action": "season_repair_unavailable",
+                "backend_connected": True,
+                "show_found": False,
+                "reason": show_info.get("reason"),
+                "candidates": show_info.get("candidates", []),
+            }
         if not show_info:
             return {
                 "ok": False,
@@ -475,7 +544,10 @@ class SickChillClient(BaseHttpClient):
                 "action": "season_repair_unavailable",
                 "backend_connected": True,
                 "show_found": False,
-                "reason": "show_not_found_in_sickchill",
+                "expected_indexer_id": original_expected_indexer_id,
+                "reason": "expected_show_not_found_in_sickchill"
+                if original_expected_indexer_id is not None
+                else "show_not_found_in_sickchill",
             }
 
         indexer_id = self._show_indexer_id(show_info)
@@ -490,20 +562,8 @@ class SickChillClient(BaseHttpClient):
                 "show_info": show_info,
                 "reason": "show_missing_indexer_id",
             }
-        if expected_indexer_id is not None and indexer_id != expected_indexer_id:
-            return {
-                "ok": False,
-                "show": show,
-                "season": season,
-                "action": "season_repair_unavailable",
-                "backend_connected": True,
-                "show_found": False,
-                "show_info": show_info,
-                "indexer_id": indexer_id,
-                "expected_indexer_id": expected_indexer_id,
-                "reason": "sickchill_show_mismatch",
-            }
-
+        resolved_show = str(show_info.get("show_name") or show)
+        id_mismatch = original_expected_indexer_id is not None and original_expected_indexer_id != indexer_id
         results: list[dict[str, Any]] = []
         changed_count = 0
         for episode in sorted({int(ep) for ep in episodes}):
@@ -516,10 +576,10 @@ class SickChillClient(BaseHttpClient):
                     continue
                 before_status = str(before.get("status") or "unknown").lower()
                 row["from_status"] = before_status
-                if not self._episode_has_aired(before.get("airdate")):
+                if before_status == "unaired" or not self._episode_has_aired(before.get("airdate")):
                     row.update({"ok": True, "action": "not_aired_yet"})
-                elif before_status == "ignored":
-                    wanted_result = await self.ensure_episode_wanted(show=show, season=season, episode=episode)
+                elif before_status in {"ignored", "skipped"}:
+                    wanted_result = await self.ensure_episode_wanted(show=resolved_show, season=season, episode=episode)
                     if wanted_result.get("ok"):
                         changed_count += 1
                         row.update({"ok": True, "action": "marked_wanted", "to_status": wanted_result.get("status")})
@@ -532,7 +592,7 @@ class SickChillClient(BaseHttpClient):
                             }
                         )
                 elif before_status in {"wanted", "missing", "processing"}:
-                    search_result = await self.trigger_manual_search(show=show, season=season, episode=episode)
+                    search_result = await self.trigger_manual_search(show=resolved_show, season=season, episode=episode)
                     row.update(
                         {
                             "ok": bool(search_result.get("ok")),
@@ -553,16 +613,98 @@ class SickChillClient(BaseHttpClient):
 
         return {
             "ok": all(row.get("ok") for row in results),
-            "show": show,
+            "show": resolved_show,
             "season": season,
             "action": "season_repair_attempted",
             "backend_connected": True,
             "show_found": True,
             "show_info": show_info,
             "indexer_id": indexer_id,
+            "expected_indexer_id": original_expected_indexer_id,
+            "indexer_id_mismatch": id_mismatch,
             "changed_count": changed_count,
             "target_episode_count": len(results),
             "search_results": results,
+        }
+
+    async def episode_numbers_for_season(
+        self,
+        show: str,
+        season: int,
+        expected_indexer_id: int | None = None,
+    ) -> dict[str, Any]:
+        original_expected_indexer_id = expected_indexer_id
+        show_info = await self._resolve_show_by_indexer_id(expected_indexer_id) if expected_indexer_id is not None else None
+        if expected_indexer_id is None and not show_info:
+            show_info = await self._resolve_show(show)
+        if isinstance(show_info, dict) and show_info.get("backend_connected") is False:
+            return {
+                "ok": False,
+                "show": show,
+                "season": season,
+                "backend_connected": False,
+                "show_found": False,
+                "reason": show_info.get("error") or "sickchill_unreachable",
+            }
+        if self._is_show_resolution_error(show_info):
+            return {
+                "ok": False,
+                "show": show,
+                "season": season,
+                "backend_connected": True,
+                "show_found": False,
+                "reason": show_info.get("reason"),
+                "candidates": show_info.get("candidates", []),
+            }
+        if not show_info:
+            return {
+                "ok": False,
+                "show": show,
+                "season": season,
+                "backend_connected": True,
+                "show_found": False,
+                "expected_indexer_id": original_expected_indexer_id,
+                "reason": "expected_show_not_found_in_sickchill"
+                if original_expected_indexer_id is not None
+                else "show_not_found_in_sickchill",
+            }
+
+        indexer_id = self._show_indexer_id(show_info)
+        if indexer_id is None:
+            return {
+                "ok": False,
+                "show": show,
+                "season": season,
+                "backend_connected": True,
+                "show_found": True,
+                "show_info": show_info,
+                "reason": "show_missing_indexer_id",
+            }
+        id_mismatch = original_expected_indexer_id is not None and original_expected_indexer_id != indexer_id
+
+        season_requests = show_info.get("seasonRequests") or []
+        episodes: list[int] = []
+        for season_request in season_requests:
+            season_number = self._maybe_int(season_request.get("seasonNumber"))
+            if season_number != season:
+                continue
+            for episode_info in season_request.get("episodes") or []:
+                episode_number = self._maybe_int(episode_info.get("episodeNumber"))
+                if isinstance(episode_number, int) and episode_number > 0:
+                    episodes.append(episode_number)
+
+        return {
+            "ok": bool(episodes),
+            "show": str(show_info.get("show_name") or show),
+            "season": season,
+            "backend_connected": True,
+            "show_found": True,
+            "show_info": show_info,
+            "indexer_id": indexer_id,
+            "expected_indexer_id": original_expected_indexer_id,
+            "indexer_id_mismatch": id_mismatch,
+            "episodes": sorted(set(episodes)),
+            "reason": None if episodes else "season_episode_list_unavailable",
         }
 
     async def check_episode_file(self, show: str, season: int, episode: int) -> dict:
@@ -577,6 +719,18 @@ class SickChillClient(BaseHttpClient):
                 "backend_connected": False,
                 "show_found": False,
                 "reason": show_info.get("error") or "sickchill_unreachable",
+            }
+        if self._is_show_resolution_error(show_info):
+            return {
+                "show": show,
+                "season": season,
+                "episode": episode,
+                "exists": None,
+                "path": None,
+                "backend_connected": True,
+                "show_found": False,
+                "reason": show_info.get("reason"),
+                "candidates": show_info.get("candidates", []),
             }
         if not show_info:
             return {
@@ -636,11 +790,18 @@ class SickChillClient(BaseHttpClient):
         data = self._unwrap_data(shows_payload)
         candidates = self._collect_show_candidates(data)
         normalized = self._normalize(show)
+        if not normalized:
+            return None
         exact = [item for item in candidates if self._normalize(item.get("show_name")) == normalized]
-        if exact:
+        if len(exact) == 1:
             return exact[0]
-        if candidates:
-            return candidates[0]
+        if len(exact) > 1:
+            return {
+                "resolution_error": True,
+                "backend_connected": True,
+                "reason": "show_ambiguous_in_sickchill",
+                "candidates": self._summarize_show_candidates(exact),
+            }
         return None
 
     async def _resolve_show_by_indexer_id(self, indexer_id: int) -> dict[str, Any] | None:
@@ -754,6 +915,22 @@ class SickChillClient(BaseHttpClient):
 
     def _normalize(self, value: Any) -> str:
         return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+    def _is_show_resolution_error(self, value: Any) -> bool:
+        return isinstance(value, dict) and bool(value.get("resolution_error"))
+
+    def _summarize_show_candidates(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        summarized: list[dict[str, Any]] = []
+        for candidate in candidates[:10]:
+            summarized.append(
+                {
+                    "show_name": candidate.get("show_name"),
+                    "indexerid": self._show_indexer_id(candidate),
+                    "network": candidate.get("network"),
+                    "status": candidate.get("status"),
+                }
+            )
+        return summarized
 
     def _episode_has_aired(self, airdate: Any) -> bool:
         if not airdate:

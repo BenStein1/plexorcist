@@ -61,14 +61,26 @@ class OmbiClient(BaseHttpClient):
         return {"UserName": username}
 
     async def search_media(self, query: str) -> dict:
+        effective_query = query
+        attempted_queries = [query]
         payload = await self._search_multi(query)
         if not payload:
             payload = await self._search_fallback(query)
+        broader_query = self._strip_year(query)
+        if not payload and broader_query and broader_query != query:
+            attempted_queries.append(broader_query)
+            payload = await self._search_multi(broader_query)
+            if not payload:
+                payload = await self._search_fallback(broader_query)
+            if payload:
+                effective_query = broader_query
         if not isinstance(payload, list):
-            return {"query": query, "results": [], "source": "ombi"}
+            return {"query": query, "effective_query": effective_query, "attempted_queries": attempted_queries, "results": [], "source": "ombi"}
         payload = self._rank_results(query, payload)
         return {
             "query": query,
+            "effective_query": effective_query,
+            "attempted_queries": attempted_queries,
             "results": [self._normalize_search_item(item) for item in payload],
             "source": "ombi",
         }
@@ -210,6 +222,10 @@ class OmbiClient(BaseHttpClient):
         }
 
     async def request_show_scope_for_user(self, username: str, tvdb_id: int, scope: str) -> dict:
+        safe_tvdb_id = self._safe_int(tvdb_id)
+        if not safe_tvdb_id or safe_tvdb_id <= 0:
+            return self._missing_show_identifier(username=username, tvdb_id=tvdb_id, scope=scope)
+        tvdb_id = safe_tvdb_id
         detail = await self.get_tv_detail(tvdb_id)
         if scope == "full_series":
             gate = self._gate_request(detail, tv_scope=scope)
@@ -245,6 +261,16 @@ class OmbiClient(BaseHttpClient):
         return {"ok": True, "username": username, "tvdb_id": tvdb_id, "scope": scope, "status": "requested", "ombi": result}
 
     async def request_episode_for_user(self, username: str, tvdb_id: int, season: int, episode: int) -> dict:
+        safe_tvdb_id = self._safe_int(tvdb_id)
+        if not safe_tvdb_id or safe_tvdb_id <= 0:
+            return self._missing_show_identifier(
+                username=username,
+                tvdb_id=tvdb_id,
+                scope="episode",
+                season=season,
+                episode=episode,
+            )
+        tvdb_id = safe_tvdb_id
         detail = await self.get_tv_detail(tvdb_id)
         episode_state = self._find_episode(detail, season, episode)
         if episode_state is not None:
@@ -352,11 +378,18 @@ class OmbiClient(BaseHttpClient):
                 }
         return {
             "query": query,
+            "effective_query": search.get("effective_query") or query,
+            "attempted_queries": search.get("attempted_queries") or [query],
             "username": username,
             "exists_in_ombi": bool(match),
             "status": self._extract_request_status(detail or match.get("raw") or {}),
             "tvdb_id": match.get("tvdb_id"),
             "title": detail.get("title") or match.get("title") or query.title(),
+            "candidates": [
+                self._summarize_show_candidate(item)
+                for item in shows[:5]
+                if item.get("tvdb_id")
+            ],
             "raw": detail or match.get("raw") or {},
         }
 
@@ -460,7 +493,7 @@ class OmbiClient(BaseHttpClient):
                 fallback = await self.search_media(broader_query)
                 if fallback.get("results"):
                     search = fallback
-                    effective_query = broader_query
+                    effective_query = fallback.get("effective_query") or broader_query
         candidates: list[dict] = []
         for item in search.get("results", []):
             if item.get("type") == "movie" and item.get("tmdb_id"):
@@ -523,8 +556,11 @@ class OmbiClient(BaseHttpClient):
                 candidates.append(
                     {
                         "title": (request_lookup.get("title") if request_lookup else None) or detail.get("title") or item.get("title"),
+                        "year": self._extract_year(str(detail.get("firstAired") or raw.get("firstAired") or "")),
                         "type": "show",
                         "tvdb_id": item.get("tvdb_id"),
+                        "network": detail.get("network") or raw.get("network"),
+                        "overview": detail.get("overview") or raw.get("overview"),
                         "requested": requested,
                         "available": bool(detail.get("available")),
                         "partly_available": bool(detail.get("partlyAvailable")),
@@ -576,6 +612,43 @@ class OmbiClient(BaseHttpClient):
             "episodes": episodes,
             "is_ongoing": bool(item.get("status") in {"Returning Series", "Continuing"}),
             "raw": item,
+        }
+
+    def _missing_show_identifier(
+        self,
+        username: str,
+        tvdb_id: object,
+        scope: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> dict:
+        payload: dict[str, object] = {
+            "ok": False,
+            "username": username,
+            "tvdb_id": tvdb_id,
+            "scope": scope,
+            "status": "missing_show_identifier",
+            "action": "show_identifier_required",
+            "reason": "show_requests_require_positive_tvdb_id",
+            "next_step": "resolve_show_candidate",
+        }
+        if season is not None:
+            payload["season"] = season
+        if episode is not None:
+            payload["episode"] = episode
+        return payload
+
+    def _summarize_show_candidate(self, item: dict) -> dict:
+        raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+        return {
+            "title": item.get("title"),
+            "year": item.get("year") or self._extract_year(str(raw.get("firstAired") or "")),
+            "type": item.get("type"),
+            "tvdb_id": item.get("tvdb_id"),
+            "network": raw.get("network"),
+            "overview": raw.get("overview"),
+            "requested": bool(raw.get("requested")),
+            "available": bool(raw.get("available") or raw.get("fullyAvailable")),
         }
 
     def _extract_request_status(self, item: dict) -> str:
