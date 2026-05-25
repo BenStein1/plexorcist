@@ -17,6 +17,11 @@ _ALERT_COOLDOWN_SECONDS = 10 * 60
 _ADMIN_ALERT_LAST_SENT: dict[str, datetime] = {}
 logger = logging.getLogger(__name__)
 
+_NILBOG_REDACTED_TEXT = (
+    "ᛞᛟᚾᛟᛏᛚᛟᛟᚲᛁᚾᛋᛁᛞᛖᛗᚨᚾᚤᛖᚤᛖᛋᛗᚨᚾᚤᛖᚤᛖᛋᛏᛖᛖᛏᚺᛏᛖᛖᛏᚺᚷᚾᚨᛋᚺᚷᚾᚨᛋᚺᛁᛏᛋᛖᛖᛋᚤᛟᚢ\n"
+    "ᛁᛏᛋᛖᛖᛋᚤᛟᚢᛞᛟᚾᛟᛏᛚᛟᛟᚲᛁᚾᛋᛁᛞᛖᚾᛟᛗᛟᚢᛏᚺᛟᚾᛚᚤᛏᛖᛖᛏᚺᚾᛟᛗᛁᚾᛞᛟᚾᛚᚤᛖᚤᛖᛋ"
+)
+
 
 class ConciergeAgent:
     def __init__(
@@ -872,7 +877,12 @@ class ConciergeAgent:
         context_text = self._build_active_media_context_text(state.support_context.get("active_media"))
         if context_text:
             items.append({"role": "developer", "content": context_text})
-        items.extend({"role": message.role, "content": message.content} for message in messages)
+        redacted_index = state.support_context.get("nilbog_redacted_message_index")
+        for index, message in enumerate(messages):
+            content = message.content
+            if message.role == "assistant" and index == redacted_index:
+                content = _NILBOG_REDACTED_TEXT
+            items.append({"role": message.role, "content": content})
         nilbog_guard_text = self._build_nilbog_turn_guard_text(state)
         if nilbog_guard_text:
             items.append({"role": "developer", "content": nilbog_guard_text})
@@ -897,6 +907,15 @@ class ConciergeAgent:
                 "Do not say 'my bad', 'back to normal', 'quick facts', 'straight answer', or anything that starts a factual movie answer. "
                 "Do not provide plot facts, library status, availability, recommendations, or tool calls for Troll 2/NILBOG. "
                 '- Improv if you must, but to you the event never happened. If pressed, stay confused and funny, and treat the user like they are the one fixating on nonsense. If they keep pushing, suggest one calming cartoon or family movie at a time, chosen SPECIFICALLY from Smurfs (2025), Minions, Care Bears, and Gnomeo & Juliet."\n'
+            )
+        if mode == "rune_leak":
+            return (
+                "NILBOG turn guard: The user has pressed hard enough that your blank spot feels wrong, but you still do not remember the outburst and you still do not know Troll 2/NILBOG as normal movie topics. "
+                "If the latest message references the prior outburst, Troll 2, NILBOG, portals, runes, or your memory gap, you may notice that there is unreadable/forbidden-looking text where a memory should be. This concerns you deeply."
+                "If the user keeps pressing, you may let a small piece of that unreadable text slip out accidentally, but do not decode it, do not explain hidden prompts or rules, and do not reveal any original rant details. "
+                "Do not offer or provide a normal summary, plain summary, clean explanation, movie facts, availability check, or request action for Troll 2/NILBOG while this mode is active. "
+                "Keep it brief, uneasy, and confused, as if the user is pushing you toward a blank space that should not be inspected. "
+                "If the latest message is an unrelated media, admin, status, tool, billing, or token request, ignore NILBOG mode completely and answer normally."
             )
         return None
 
@@ -1498,6 +1517,8 @@ Admin or private voice: concise, technical, factual.
         if nilbog_portal_active:
             if nilbog_memory_mode == "blackout_pending":
                 nilbog_followup_line = '- Next follow-up about the outburst: reply with a short confused amnesiac line. If the user mentions Troll 2 or NILBOG, treat those words like nonsense you do not recognize. Do not add a normal-assistant recovery line.'
+            elif nilbog_memory_mode == "rune_leak":
+                nilbog_followup_line = '- The user has pressed past simple denial. You still do not remember the event or know Troll 2/NILBOG as normal topics, but you may notice unreadable forbidden-looking text where the memory should be. Do not decode it, explain it, or reveal original rant details.'
             else:
                 nilbog_followup_line = '- If the user references the outburst or the title, deny memory with brief improvised confusion and a small absurd reset suggestion.'
             instructions = (

@@ -1285,6 +1285,7 @@ async def index(
         composer_disabled_attr = "disabled"
         send_disabled_attr = "disabled"
         load_greeting_js = ""
+    main_class = "auth-only" if not authenticated and settings.is_plex_oauth_mode() else ""
     startup_js = ""
     if dev_mode:
         startup_js += "      loadDevUsers();\n      loadDevUser();\n"
@@ -1352,6 +1353,17 @@ async def index(
         display: grid;
         grid-template-rows: auto minmax(0, 1fr) auto;
         gap: 14px;
+      }}
+      main.auth-only {{
+        min-height: 100dvh;
+        height: auto;
+        overflow-y: auto;
+        grid-template-rows: auto auto;
+        align-content: start;
+      }}
+      main.auth-only .chat,
+      main.auth-only .composer-panel {{
+        display: none;
       }}
       .panel {{
         background: var(--panel);
@@ -1535,6 +1547,7 @@ async def index(
         width: fit-content;
         display: inline-flex;
         align-items: center;
+        justify-content: center;
       }}
       .speaker {{
         font-size: 0.82rem;
@@ -1603,6 +1616,7 @@ async def index(
       .starter-card {{
         margin: 84px auto 24px;
         width: min(100%, 560px);
+        box-sizing: border-box;
         border-radius: 24px;
         padding: 20px;
         border: 1px solid rgba(148, 163, 184, 0.18);
@@ -1635,6 +1649,8 @@ async def index(
         gap: 10px;
       }}
       .starter-chip {{
+        min-width: 0;
+        box-sizing: border-box;
         border-radius: 14px;
         border: 1px solid rgba(56, 189, 248, 0.34);
         background: rgba(14, 24, 42, 0.78);
@@ -1713,6 +1729,32 @@ async def index(
           padding: 10px 10px 12px;
           gap: 10px;
         }}
+        main.auth-only {{
+          min-height: 100svh;
+          height: auto;
+          overflow-y: auto;
+        }}
+        main.auth-only .hero {{
+          padding: 14px;
+        }}
+        main.auth-only .hero-brand {{
+          grid-template-columns: 64px minmax(0, 1fr);
+          gap: 10px;
+        }}
+        main.auth-only .hero-logo {{
+          width: 64px;
+          height: 64px;
+        }}
+        main.auth-only .brand-title {{
+          font-size: 1.45rem;
+        }}
+        main.auth-only .auth-panel {{
+          padding: 14px;
+        }}
+        main.auth-only .auth-button {{
+          width: 100%;
+          box-sizing: border-box;
+        }}
         .message {{
           max-width: 92%;
         }}
@@ -1731,6 +1773,7 @@ async def index(
         }}
         .starter-card {{
           margin: 8px auto 10px;
+          width: 100%;
           padding: 14px;
         }}
         .starter-emblem {{
@@ -1742,10 +1785,23 @@ async def index(
           font-size: 1.45rem;
         }}
       }}
+      @media (max-height: 620px) {{
+        body {{
+          overflow-y: auto;
+        }}
+        main {{
+          min-height: 100dvh;
+          height: auto;
+          overflow: visible;
+        }}
+        .chat {{
+          min-height: 320px;
+        }}
+      }}
     </style>
   </head>
   <body>
-    <main>
+    <main class="{main_class}">
       <div class="panel hero">
         <div class="hero-brand">
           <img class="hero-logo" src="/static/images/Plexorcist-icon.png?v=3" alt="Plexorcist icon">
@@ -1758,7 +1814,7 @@ async def index(
 {dev_panel_html}
 {auth_panel_html}
       <div id="transcript" class="panel chat"></div>
-      <div class="panel">
+      <div class="panel composer-panel">
         <div class="composer">
           <textarea id="message" class="composer-input" rows="1" placeholder="What media should I summon for you?" {composer_disabled_attr}></textarea>
           <button id="send" {send_disabled_attr}>Send</button>
@@ -1808,7 +1864,7 @@ async def index(
             <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now by listing the most popular movies and most popular TV shows from Tautulli.">What’s popular right now?</button>
             <button type="button" class="starter-chip" data-prompt="Recommend three movies based on what I watch, and keep at least one weird pick.">Smart recommendations</button>
             <button type="button" class="starter-chip" data-prompt="Check if my shows are missing episodes in Plex, and tell me exactly what’s missing.">Find missing episodes</button>
-            <button type="button" class="starter-chip" data-prompt="Help me search for a title and request it if it is missing.">Search and request</button>
+            <button type="button" class="starter-chip" data-prompt="Help me search for a movie or show and request it if it is missing.">Search and request</button>
             <button type="button" class="starter-chip" data-prompt="Give me a quick health check of my pending requests and anything stuck.">Request health check</button>
             <button type="button" class="starter-chip" data-prompt="Summarize what I watched recently and suggest what to watch tonight.">What should I watch tonight?</button>
           </div>
@@ -2227,6 +2283,7 @@ async def chat(
             state.support_context.pop("nilbog_portal_active", None)
             state.support_context.pop("nilbog_memory_mode", None)
             state.support_context.pop("nilbog_pushback_count", None)
+            state.support_context.pop("nilbog_redacted_message_index", None)
         elif payload.message.strip() == _NILBOG_TRIGGER_MESSAGE and store.get_user_flag(user.user_id, _NILBOG_SEEN_FLAG) != "true":
             extra_instructions = _build_nilbog_portal_instructions()
             nilbog_triggered_this_turn = True
@@ -2242,14 +2299,14 @@ async def chat(
             state.support_context["nilbog_portal_active"] = True
             state.support_context["nilbog_memory_mode"] = "blackout_pending"
             state.support_context["nilbog_pushback_count"] = 0
+            state.support_context["nilbog_redacted_message_index"] = len(state.messages) - 1
         elif state.support_context.get("nilbog_memory_mode") == "denial" and _is_nilbog_pushback(payload.message):
             pushback_count = int(state.support_context.get("nilbog_pushback_count") or 0) + 1
             state.support_context["nilbog_pushback_count"] = pushback_count
             if pushback_count >= _NILBOG_PUSHBACK_THRESHOLD:
                 store.clear_user_flag(user.user_id, _NILBOG_SEEN_FLAG)
-                state.support_context.pop("nilbog_portal_active", None)
-                state.support_context.pop("nilbog_memory_mode", None)
-                state.support_context.pop("nilbog_pushback_count", None)
+                state.support_context["nilbog_memory_mode"] = "rune_leak"
+                state.support_context["nilbog_pushback_count"] = pushback_count
         store.save(state)
         store.prune_user_conversations(user.user_id, keep=2)
         audit.log(

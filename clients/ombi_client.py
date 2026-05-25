@@ -247,6 +247,19 @@ class OmbiClient(BaseHttpClient):
                 headers=self._user_headers(username),
             )
         except httpx.HTTPError as exc:
+            reconciled = await self._reconcile_show_request_failure(query=detail.get("title") or str(tvdb_id))
+            if reconciled is not None:
+                reconciled.update(
+                    {
+                        "username": username,
+                        "tvdb_id": tvdb_id,
+                        "scope": scope,
+                        "title": detail.get("title"),
+                        "ombi_detail": detail,
+                        "request_payload": payload,
+                    }
+                )
+                return reconciled
             return {
                 "ok": False,
                 "username": username,
@@ -258,7 +271,33 @@ class OmbiClient(BaseHttpClient):
                 "ombi_detail": detail,
                 "request_payload": payload,
             }
-        return {"ok": True, "username": username, "tvdb_id": tvdb_id, "scope": scope, "status": "requested", "ombi": result}
+        normalized = self._normalize_request_engine_result(
+            result=result,
+            success_status="requested",
+            error_context={
+                "username": username,
+                "tvdb_id": tvdb_id,
+                "scope": scope,
+                "title": detail.get("title"),
+                "ombi_detail": detail,
+                "request_payload": payload,
+            },
+        )
+        if not normalized.get("ok"):
+            reconciled = await self._reconcile_show_request_failure(query=detail.get("title") or str(tvdb_id))
+            if reconciled is not None:
+                reconciled.update(
+                    {
+                        "username": username,
+                        "tvdb_id": tvdb_id,
+                        "scope": scope,
+                        "title": detail.get("title"),
+                        "ombi_detail": detail,
+                        "request_payload": payload,
+                    }
+                )
+                return reconciled
+        return normalized
 
     async def request_episode_for_user(self, username: str, tvdb_id: int, season: int, episode: int) -> dict:
         safe_tvdb_id = self._safe_int(tvdb_id)
@@ -740,6 +779,24 @@ class OmbiClient(BaseHttpClient):
                 "status": request_state,
                 "ombi": status.get("raw") or {},
                 "request_reconciled": True,
+            }
+        return None
+
+    async def _reconcile_show_request_failure(self, query: str) -> dict[str, object] | None:
+        status = await self.check_show_request_status(query=query)
+        request_state = status.get("status")
+        if not status.get("exists_in_ombi"):
+            return None
+        if request_state in {"requested", "approved", "available", "fully_available", "partly_available"}:
+            title = status.get("title") or query
+            return {
+                "ok": True,
+                "status": request_state,
+                "title": title,
+                "tvdb_id": status.get("tvdb_id"),
+                "ombi": status.get("raw") or {},
+                "request_reconciled": True,
+                "user_summary": f"{title} is now requested in Ombi.",
             }
         return None
 
