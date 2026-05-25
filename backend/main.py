@@ -45,6 +45,7 @@ from tools.recommendation_tools import RecommendationTools
 from tools.registry import ToolRegistry
 from tools.request_tools import RequestTools
 from tools.admin_tools import AdminTools
+from tools.admin_alerts import AdminAlertReporter
 
 app = FastAPI(title="Plexorcist Concierge")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -243,6 +244,8 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
         password=settings.transmission_password,
     )
     prowl = ProwlClient(settings.prowl_api_key)
+    friendly_names = FriendlyNameDirectory(settings.friendly_names_path)
+    admin_alerts = AdminAlertReporter(prowl)
 
     media = MediaSearchTools(ombi, plex)
     requests = RequestTools(ombi)
@@ -253,6 +256,8 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     escalation = EscalationTools(jackett, transmission, prowl, user_label=_user_label(user) if user else None)
     admin_tools = AdminTools(
         transmission,
+        store=store,
+        friendly_names=friendly_names,
         verify_wait_seconds=settings.transmission_maintenance_verify_wait_seconds,
     )
 
@@ -313,7 +318,15 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
         return await admin_tools.run_transmission_maintenance()
 
-    registry = ToolRegistry()
+    async def _get_admin_task_summary(user_query: str | None = None, days: int = 30, limit: int = 20) -> dict:
+        if not user or not user.is_admin:
+            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
+        return await admin_tools.get_admin_task_summary(user_query=user_query, days=days, limit=limit)
+
+    async def _after_tool_call(tool_record) -> None:
+        await admin_alerts.report_tool_call(user, tool_record)
+
+    registry = ToolRegistry(after_call=_after_tool_call)
     registry.register(
         "search_media",
         media.search_media,
@@ -600,6 +613,20 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
             "type": "object",
             "properties": {},
             "required": [],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "get_admin_task_summary",
+        _get_admin_task_summary,
+        "Admin-only task dashboard. Use when the admin asks about open user tasks, unresolved user issues, pending user problems, or what a named user has pending. Reads compact memory/task summaries, not raw conversations. Friendly names, usernames, display names, and user IDs can be used in user_query.",
+        {
+            "type": "object",
+            "properties": {
+                "user_query": {"type": "string"},
+                "days": {"type": "integer", "minimum": 1, "maximum": 365},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
             "additionalProperties": False,
         },
     )

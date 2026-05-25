@@ -8,6 +8,7 @@ from backend.models import ToolCallRecord
 
 
 ToolHandler = Callable[..., Awaitable[dict[str, Any]]]
+AfterToolCall = Callable[[ToolCallRecord], Awaitable[None]]
 
 
 @dataclass
@@ -19,8 +20,9 @@ class ToolDefinition:
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(self, after_call: AfterToolCall | None = None) -> None:
         self._definitions: dict[str, ToolDefinition] = {}
+        self._after_call = after_call
 
     def register(
         self,
@@ -40,7 +42,10 @@ class ToolRegistry:
         if name not in self._definitions:
             raise ValueError(f"Unknown tool: {name}")
         result = await self._definitions[name].handler(**kwargs)
-        return ToolCallRecord(name=name, arguments=kwargs, result=result)
+        record = ToolCallRecord(name=name, arguments=kwargs, result=result)
+        if self._after_call is not None:
+            await self._after_call(record)
+        return record
 
     def openai_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []

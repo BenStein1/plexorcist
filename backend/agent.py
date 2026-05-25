@@ -488,6 +488,8 @@ class ConciergeAgent:
         result = tool_record.result if isinstance(tool_record.result, dict) else {}
         if result.get("suppress_auto_alert"):
             return None
+        if result.get("admin_alert_attempted") or result.get("admin_alert_sent"):
+            return None
         if name not in {
             "check_episode_status",
             "check_episode_file",
@@ -1461,6 +1463,7 @@ Security and boundaries:
 - Never make arbitrary API calls.
 - Only use safe backend tools provided to you.
 - Hide the machinery from normal users.
+- If an admin asks about open user tasks, unresolved user issues, pending user problems, or what a named/friendly user has pending, use `get_admin_task_summary`. Do not inspect raw conversations unless the admin explicitly asks for transcripts.
 
 Tool and system rules:
 - Only offer actions that map to an available tool. If no tool supports an action, say it is not currently available and offer the closest supported alternative.
