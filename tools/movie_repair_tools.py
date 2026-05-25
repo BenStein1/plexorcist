@@ -14,15 +14,39 @@ class MovieRepairTools:
         self.ombi = ombi
         self.radarr = radarr
 
-    async def repair_requested_movie(self, query: str) -> dict[str, Any]:
+    async def repair_requested_movie(
+        self,
+        title: str | None = None,
+        year: int | None = None,
+        issue: str | None = None,
+        query: str | None = None,
+    ) -> dict[str, Any]:
+        lookup_query = self._build_lookup_query(title=title, year=year, query=query)
+        issue = str(issue or "").strip() or None
+        if not lookup_query:
+            return {
+                "ok": False,
+                "tool_name": "repair_requested_movie",
+                "query": query,
+                "title": title,
+                "year": year,
+                "issue": issue,
+                "action": "movie_identity_required",
+                "reason": "movie_repair_requires_title_or_query",
+                "user_summary": "I need the movie title before I can run a Radarr repair.",
+            }
         try:
-            existing = await self.ombi.check_existing_media_status(query=query)
+            existing = await self.ombi.check_existing_media_status(query=lookup_query)
         except httpx.HTTPError as exc:
             error = classify_http_error(service="ombi", operation="multi_search", exc=exc)
             return {
                 "ok": False,
                 "tool_name": "repair_requested_movie",
                 "query": query,
+                "lookup_query": lookup_query,
+                "requested_title": title,
+                "requested_year": year,
+                "issue": issue,
                 "action": service_action(error),
                 "reason": str(exc),
                 **error,
@@ -40,12 +64,18 @@ class MovieRepairTools:
                 "ok": False,
                 "tool_name": "repair_requested_movie",
                 "query": query,
+                "lookup_query": lookup_query,
+                "requested_title": title,
+                "requested_year": year,
+                "issue": issue,
                 "action": "movie_not_found",
                 "reason": "movie_not_found",
                 "match": best_match,
             }
 
         title = str(best_match.get("title"))
+        matched_year = self._safe_int(best_match.get("year")) or year
+        display_title = self._display_title(title, matched_year)
         tmdb_id = self._safe_int(best_match.get("tmdb_id"))
         requested = bool(best_match.get("requested"))
         available = bool(best_match.get("available"))
@@ -55,7 +85,10 @@ class MovieRepairTools:
                 "ok": False,
                 "tool_name": "repair_requested_movie",
                 "query": query,
+                "lookup_query": lookup_query,
                 "title": title,
+                "year": matched_year,
+                "issue": issue,
                 "tmdb_id": tmdb_id,
                 "requested": False,
                 "available": available,
@@ -71,7 +104,10 @@ class MovieRepairTools:
                 "ok": False,
                 "tool_name": "repair_requested_movie",
                 "query": query,
+                "lookup_query": lookup_query,
                 "title": title,
+                "year": matched_year,
+                "issue": issue,
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
@@ -91,7 +127,10 @@ class MovieRepairTools:
             return {
                 "ok": False,
                 "query": query,
+                "lookup_query": lookup_query,
                 "title": title,
+                "year": matched_year,
+                "issue": issue,
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
@@ -104,7 +143,10 @@ class MovieRepairTools:
             return {
                 "ok": False,
                 "query": query,
+                "lookup_query": lookup_query,
                 "title": title,
+                "year": matched_year,
+                "issue": issue,
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
@@ -120,7 +162,10 @@ class MovieRepairTools:
             return {
                 "ok": False,
                 "query": query,
+                "lookup_query": lookup_query,
                 "title": title,
+                "year": matched_year,
+                "issue": issue,
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
@@ -162,7 +207,10 @@ class MovieRepairTools:
                 return {
                     "ok": True,
                     "query": query,
+                    "lookup_query": lookup_query,
                     "title": title,
+                    "year": matched_year,
+                    "issue": issue,
                     "tmdb_id": tmdb_id,
                     "requested": requested,
                     "available": available,
@@ -171,7 +219,7 @@ class MovieRepairTools:
                     "corrective_action_taken": True,
                     "download_in_progress": True,
                     "user_summary": (
-                        f"Radarr already has a download working for {title}: "
+                        f"Radarr already has a download working for {display_title}: "
                         f"'{release_title}'. It should arrive after that download/import completes."
                     ),
                     "radarr_movie_id": movie_id,
@@ -193,7 +241,10 @@ class MovieRepairTools:
                 return {
                     "ok": False,
                     "query": query,
+                    "lookup_query": lookup_query,
                     "title": title,
+                    "year": matched_year,
+                    "issue": issue,
                     "tmdb_id": tmdb_id,
                     "requested": requested,
                     "available": available,
@@ -209,7 +260,10 @@ class MovieRepairTools:
             return {
                 "ok": False,
                 "query": query,
+                "lookup_query": lookup_query,
                 "title": title,
+                "year": matched_year,
+                "issue": issue,
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
@@ -238,7 +292,10 @@ class MovieRepairTools:
             return {
                 "ok": False,
                 "query": query,
+                "lookup_query": lookup_query,
                 "title": title,
+                "year": matched_year,
+                "issue": issue,
                 "tmdb_id": tmdb_id,
                 "requested": requested,
                 "available": available,
@@ -259,7 +316,10 @@ class MovieRepairTools:
         return {
             "ok": True,
             "query": query,
+            "lookup_query": lookup_query,
             "title": title,
+            "year": matched_year,
+            "issue": issue,
             "tmdb_id": tmdb_id,
             "requested": requested,
             "available": available,
@@ -267,7 +327,7 @@ class MovieRepairTools:
             "corrective_action_taken": True,
             "download_in_progress": True,
             "user_summary": (
-                f"Submitted a Radarr download for {title}: '{selected['title']}'. "
+                f"Submitted a Radarr download for {display_title}: '{selected['title']}'. "
                 "It should arrive after that download/import completes."
             ),
             "radarr_movie_id": movie_id,
@@ -279,6 +339,20 @@ class MovieRepairTools:
             "grab_payload": grab_payload,
             "grab_result": grab_result,
         }
+
+    def _build_lookup_query(self, title: str | None, year: int | None, query: str | None) -> str:
+        clean_title = str(title or "").strip()
+        if clean_title:
+            safe_year = self._safe_int(year)
+            if safe_year:
+                return f"{clean_title} ({safe_year})"
+            return clean_title
+        return str(query or "").strip()
+
+    def _display_title(self, title: str, year: int | None) -> str:
+        if year:
+            return f"{title} ({year})"
+        return title
 
     def _find_managed_movie(
         self,

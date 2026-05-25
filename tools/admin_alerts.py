@@ -61,6 +61,8 @@ class AdminAlertReporter:
             return None
 
         show = str(result.get("show") or result.get("title") or "Unknown show")
+        issue = str(result.get("issue") or "").strip()
+        issue_text = f" Issue: {issue}." if issue else ""
         season = result.get("season")
         episode = result.get("episode")
         if season is not None and episode is not None:
@@ -217,7 +219,7 @@ class AdminAlertReporter:
                     "Corrective Action Taken",
                     (
                         f"User {self._user_label(user)} reported missing requested movie {show}; "
-                        f"I submitted a Radarr replacement grab for '{release_title}' ({seeders} seeders)."
+                        f"I submitted a Radarr replacement grab for '{release_title}' ({seeders} seeders).{issue_text}"
                     ),
                     0,
                 )
@@ -229,7 +231,7 @@ class AdminAlertReporter:
                     "Corrective Action Taken",
                     (
                         f"User {self._user_label(user)} reported missing requested movie {show}; "
-                        f"Radarr already has a replacement working for '{release_title}'."
+                        f"Radarr already has a replacement working for '{release_title}'.{issue_text}"
                     ),
                     0,
                 )
@@ -240,7 +242,7 @@ class AdminAlertReporter:
                     "Corrective Action Failed",
                     (
                         f"User {self._user_label(user)} reported missing requested movie {show}; "
-                        f"Radarr movie repair failed ({reason})."
+                        f"Radarr movie repair failed ({reason}).{issue_text}"
                     ),
                     1,
                 )
@@ -253,7 +255,7 @@ class AdminAlertReporter:
                     "Corrective Action Failed",
                     (
                         f"User {self._user_label(user)} reported missing requested movie {show}; "
-                        f"Radarr declined the attempted grab for '{release_title}' ({reason})."
+                        f"Radarr declined the attempted grab for '{release_title}' ({reason}).{issue_text}"
                     ),
                     1,
                 )
@@ -265,7 +267,7 @@ class AdminAlertReporter:
                     "Corrective Action Failed",
                     (
                         f"User {self._user_label(user)} reported missing requested movie {show}; "
-                        f"Radarr found releases but none were approved. Top release: {top_title}."
+                        f"Radarr found releases but none were approved. Top release: {top_title}.{issue_text}"
                     ),
                     1,
                 )
@@ -277,7 +279,7 @@ class AdminAlertReporter:
                     "Corrective Action Failed",
                     (
                         f"User {self._user_label(user)} reported missing requested movie {show}; "
-                        f"Radarr found a likely candidate but rejected it as Unknown Movie. Top release: {top_title}."
+                        f"Radarr found a likely candidate but rejected it as Unknown Movie. Top release: {top_title}.{issue_text}"
                     ),
                     1,
                 )

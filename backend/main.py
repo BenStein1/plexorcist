@@ -454,13 +454,15 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "repair_requested_movie",
         movie_repairs.repair_requested_movie,
-        "Primary movie repair tool. Use directly when a user says a movie downloaded wrong, has bad language/audio, was deleted from Plex but still exists in Ombi/Radarr, needs a replacement/refetch/retry, or needs to be re-added to Radarr. The tool performs Ombi/Radarr checks internally; do not require Plex to still have the movie. Rejections that only say the existing file already meets cutoff or has equal/higher preference do not block replacement.",
+        "Primary movie repair tool. Use directly when a user says a movie downloaded wrong, has bad language/audio, needs a replacement/refetch/retry, or needs to be re-added to Radarr. Pass clean movie identity in title/year, and put the complaint or desired action in issue. Do not include repair instructions or complaint text in title. The tool performs Ombi/Radarr checks internally and never deletes files.",
         {
             "type": "object",
             "properties": {
+                "title": {"type": "string"},
+                "year": {"type": "integer"},
+                "issue": {"type": "string"},
                 "query": {"type": "string"},
             },
-            "required": ["query"],
             "additionalProperties": False,
         },
     )
