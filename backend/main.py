@@ -318,10 +318,15 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
         return await admin_tools.run_transmission_maintenance()
 
-    async def _get_admin_task_summary(user_query: str | None = None, days: int = 30, limit: int = 20) -> dict:
+    async def _get_admin_task_summary(
+        user_query: str | None = None,
+        scope: str = "all_users",
+        days: int = 30,
+        limit: int = 20,
+    ) -> dict:
         if not user or not user.is_admin:
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return await admin_tools.get_admin_task_summary(user_query=user_query, days=days, limit=limit)
+        return await admin_tools.get_admin_task_summary(user_query=user_query, scope=scope, days=days, limit=limit)
 
     async def _after_tool_call(tool_record) -> None:
         await admin_alerts.report_tool_call(user, tool_record)
@@ -621,14 +626,16 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "get_admin_task_summary",
         _get_admin_task_summary,
-        "Admin-only task dashboard. Use when the admin asks about open user tasks, unresolved user issues, pending user problems, or what a named user has pending. Reads compact memory/task summaries, not raw conversations. Friendly names, usernames, display names, and user IDs can be used in user_query.",
+        "Admin-only task dashboard. Use when the admin asks about open user tasks, unresolved user issues, pending user problems, or what a named user has pending. Use scope=all_users for broad/system-wide questions like 'any open tasks' or 'anything new'. Use scope=specific_user only when the admin names a user/friendly name/username/user ID. Reads compact memory/task summaries, not raw conversations.",
         {
             "type": "object",
             "properties": {
                 "user_query": {"type": "string"},
+                "scope": {"type": "string", "enum": ["all_users", "specific_user"]},
                 "days": {"type": "integer", "minimum": 1, "maximum": 365},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             },
+            "required": ["scope"],
             "additionalProperties": False,
         },
     )

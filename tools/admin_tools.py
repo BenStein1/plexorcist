@@ -28,6 +28,7 @@ class AdminTools:
     async def get_admin_task_summary(
         self,
         user_query: str | None = None,
+        scope: str = "all_users",
         days: int = 30,
         limit: int = 20,
     ) -> dict[str, Any]:
@@ -41,7 +42,22 @@ class AdminTools:
 
         days = max(1, min(int(days or 30), 365))
         limit = max(1, min(int(limit or 20), 100))
+        scope = str(scope or "all_users").strip().lower()
+        if scope not in {"all_users", "specific_user"}:
+            scope = "all_users"
         query = (user_query or "").strip()
+        if scope == "all_users":
+            query = ""
+        elif not query:
+            return {
+                "ok": False,
+                "action": "admin_task_summary",
+                "reason": "user_query_required",
+                "scope": scope,
+                "days": days,
+                "limit": limit,
+                "user_summary": "I need a friendly name, username, or user ID to summarize tasks for a specific user.",
+            }
         rows = self._query_open_tasks(days=days, limit=limit * 5 if query else limit)
         users = self._load_user_labels()
         snapshots = self._load_latest_tier2_snapshots({str(row["user_id"]) for row in rows})
@@ -96,6 +112,7 @@ class AdminTools:
             "action": "admin_task_summary",
             "days": days,
             "limit": limit,
+            "scope": scope,
             "user_query": query or None,
             "task_count": len(tasks),
             "tasks": tasks,
