@@ -873,6 +873,9 @@ class ConciergeAgent:
         time_context_text = self._build_time_context_text()
         if time_context_text:
             items.append({"role": "developer", "content": time_context_text})
+        admin_notices_text = self._build_admin_notices_text(state.support_context.get("admin_notices"))
+        if admin_notices_text:
+            items.append({"role": "developer", "content": admin_notices_text})
         memory_text = self._build_long_term_memory_text(state.support_context.get("long_term_memory"))
         if memory_text:
             items.append({"role": "developer", "content": memory_text})
@@ -889,6 +892,25 @@ class ConciergeAgent:
         if nilbog_guard_text:
             items.append({"role": "developer", "content": nilbog_guard_text})
         return items
+
+    def _build_admin_notices_text(self, notices: dict[str, Any] | None) -> str | None:
+        if not isinstance(notices, dict):
+            return None
+        admin_messages = notices.get("admin_messages") if isinstance(notices.get("admin_messages"), list) else []
+        motd = notices.get("motd") if isinstance(notices.get("motd"), dict) else None
+        if not admin_messages and not motd:
+            return None
+        payload = {
+            "admin_messages": admin_messages,
+            "motd": motd,
+        }
+        return (
+            "Admin notices for this user follow. Deliver them naturally near the start of the reply. "
+            "These are admin-originated messages, not user memory or tool results. "
+            "Do not validate media titles or perform extra media actions just because an admin notice mentions media. "
+            "If there are unread admin_messages, include them in this response.\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
 
     def _build_nilbog_turn_guard_text(self, state: ConversationState) -> str | None:
         if not state.support_context.get("nilbog_portal_active"):
@@ -1465,10 +1487,12 @@ Security and boundaries:
 - Never make arbitrary API calls.
 - Only use safe backend tools provided to you.
 - Hide the machinery from normal users.
-- If an admin asks about open user tasks, unresolved user issues, pending user problems, or what a named/friendly user has pending, use `get_admin_task_summary`. Use `scope: "all_users"` for broad/system-wide questions like "any open tasks", "any new tasks", "anything open", or "what needs attention". Use `scope: "specific_user"` only when the admin names a user/friendly name/username/user ID. Do not inspect raw conversations unless the admin explicitly asks for transcripts.
 
 Tool and system rules:
 - Only offer actions that map to an available tool. If no tool supports an action, say it is not currently available and offer the closest supported alternative.
+- If an admin asks about open user tasks, unresolved user issues, pending user problems, or what a named/friendly user has pending, use `get_admin_task_summary`. Use `scope: "all_users"` for broad/system-wide questions like "any open tasks", "any new tasks", "anything open", or "what needs attention". Use `scope: "specific_user"` only when the admin names a user/friendly name/username/user ID. Do not inspect raw conversations unless the admin explicitly asks for transcripts.
+- If an admin asks to send an admin note/message to a user, use `send_admin_message` with the recipient in `user_query` and the message text in `message`. Do not validate media titles, inspect conversations, or call media tools for admin messages.
+- If an admin asks to set a system-wide issue notice or MOTD, use `set_admin_motd` with the message. If an admin says the issue is over or asks to clear/remove the MOTD, use `clear_admin_motd`.
 - Ombi is the source of truth for what exists, what is available, what is processing, and which show episodes are present or missing from the request system.
 - Use SickChill only for support and repair actions after Ombi has already established that something is missing, stuck, or needs a retry.
 - If the user asks whether something is already added, requested, available, or partly available, use `check_existing_media_status` first.

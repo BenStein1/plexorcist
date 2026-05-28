@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import contextlib
+import logging
 from html import escape
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -49,6 +50,7 @@ from tools.admin_alerts import AdminAlertReporter
 
 app = FastAPI(title="Plexorcist Concierge")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+logger = logging.getLogger(__name__)
 _MEMORY_SWEEP_TASK: asyncio.Task | None = None
 _NILBOG_TRIGGER_MESSAGE = "Tell me about Troll 2"
 _NILBOG_SEEN_FLAG = "nilbog_portal_seen"
@@ -118,6 +120,25 @@ def _build_openai_usage_report(store: ConversationStore, model: str) -> dict:
         "ytd": ytd,
         "other_models_present": bool(other_models),
         "other_models": other_models,
+    }
+
+
+def _load_admin_motd(store: ConversationStore) -> dict[str, object] | None:
+    raw = store.get_user_flag("__global__", "admin_motd")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = {"message": raw}
+    if not isinstance(payload, dict):
+        return None
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        return None
+    return {
+        "message": message,
+        "from_admin_name": payload.get("from_admin_name") or "Ben",
     }
 
 
@@ -327,6 +348,30 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
         if not user or not user.is_admin:
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
         return await admin_tools.get_admin_task_summary(user_query=user_query, scope=scope, days=days, limit=limit)
+
+    async def _send_admin_message(user_query: str, message: str) -> dict:
+        if not user or not user.is_admin:
+            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
+        return await admin_tools.send_admin_message(
+            user_query=user_query,
+            message=message,
+            sender_user_id=user.user_id,
+            sender_name=user.display_name or user.username or "Ben",
+        )
+
+    async def _set_admin_motd(message: str) -> dict:
+        if not user or not user.is_admin:
+            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
+        return await admin_tools.set_admin_motd(
+            message=message,
+            sender_user_id=user.user_id,
+            sender_name=user.display_name or user.username or "Ben",
+        )
+
+    async def _clear_admin_motd() -> dict:
+        if not user or not user.is_admin:
+            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
+        return await admin_tools.clear_admin_motd()
 
     async def _after_tool_call(tool_record) -> None:
         await admin_alerts.report_tool_call(user, tool_record)
@@ -636,6 +681,44 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             },
             "required": ["scope"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "send_admin_message",
+        _send_admin_message,
+        "Admin-only message delivery. Use when the admin asks to send an admin note/message to a user. Resolve only the user; do not validate media titles or call media tools. The message should preserve the admin's intended note in plain language.",
+        {
+            "type": "object",
+            "properties": {
+                "user_query": {"type": "string"},
+                "message": {"type": "string"},
+            },
+            "required": ["user_query", "message"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "set_admin_motd",
+        _set_admin_motd,
+        "Admin-only global message of the day. Use when the admin asks to set a system-wide MOTD or system issue notice. Do not validate media titles or call media tools.",
+        {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+            },
+            "required": ["message"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "clear_admin_motd",
+        _clear_admin_motd,
+        "Admin-only MOTD clear action. Use when the admin says the system issue is over or asks to clear/remove the MOTD.",
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
             "additionalProperties": False,
         },
     )
@@ -2312,6 +2395,24 @@ async def chat(
             user.user_id,
             recent_notes_limit=settings.memory_recent_notes_limit,
         )
+        unread_admin_messages = store.get_unread_admin_messages(user.user_id)
+        admin_message_ids = [int(item["id"]) for item in unread_admin_messages if item.get("id") is not None]
+        admin_notices = {
+            "admin_messages": [
+                {
+                    "id": item.get("id"),
+                    "message": item.get("content"),
+                    "from_admin_name": (item.get("metadata") or {}).get("from_admin_name") or "Ben",
+                    "created_at": item.get("created_at"),
+                }
+                for item in unread_admin_messages
+            ],
+            "motd": _load_admin_motd(store),
+        }
+        if admin_notices["admin_messages"] or admin_notices["motd"]:
+            state.support_context["admin_notices"] = admin_notices
+        else:
+            state.support_context.pop("admin_notices", None)
         extra_instructions: str | None = None
         nilbog_triggered_this_turn = False
         normalized_message = payload.message.strip().lower()
@@ -2344,6 +2445,11 @@ async def chat(
                 state.support_context["nilbog_memory_mode"] = "rune_leak"
                 state.support_context["nilbog_pushback_count"] = pushback_count
         store.save(state)
+        if admin_message_ids:
+            try:
+                store.mark_admin_messages_read(user.user_id, admin_message_ids)
+            except Exception:
+                logger.exception("Failed to mark admin messages read for user %s", user.user_id)
         store.prune_user_conversations(user.user_id, keep=2)
         audit.log(
             "chat_turn",

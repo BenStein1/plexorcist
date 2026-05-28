@@ -119,6 +119,107 @@ class AdminTools:
             "user_summary": summary,
         }
 
+    async def send_admin_message(
+        self,
+        user_query: str,
+        message: str,
+        sender_user_id: str,
+        sender_name: str = "Ben",
+    ) -> dict[str, Any]:
+        if self.store is None:
+            return {
+                "ok": False,
+                "action": "admin_message_unavailable",
+                "reason": "store_unavailable",
+                "user_summary": "Admin message delivery is unavailable because the memory store is not configured.",
+            }
+        message = str(message or "").strip()
+        if not message:
+            return {
+                "ok": False,
+                "action": "admin_message_not_queued",
+                "reason": "message_required",
+                "user_summary": "I need a message to send.",
+            }
+        resolved = self._resolve_user_query(user_query)
+        if not resolved.get("ok"):
+            return {
+                **resolved,
+                "action": "admin_message_not_queued",
+            }
+        recipient = resolved["user"]
+        self.store.add_user_memory_note(
+            user_id=recipient["user_id"],
+            note_type="admin_message",
+            content=message,
+            status="unread",
+            tier=1,
+            metadata={
+                "from_admin_user_id": sender_user_id,
+                "from_admin_name": sender_name,
+                "recipient_label": recipient["label"],
+                "created_by_tool": "send_admin_message",
+            },
+        )
+        return {
+            "ok": True,
+            "action": "admin_message_queued",
+            "recipient": recipient,
+            "recipient_label": recipient["label"],
+            "message": message,
+            "user_summary": f"Queued admin message for {recipient['label']}: {message}",
+        }
+
+    async def set_admin_motd(self, message: str, sender_user_id: str, sender_name: str = "Ben") -> dict[str, Any]:
+        if self.store is None:
+            return {
+                "ok": False,
+                "action": "admin_motd_unavailable",
+                "reason": "store_unavailable",
+                "user_summary": "MOTD is unavailable because the memory store is not configured.",
+            }
+        message = str(message or "").strip()
+        if not message:
+            return {
+                "ok": False,
+                "action": "admin_motd_not_set",
+                "reason": "message_required",
+                "user_summary": "I need MOTD text to set.",
+            }
+        self.store.set_user_flag(
+            "__global__",
+            "admin_motd",
+            json.dumps(
+                {
+                    "message": message,
+                    "from_admin_user_id": sender_user_id,
+                    "from_admin_name": sender_name,
+                }
+            ),
+        )
+        return {
+            "ok": True,
+            "action": "admin_motd_set",
+            "message": message,
+            "user_summary": f"MOTD set: {message}",
+        }
+
+    async def clear_admin_motd(self) -> dict[str, Any]:
+        if self.store is None:
+            return {
+                "ok": False,
+                "action": "admin_motd_unavailable",
+                "reason": "store_unavailable",
+                "user_summary": "MOTD is unavailable because the memory store is not configured.",
+            }
+        deleted = self.store.clear_user_flag("__global__", "admin_motd")
+        return {
+            "ok": True,
+            "action": "admin_motd_cleared",
+            "deleted": deleted,
+            "user_summary": "MOTD cleared." if deleted else "There was no active MOTD to clear.",
+        }
+
     async def run_transmission_maintenance(self) -> dict[str, Any]:
         try:
             torrents = await self.transmission.get_torrents()
@@ -290,11 +391,68 @@ class AdminTools:
                 else (display_name or username)
             )
             labels[user_id] = {
+                "user_id": user_id,
                 "username": username,
                 "display_name": display_name,
                 "friendly_name": friendly_name,
+                "label": self._format_user_label(user_id, {
+                    "username": username,
+                    "display_name": display_name,
+                    "friendly_name": friendly_name,
+                }),
             }
         return labels
+
+    def _resolve_user_query(self, user_query: str) -> dict[str, Any]:
+        query = str(user_query or "").strip().lower()
+        if not query:
+            return {
+                "ok": False,
+                "reason": "user_query_required",
+                "user_summary": "I need a friendly name, username, display name, or user ID.",
+            }
+        users = self._load_user_labels()
+        matches = []
+        for user_id, label in users.items():
+            values = {
+                user_id,
+                str(label.get("username") or ""),
+                str(label.get("display_name") or ""),
+                str(label.get("friendly_name") or ""),
+                str(label.get("label") or ""),
+            }
+            if any(query == value.lower() for value in values if value):
+                matches.append({**label, "user_id": user_id})
+        if not matches:
+            for user_id, label in users.items():
+                values = [
+                    user_id,
+                    str(label.get("username") or ""),
+                    str(label.get("display_name") or ""),
+                    str(label.get("friendly_name") or ""),
+                    str(label.get("label") or ""),
+                ]
+                if any(query in value.lower() for value in values if value):
+                    matches.append({**label, "user_id": user_id})
+        if not matches:
+            return {
+                "ok": False,
+                "reason": "user_not_found",
+                "user_query": user_query,
+                "user_summary": f"I could not find a user matching {user_query}.",
+            }
+        unique: dict[str, dict[str, str]] = {str(item["user_id"]): item for item in matches}
+        matches = list(unique.values())
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "reason": "user_ambiguous",
+                "user_query": user_query,
+                "candidates": matches[:10],
+                "user_summary": "That user match is ambiguous. Pick one: "
+                + ", ".join(str(item.get("label") or item.get("user_id")) for item in matches[:5]),
+            }
+        return {"ok": True, "user": matches[0]}
 
     def _load_latest_tier2_snapshots(self, user_ids: set[str]) -> dict[str, str]:
         if not user_ids:

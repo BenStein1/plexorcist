@@ -110,35 +110,35 @@ class ConversationStore:
             conn.execute("ALTER TABLE conversations ADD COLUMN memory_compaction_attempts INTEGER NOT NULL DEFAULT 0")
         if "memory_compaction_last_error" not in columns:
             conn.execute("ALTER TABLE conversations ADD COLUMN memory_compaction_last_error TEXT")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_memory_notes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL,
-                    note_type TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    task_id TEXT,
-                    status TEXT NOT NULL,
-                    tier INTEGER NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_memory_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                note_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                task_id TEXT,
+                status TEXT NOT NULL,
+                tier INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_memory_snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL,
-                    tier INTEGER NOT NULL,
-                    summary TEXT NOT NULL,
-                    source_span_start TEXT,
-                    source_span_end TEXT,
-                    created_at TEXT NOT NULL
-                )
-                """
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_memory_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                tier INTEGER NOT NULL,
+                summary TEXT NOT NULL,
+                source_span_start TEXT,
+                source_span_end TEXT,
+                created_at TEXT NOT NULL
             )
+            """
+        )
 
     def get_or_create(self, user_id: str, conversation_id: str | None = None) -> ConversationState:
         if conversation_id:
@@ -578,6 +578,59 @@ class ConversationStore:
             )
             return int(cursor.rowcount or 0)
 
+    def get_unread_admin_messages(self, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        import json
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, content, metadata_json, created_at
+                FROM user_memory_notes
+                WHERE user_id = ?
+                  AND note_type = 'admin_message'
+                  AND status = 'unread'
+                ORDER BY datetime(created_at) ASC
+                LIMIT ?
+                """,
+                (user_id, max(1, int(limit))),
+            ).fetchall()
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = {}
+            try:
+                metadata = json.loads(row[2] or "{}")
+            except Exception:
+                metadata = {}
+            messages.append(
+                {
+                    "id": row[0],
+                    "content": row[1],
+                    "metadata": metadata,
+                    "created_at": row[3],
+                }
+            )
+        return messages
+
+    def mark_admin_messages_read(self, user_id: str, message_ids: list[int]) -> int:
+        ids = [int(item) for item in message_ids if item is not None]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE user_memory_notes
+                SET status = 'read', updated_at = ?
+                WHERE user_id = ?
+                  AND note_type = 'admin_message'
+                  AND status = 'unread'
+                  AND id IN ({placeholders})
+                """,
+                (now, user_id, *ids),
+            )
+            return int(cursor.rowcount or 0)
+
     def add_user_memory_note(
         self,
         user_id: str,
@@ -654,6 +707,7 @@ class ConversationStore:
                 WHERE id IN (
                     SELECT id FROM user_memory_notes
                     WHERE user_id = ? AND tier = 1
+                      AND NOT (note_type = 'admin_message' AND status = 'unread')
                     ORDER BY updated_at DESC
                     LIMIT -1 OFFSET ?
                 )
