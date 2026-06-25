@@ -28,6 +28,7 @@ from backend.logging import AuditLogger, configure_logging
 from backend.models import ChatRequest, ChatResponse, DevImpersonationRequest, PlexAuthSession, UserContext
 from backend.state import ConversationStore
 from clients.jackett_client import JackettClient
+from clients.llm import LlmClient, LlmProviderConfig, UsageRecorder, build_llm_client
 from clients.ombi_client import OmbiClient
 from clients.plex_auth_client import PlexAuthClient
 from clients.plex_client import PlexClient
@@ -36,7 +37,6 @@ from clients.radarr_client import RadarrClient
 from clients.sickchill_client import SickChillClient
 from clients.tautulli_client import TautulliClient
 from clients.transmission_client import TransmissionClient
-from clients.openai_client import OpenAIResponsesClient
 from tools.escalation_tools import EscalationTools
 from tools.episode_tools import EpisodeTools
 from tools.media_search import MediaSearchTools
@@ -121,6 +121,20 @@ def _build_openai_usage_report(store: ConversationStore, model: str) -> dict:
         "other_models_present": bool(other_models),
         "other_models": other_models,
     }
+
+
+def _build_llm_client(settings: Settings, usage_recorder: UsageRecorder | None) -> LlmClient | None:
+    return build_llm_client(
+        LlmProviderConfig(
+            provider=settings.llm_provider,
+            model=settings.effective_llm_model,
+            timeout_seconds=float(max(30, int(settings.effective_llm_request_timeout_seconds))),
+            openai_api_key=settings.openai_api_key,
+            anthropic_api_key=settings.anthropic_api_key,
+            ollama_base_url=settings.effective_ollama_base_url,
+        ),
+        usage_recorder=usage_recorder,
+    )
 
 
 def _load_admin_motd(store: ConversationStore) -> dict[str, object] | None:
@@ -332,7 +346,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     async def _get_openai_token_usage() -> dict:
         if not user or not user.is_admin:
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return _build_openai_usage_report(store, settings.openai_model)
+        return _build_openai_usage_report(store, settings.effective_llm_model)
 
     async def _run_transmission_maintenance() -> dict:
         if not user or not user.is_admin:
@@ -349,11 +363,12 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
         return await admin_tools.get_admin_task_summary(user_query=user_query, scope=scope, days=days, limit=limit)
 
-    async def _send_admin_message(user_query: str, message: str) -> dict:
+    async def _send_admin_message(message: str, user_query: str | None = None, task_query: str | None = None) -> dict:
         if not user or not user.is_admin:
             return {"ok": False, "action": "admin_required", "reason": "admin_only"}
         return await admin_tools.send_admin_message(
             user_query=user_query,
+            task_query=task_query,
             message=message,
             sender_user_id=user.user_id,
             sender_name=user.display_name or user.username or "Ben",
@@ -687,14 +702,15 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     registry.register(
         "send_admin_message",
         _send_admin_message,
-        "Admin-only message delivery. Use when the admin asks to send an admin note/message to a user. Resolve only the user; do not validate media titles or call media tools. The message should preserve the admin's intended note in plain language.",
+        "Admin-only message delivery. Use when the admin asks to send an admin note/message to a user. If the admin names a user, pass that in user_query. If the admin says whoever/requester/person tied to a title or issue, pass the title/issue in task_query and leave user_query empty so the backend resolves the affected user from open tasks. Do not guess the recipient from prior chat prose. Do not validate media titles or call media tools. The message should preserve the admin's intended note in plain language.",
         {
             "type": "object",
             "properties": {
                 "user_query": {"type": "string"},
+                "task_query": {"type": "string"},
                 "message": {"type": "string"},
             },
-            "required": ["user_query", "message"],
+            "required": ["message"],
             "additionalProperties": False,
         },
     )
@@ -787,14 +803,11 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     return (
         ConciergeAgent(
             registry,
-            model=settings.openai_model,
-            openai_api_key=settings.openai_api_key,
-            openai_timeout_seconds=float(max(30, int(settings.openai_request_timeout_seconds))),
             ombi_continue_url=settings.ombi_continue_url,
+            llm_client=_build_llm_client(settings, store.record_openai_token_usage),
             admin_label=settings.admin_display_name or "the admin",
             prowl=prowl,
             movie_direct_source_enabled=settings.movie_direct_source_enabled,
-            openai_usage_recorder=store.record_openai_token_usage,
         ),
         store,
         AuditLogger(),
@@ -917,22 +930,6 @@ def _parse_json_from_text(text: str) -> dict:
     return {}
 
 
-def _extract_response_text(response: dict) -> str:
-    direct = response.get("output_text")
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
-    chunks: list[str] = []
-    for item in response.get("output", []):
-        if not isinstance(item, dict) or item.get("type") != "message":
-            continue
-        for content in item.get("content", []):
-            if not isinstance(content, dict):
-                continue
-            if content.get("type") in {"output_text", "text"} and content.get("text"):
-                chunks.append(str(content.get("text")))
-    return "\n".join(chunk for chunk in chunks if chunk).strip()
-
-
 def _persist_fallback_memory(
     *,
     user: UserContext,
@@ -997,7 +994,8 @@ async def _summarize_inactive_conversation(
             reason="local_summary_only",
             source=source,
         )
-    if not settings.openai_api_key:
+    client = _build_llm_client(settings, store.record_openai_token_usage)
+    if client is None:
         return {"status": "skipped_no_api_key", "notes_added": 0}
     transcript = [
         {"role": msg.role, "content": msg.content}
@@ -1009,12 +1007,6 @@ async def _summarize_inactive_conversation(
     existing_memory = store.get_user_memory_context(
         user.user_id,
         recent_notes_limit=settings.memory_recent_notes_limit,
-    )
-    client = OpenAIResponsesClient(
-        settings.openai_api_key,
-        settings.openai_model,
-        timeout_seconds=float(max(30, int(settings.openai_request_timeout_seconds))),
-        usage_recorder=store.record_openai_token_usage,
     )
     instructions = (
         "Summarize this completed user interaction into durable memory JSON.\n"
@@ -1046,10 +1038,10 @@ async def _summarize_inactive_conversation(
         {"role": "user", "content": json.dumps(transcript, ensure_ascii=False)},
     ]
     try:
-        response = await client.create_response(
+        response = await client.generate_response(
             instructions="Produce strict JSON only.",
             input_items=input_items,
-            tools=[],
+            tool_schemas=[],
             usage_context={
                 "user_id": user.user_id,
                 "username": user.username,
@@ -1059,7 +1051,7 @@ async def _summarize_inactive_conversation(
         )
     except Exception as exc:
         return {"status": f"error_openai:{type(exc).__name__}", "notes_added": 0}
-    text = _extract_response_text(response)
+    text = response.text
     payload = _parse_json_from_text(text)
     if not isinstance(payload, dict):
         return {"status": "error_non_json_summary", "notes_added": 0}
@@ -2034,7 +2026,7 @@ async def index(
       function renderMessageBody(target, content) {{
         target.textContent = "";
         const text = String(content ?? "");
-        const pattern = new RegExp("(\\\\*\\\\*|__|\\\\*)([^\\\\n]+?)\\\\1", "g");
+        const pattern = new RegExp("(\\\\*\\\\*|__)([\\\\s\\\\S]+?)\\\\1|(\\\\*)([^\\\\n]+?)\\\\3", "g");
         let lastIndex = 0;
         let match;
         while ((match = pattern.exec(text)) !== null) {{
@@ -2042,7 +2034,7 @@ async def index(
             target.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
           }}
           const strong = document.createElement("strong");
-          strong.textContent = match[2];
+          strong.textContent = match[2] ?? match[4];
           target.appendChild(strong);
           lastIndex = pattern.lastIndex;
         }}

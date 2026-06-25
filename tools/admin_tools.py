@@ -102,7 +102,7 @@ class AdminTools:
         else:
             lines = [f"Found {len(tasks)} open user task(s):"]
             for task in tasks[:10]:
-                lines.append(f"- {task['user_label']}: {task['content']}")
+                lines.append(f"- User {task['user_label']}: {task['content']}")
             if len(tasks) > 10:
                 lines.append(f"- plus {len(tasks) - 10} more.")
             summary = "\n".join(lines)
@@ -121,10 +121,11 @@ class AdminTools:
 
     async def send_admin_message(
         self,
-        user_query: str,
-        message: str,
-        sender_user_id: str,
+        user_query: str | None = None,
+        message: str = "",
+        sender_user_id: str = "",
         sender_name: str = "Ben",
+        task_query: str | None = None,
     ) -> dict[str, Any]:
         if self.store is None:
             return {
@@ -141,7 +142,11 @@ class AdminTools:
                 "reason": "message_required",
                 "user_summary": "I need a message to send.",
             }
-        resolved = self._resolve_user_query(user_query)
+        resolved = self._resolve_message_recipient(
+            user_query=user_query,
+            task_query=task_query,
+            sender_user_id=sender_user_id,
+        )
         if not resolved.get("ok"):
             return {
                 **resolved,
@@ -167,6 +172,8 @@ class AdminTools:
             "recipient": recipient,
             "recipient_label": recipient["label"],
             "message": message,
+            "target_basis": resolved.get("target_basis"),
+            "matched_task": resolved.get("matched_task"),
             "user_summary": f"Queued admin message for {recipient['label']}: {message}",
         }
 
@@ -453,6 +460,94 @@ class AdminTools:
                 + ", ".join(str(item.get("label") or item.get("user_id")) for item in matches[:5]),
             }
         return {"ok": True, "user": matches[0]}
+
+    def _resolve_message_recipient(
+        self,
+        *,
+        user_query: str | None,
+        task_query: str | None,
+        sender_user_id: str | None,
+    ) -> dict[str, Any]:
+        query = str(user_query or "").strip()
+        task = str(task_query or "").strip()
+        if query:
+            resolved = self._resolve_user_query(query)
+            if resolved.get("ok"):
+                resolved["target_basis"] = "user_query"
+            return resolved
+        if task:
+            return self._resolve_task_recipient(task, sender_user_id=sender_user_id)
+        return {
+            "ok": False,
+            "reason": "recipient_required",
+            "user_summary": "I need either a user/friendly name or a task/title to identify who should receive the admin message.",
+        }
+
+    def _resolve_task_recipient(self, task_query: str, *, sender_user_id: str | None) -> dict[str, Any]:
+        query = task_query.strip().lower()
+        if not query:
+            return {
+                "ok": False,
+                "reason": "task_query_required",
+                "user_summary": "I need a title or task description to find the affected user.",
+            }
+        rows = self._query_open_tasks(days=365, limit=200)
+        users = self._load_user_labels()
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            user_id = str(row["user_id"])
+            # The admin's own memory can contain copied task summaries about other users.
+            # For "whoever requested X", prefer the affected user's task row, not Ben's dashboard note.
+            if sender_user_id and user_id == str(sender_user_id):
+                continue
+            metadata = self._parse_json(row.get("metadata_json"), default={})
+            searchable = " ".join(
+                str(item or "")
+                for item in (
+                    row.get("content"),
+                    row.get("task_id"),
+                    json.dumps(metadata, ensure_ascii=False) if metadata else "",
+                )
+            ).lower()
+            if query not in searchable:
+                continue
+            matches.append(
+                {
+                    "user_id": user_id,
+                    "user_label": self._format_user_label(user_id, users.get(user_id)),
+                    "content": row["content"],
+                    "task_id": row["task_id"],
+                    "status": row["status"],
+                    "updated_at": row["updated_at"],
+                    "metadata": metadata,
+                }
+            )
+        if not matches:
+            return {
+                "ok": False,
+                "reason": "task_not_found",
+                "task_query": task_query,
+                "user_summary": f"I could not find an open task matching {task_query}.",
+            }
+        unique_user_ids = {str(match["user_id"]) for match in matches}
+        if len(unique_user_ids) > 1:
+            return {
+                "ok": False,
+                "reason": "task_recipient_ambiguous",
+                "task_query": task_query,
+                "candidates": matches[:10],
+                "user_summary": "That task/title matches multiple users. Pick one: "
+                + ", ".join(str(match["user_label"]) for match in matches[:5]),
+            }
+        match = matches[0]
+        user_id = str(match["user_id"])
+        user = users.get(user_id) or {"user_id": user_id, "label": user_id}
+        return {
+            "ok": True,
+            "user": {**user, "user_id": user_id, "label": self._format_user_label(user_id, user)},
+            "target_basis": "task_query",
+            "matched_task": match,
+        }
 
     def _load_latest_tier2_snapshots(self, user_ids: set[str]) -> dict[str, str]:
         if not user_ids:

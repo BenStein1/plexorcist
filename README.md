@@ -1,6 +1,6 @@
 # Plexorcist Concierge
 
-Plexorcist Concierge is a FastAPI/OpenAI chat front door for a Plex request stack. It lets users ask for movies, shows, recommendations, missing-episode checks, and repair actions in normal language while keeping privileged media operations behind bounded server-side tools.
+Plexorcist Concierge is a FastAPI chat front door for a Plex request stack, currently backed by OpenAI through a provider-aware LLM client. It lets users ask for movies, shows, recommendations, missing-episode checks, and repair actions in normal language while keeping privileged media operations behind bounded server-side tools.
 
 The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage, Radarr, Tautulli, Jackett, Transmission, and Prowl. The model cannot make arbitrary API calls; it can only invoke the registered tools exposed by the backend.
 
@@ -28,7 +28,7 @@ The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage,
 `backend/`
 
 - `main.py`: FastAPI routes, app startup, tool registration, auth callback, static UI, memory sweeper.
-- `agent.py`: OpenAI Responses API orchestration, prompt assembly, tool-call handling, admin alert behavior.
+- `agent.py`: LLM response orchestration, prompt assembly, tool-call handling, admin alert behavior.
 - `auth_context.py`: user context providers for development, Plex OAuth, Ombi session, and header passthrough modes.
 - `auth_store.py`: Plex OAuth session persistence.
 - `config.py`: environment-backed settings.
@@ -39,7 +39,7 @@ The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage,
 
 `clients/`
 
-- Service adapters for Ombi, Plex auth, Plex, SickChill/SickRage, Radarr, Tautulli, Jackett, Transmission, Prowl, and OpenAI.
+- Service adapters for Ombi, Plex auth, Plex, SickChill/SickRage, Radarr, Tautulli, Jackett, Transmission, Prowl, and LLM providers.
 
 `tools/`
 
@@ -82,13 +82,22 @@ Memory is not a proactive reminder scheduler. If a user asks to be reminded next
 
 ## Token Usage
 
-OpenAI token usage is recorded in SQLite by model, resolved model, input tokens, cached input tokens, output tokens, total tokens, user, conversation, and source. Admins can ask the assistant for current MTD/YTD usage and estimated raw cost for the configured model.
+OpenAI token usage is recorded in SQLite by model, resolved model, input tokens, cached input tokens, output tokens, total tokens, user, conversation, and source. Admins can ask the assistant for current MTD/YTD usage and estimated raw cost for the configured OpenAI model.
 
-The model is configured with:
+The active provider/model is configured with:
 
 ```bash
-OPENAI_MODEL=gpt-5.4-mini
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5-mini
 ```
+
+Supported values are `openai`, `anthropic`, and `ollama`. OpenAI remains the default and uses the native internal tool-call format. Anthropic and Ollama translate between their chat/tool formats and the same internal response shape so the backend tool loop stays unchanged.
+
+Provider-specific settings:
+
+- OpenAI: `OPENAI_API_KEY`, optional `OPENAI_MODEL` fallback when `LLM_MODEL` is unset.
+- Anthropic: `ANTHROPIC_API_KEY`, with `LLM_MODEL` set to a Messages API model.
+- Ollama: `OLLAMA_BASE_URL` or `OLLAMA_HOST`, with `LLM_MODEL` set to a locally available chat/tool-capable model.
 
 ## Run Locally
 
@@ -116,7 +125,10 @@ Important groups:
 - Ombi: `OMBI_BASE_URL`, `OMBI_CONTINUE_URL`, `OMBI_API_KEY`
 - Media services: `PLEX_BASE_URL`, `SICKCHILL_BASE_URL`, `RADARR_BASE_URL`, `TAUTULLI_BASE_URL`, `JACKETT_BASE_URL`, `TRANSMISSION_HOST`, `TRANSMISSION_MAINTENANCE_VERIFY_WAIT_SECONDS`
 - Notifications: `PROWL_API_KEY`, `LOGIN_NOTIFY_ENABLED`, `LOGIN_NOTIFY_SCOPE`
-- OpenAI: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_REQUEST_TIMEOUT_SECONDS`
+- LLM provider: `LLM_PROVIDER`, `LLM_MODEL`, `LLM_REQUEST_TIMEOUT_SECONDS`
+- OpenAI compatibility: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_REQUEST_TIMEOUT_SECONDS`
+- Anthropic: `ANTHROPIC_API_KEY`
+- Ollama: `OLLAMA_BASE_URL`, `OLLAMA_HOST`
 - Memory: `MEMORY_INACTIVITY_MINUTES`, `MEMORY_COMPACTION_TIMEOUT_SECONDS`, `MEMORY_RECENT_NOTES_LIMIT`, `MEMORY_TIER1_KEEP`
 
 Secrets, local DBs, logs, friendly-name data, deployment helpers, and scratch artifacts are intentionally ignored by Git.
@@ -131,6 +143,10 @@ The project includes:
 
 Local/private deployment uses `deploy.local.sh`, which is intentionally ignored by Git because it contains machine-specific paths.
 
+The deploy helper should sync the repo root with `.rsync-filter` exclusions, not a hand-maintained allowlist. If you add local-only files or folders, put them in [`.rsync-filter`](/home/ben/Projects/plexorcist/.rsync-filter) instead of editing the rsync command.
+
+If the service fails to start after deploy, check that any new runtime module was actually included in the sync and then read the server-side `plexorcist.log` before assuming the database is at fault.
+
 ## Status
 
 The original scaffold goals are mostly complete:
@@ -139,6 +155,6 @@ The original scaffold goals are mostly complete:
 - Plex OAuth session handling is implemented.
 - Conversation state now tracks media context, pending actions, memory, and support context.
 - Service clients are implemented for the active media stack.
-- The OpenAI tool-calling loop operates against bounded real tools.
+- The LLM tool-calling loop operates against bounded real tools, with OpenAI, Anthropic, and Ollama provider adapters implemented behind the local `clients/llm.py` connector.
 
 Remaining work is mostly refinement rather than foundational plumbing: more diagnostics, better ranking/disambiguation, UI polish, and continued tuning of assistant behavior.

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from typing import Any
 
 import httpx
 
+from clients.llm import LlmResponse, ToolCall, UsageRecorder
+
 
 logger = logging.getLogger(__name__)
-UsageRecorder = Callable[[dict[str, Any]], None]
 
 
 class OpenAIResponsesClient:
@@ -24,19 +24,19 @@ class OpenAIResponsesClient:
         self.timeout_seconds = timeout_seconds
         self.usage_recorder = usage_recorder
 
-    async def create_response(
+    async def generate_response(
         self,
         *,
         instructions: str,
         input_items: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
         usage_context: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> LlmResponse:
         payload = {
             "model": self.model,
             "instructions": instructions,
             "input": input_items,
-            "tools": tools,
+            "tools": tool_schemas,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -51,7 +51,51 @@ class OpenAIResponsesClient:
             response.raise_for_status()
             payload = response.json()
             self._record_usage(payload, usage_context or {})
-            return payload
+            return self._build_response(payload)
+
+    def _build_response(self, payload: dict[str, Any]) -> LlmResponse:
+        output = payload.get("output", [])
+        output_items = list(output) if isinstance(output, list) else []
+        tool_calls: list[ToolCall] = []
+        for item in output_items:
+            if not isinstance(item, dict) or item.get("type") != "function_call":
+                continue
+            tool_calls.append(
+                ToolCall(
+                    name=str(item.get("name") or ""),
+                    arguments=str(item.get("arguments") or "{}"),
+                    call_id=str(item.get("call_id") or ""),
+                    raw=item,
+                )
+            )
+        return LlmResponse(
+            raw=payload,
+            output_items=output_items,
+            tool_calls=tool_calls,
+            text=self._extract_text(payload),
+        )
+
+    def _extract_text(self, payload: dict[str, Any]) -> str:
+        direct = payload.get("output_text")
+        if direct:
+            return str(direct)
+
+        chunks: list[str] = []
+        output = payload.get("output", [])
+        if not isinstance(output, list):
+            return ""
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            content_items = item.get("content", [])
+            if not isinstance(content_items, list):
+                continue
+            for content in content_items:
+                if not isinstance(content, dict):
+                    continue
+                if content.get("type") in {"output_text", "text"} and content.get("text"):
+                    chunks.append(str(content["text"]))
+        return "\n".join(chunk for chunk in chunks if chunk).strip()
 
     def _record_usage(self, payload: dict[str, Any], usage_context: dict[str, Any]) -> None:
         if self.usage_recorder is None:

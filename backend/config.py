@@ -37,8 +37,14 @@ class Settings(BaseSettings):
     plex_client_identifier_store: str = env_field(default="./plex_client_identifier.txt", env="PLEX_CLIENT_IDENTIFIER_STORE")
     plex_auth_product_name: str = env_field(default="Plexorcist Concierge", env="PLEX_AUTH_PRODUCT_NAME")
     ombi_continue_url: str = env_field(default="http://localhost:5000", env="OMBI_CONTINUE_URL")
+    llm_provider: str = env_field(default="openai", env="LLM_PROVIDER")
+    llm_model: str | None = env_field(default=None, env="LLM_MODEL")
+    llm_request_timeout_seconds: str | None = env_field(default=None, env="LLM_REQUEST_TIMEOUT_SECONDS")
     openai_model: str = env_field(default="gpt-5-mini", env="OPENAI_MODEL")
     openai_request_timeout_seconds: int = env_field(default=120, env="OPENAI_REQUEST_TIMEOUT_SECONDS")
+    anthropic_api_key: str | None = env_field(default=None, env="ANTHROPIC_API_KEY")
+    ollama_base_url: str | None = env_field(default=None, env="OLLAMA_BASE_URL")
+    ollama_host: str | None = env_field(default=None, env="OLLAMA_HOST")
     log_level: str = "INFO"
     database_url: str = env_field(default="sqlite:///./plexorcist.db", env="DATABASE_URL")
     dev_user_id: str = env_field(default="dev-user-1", env="DEV_USER_ID")
@@ -119,6 +125,26 @@ class Settings(BaseSettings):
         expected_user_id = (self.admin_user_id or "").strip()
         actual_user_id = (user_id or "").strip()
         return bool(expected_user_id and actual_user_id == expected_user_id)
+
+    @property
+    def effective_llm_model(self) -> str:
+        model = (self.llm_model or "").strip()
+        return model or self.openai_model
+
+    @property
+    def effective_llm_request_timeout_seconds(self) -> int:
+        timeout = (self.llm_request_timeout_seconds or "").strip()
+        if not timeout:
+            return self.openai_request_timeout_seconds
+        try:
+            return int(timeout)
+        except ValueError as exc:
+            raise ValueError("LLM_REQUEST_TIMEOUT_SECONDS must be an integer") from exc
+
+    @property
+    def effective_ollama_base_url(self) -> str:
+        base_url = (self.ollama_base_url or self.ollama_host or "").strip()
+        return base_url or "http://localhost:11434"
 
     if not _PYDANTIC_SETTINGS_V2:
         class Config:

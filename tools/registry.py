@@ -47,7 +47,7 @@ class ToolRegistry:
             await self._after_call(record)
         return record
 
-    def openai_tools(self) -> list[dict[str, Any]]:
+    def llm_tool_schemas(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
         for definition in self._definitions.values():
             tools.append(
@@ -59,3 +59,6 @@ class ToolRegistry:
                 }
             )
         return tools
+
+    def openai_tools(self) -> list[dict[str, Any]]:
+        return self.llm_tool_schemas()

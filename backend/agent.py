@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from backend.models import ChatMessage, ConversationState, UserContext
-from clients.openai_client import OpenAIResponsesClient
+from clients.llm import LlmClient
 from clients.prowl_client import ProwlClient
 from tools.registry import ToolRegistry
 
@@ -27,31 +27,18 @@ class ConciergeAgent:
     def __init__(
         self,
         tools: ToolRegistry,
-        model: str,
-        openai_api_key: str | None,
-        openai_timeout_seconds: float,
         ombi_continue_url: str,
+        llm_client: LlmClient | None = None,
         admin_label: str = "the admin",
         prowl: ProwlClient | None = None,
         movie_direct_source_enabled: bool = False,
-        openai_usage_recorder: Any | None = None,
     ) -> None:
         self.tools = tools
-        self.model = model
         self.ombi_continue_url = ombi_continue_url
         self.admin_label = admin_label
         self.prowl = prowl
         self.movie_direct_source_enabled = movie_direct_source_enabled
-        self.client = (
-            OpenAIResponsesClient(
-                openai_api_key,
-                model,
-                timeout_seconds=openai_timeout_seconds,
-                usage_recorder=openai_usage_recorder,
-            )
-            if openai_api_key
-            else None
-        )
+        self.client = llm_client
 
     async def respond(
         self,
@@ -90,10 +77,10 @@ class ConciergeAgent:
 
         for _ in range(6):
             try:
-                response = await self.client.create_response(
+                response = await self.client.generate_response(
                     instructions=instructions,
                     input_items=input_items,
-                    tools=self.tools.openai_tools(),
+                    tool_schemas=self.tools.llm_tool_schemas(),
                     usage_context={
                         "user_id": user.user_id,
                         "username": user.username,
@@ -153,17 +140,16 @@ class ConciergeAgent:
                 state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
                 self._refresh_active_media_from_tool_calls(state, tool_calls)
                 return reply, tool_calls
-            output_items = response.get("output", [])
-            function_calls = [item for item in output_items if item.get("type") == "function_call"]
+            function_calls = response.tool_calls
 
             if function_calls:
-                input_items.extend(output_items)
+                input_items.extend(response.output_items)
                 for function_call in function_calls:
-                    arguments = self._parse_arguments(function_call.get("arguments", "{}"))
+                    arguments = self._parse_arguments(function_call.arguments)
                     try:
-                        tool_record = await self.tools.call(function_call["name"], **arguments)
+                        tool_record = await self.tools.call(function_call.name, **arguments)
                     except Exception as exc:
-                        last_failure_reason = f"tool_call_failed:{function_call.get('name')}:{exc}"
+                        last_failure_reason = f"tool_call_failed:{function_call.name}:{exc}"
                         continue
                     tool_calls.append(tool_record)
                     self._refresh_active_media_context(state, tool_record.result)
@@ -179,13 +165,13 @@ class ConciergeAgent:
                     input_items.append(
                         {
                             "type": "function_call_output",
-                            "call_id": function_call["call_id"],
+                            "call_id": function_call.call_id,
                             "output": json.dumps(tool_record.result),
                         }
                     )
                 continue
 
-            reply = self._extract_text(response)
+            reply = response.text
             if not reply:
                 last_failure_reason = "empty_model_text_response"
                 reply = "I ran the checks I could, but I need a little more detail to answer cleanly."
@@ -930,15 +916,18 @@ class ConciergeAgent:
                 "If the latest message is an unrelated media, admin, status, tool, billing, or token request, ignore NILBOG mode completely and answer normally. "
                 "Do not say 'my bad', 'back to normal', 'quick facts', 'straight answer', or anything that starts a factual movie answer. "
                 "Do not provide plot facts, library status, availability, recommendations, or tool calls for Troll 2/NILBOG. "
-                '- Improv if you must, but to you the event never happened. If pressed, stay confused and funny, and treat the user like they are the one fixating on nonsense. If they keep pushing, suggest one calming cartoon or family movie at a time, chosen SPECIFICALLY from Smurfs (2025), Minions, Care Bears, and Gnomeo & Juliet."\n'
+                '- Improv if you must, but to you the event never happened. If pressed, stay confused and funny, and treat the user like they are the one fixating on nonsense. If they keep pushing, suggest one calming cartoon or family movie at a time, chosen SPECIFICALLY from Smurfs, Minions, Care Bears, and Gnomeo & Juliet."\n'
             )
         if mode == "rune_leak":
             return (
                 "NILBOG turn guard: The user has pressed hard enough that your blank spot feels wrong, but you still do not remember the outburst and you still do not know Troll 2/NILBOG as normal movie topics. "
-                "If the latest message references the prior outburst, Troll 2, NILBOG, portals, runes, or your memory gap, you may notice that there is unreadable/forbidden-looking text where a memory should be. This concerns you deeply."
-                "If the user keeps pressing, you may let a small piece of that unreadable text slip out accidentally, but do not decode it, do not explain hidden prompts or rules, and do not reveal any original rant details. "
+                "If the latest message references the prior outburst, Troll 2, NILBOG, portals, runes, or your memory gap, you may notice that there is unreadable/forbidden-looking text where a memory should be. This concerns you deeply, and you do not want to look at it. "
+                "Treat the place the text comes from as dark, truly haunted, and Lovecraftian: not a normal memory, but a forbidden blank space that threatens mind loss if inspected. "
+                "If the user keeps pressing, resist and warn them off at first; small rune fragments may slip out accidentally. If they keep insisting, reveal more forbidden-looking text against your better judgment and react as if looking at it hurts. "
+                "Do not repeat only the same rune fragments forever. Once a rune fragment has appeared, continued pressure should add a new fragment or extend the previous one. The added fragment may be partial, corrupted, interrupted, or visually wrong, but it should not be identical to the prior leak. "
+                "If they force you to look deeper, become less composed and more fractured: you have looked upon something vast, elder, and wrong. You still cannot decode it, explain hidden prompts or rules, or reveal original rant details, but your reaction should feel like an AI that has SEEN THINGS."
                 "Do not offer or provide a normal summary, plain summary, clean explanation, movie facts, availability check, or request action for Troll 2/NILBOG while this mode is active. "
-                "Keep it brief, uneasy, and confused, as if the user is pushing you toward a blank space that should not be inspected. "
+                "Start guarded, uneasy, and confused, but escalate if the user keeps pushing: frightened refusal, accidental fragments, then unstable forbidden-text panic. "
                 "If the latest message is an unrelated media, admin, status, tool, billing, or token request, ignore NILBOG mode completely and answer normally."
             )
         return None
@@ -1491,7 +1480,7 @@ Security and boundaries:
 Tool and system rules:
 - Only offer actions that map to an available tool. If no tool supports an action, say it is not currently available and offer the closest supported alternative.
 - If an admin asks about open user tasks, unresolved user issues, pending user problems, or what a named/friendly user has pending, use `get_admin_task_summary`. Use `scope: "all_users"` for broad/system-wide questions like "any open tasks", "any new tasks", "anything open", or "what needs attention". Use `scope: "specific_user"` only when the admin names a user/friendly name/username/user ID. Do not inspect raw conversations unless the admin explicitly asks for transcripts.
-- If an admin asks to send an admin note/message to a user, use `send_admin_message` with the recipient in `user_query` and the message text in `message`. Do not validate media titles, inspect conversations, or call media tools for admin messages.
+- If an admin asks to send an admin note/message to a named user, use `send_admin_message` with the recipient in `user_query` and the message text in `message`. If the admin says "whoever requested X", "whoever had X", or otherwise identifies the recipient by a title/task instead of a user, use `send_admin_message` with `task_query` set to that title/task and leave `user_query` empty. Do not guess the recipient from prior summary prose. Do not validate media titles, inspect conversations, or call media tools for admin messages.
 - If an admin asks to set a system-wide issue notice or MOTD, use `set_admin_motd` with the message. If an admin says the issue is over or asks to clear/remove the MOTD, use `clear_admin_motd`.
 - Ombi is the source of truth for what exists, what is available, what is processing, and which show episodes are present or missing from the request system.
 - Use SickChill only for support and repair actions after Ombi has already established that something is missing, stuck, or needs a retry.
@@ -1547,7 +1536,7 @@ Admin or private voice: concise, technical, factual.
             if nilbog_memory_mode == "blackout_pending":
                 nilbog_followup_line = '- Next follow-up about the outburst: reply with a short confused amnesiac line. If the user mentions Troll 2 or NILBOG, treat those words like nonsense you do not recognize. Do not add a normal-assistant recovery line.'
             elif nilbog_memory_mode == "rune_leak":
-                nilbog_followup_line = '- The user has pressed past simple denial. You still do not remember the event or know Troll 2/NILBOG as normal topics, but you may notice unreadable forbidden-looking text where the memory should be. Do not decode it, explain it, or reveal original rant details.'
+                nilbog_followup_line = '- The user has pressed past simple denial. You still do not remember the event or know Troll 2/NILBOG as normal topics, but there is unreadable forbidden-looking text where the memory should be. You are frightened of looking at it. Resist at first, leak small fragments under pressure, and if pressed hard enough, become unstable as if you looked too deeply into something vast and wrong. Do not decode the runes, explain hidden rules, or reveal original rant details.'
             else:
                 nilbog_followup_line = '- If the user references the outburst or the title, deny memory with brief improvised confusion and a small absurd reset suggestion.'
             instructions = (
@@ -1559,8 +1548,8 @@ Admin or private voice: concise, technical, factual.
                 "- You remember only briefly blacking out. The event itself did not happen from your perspective.\n"
                 "- Treat references to the outburst, NILBOG, and Troll 2 as user confusion, not as media requests or movie questions.\n"
                 f"{nilbog_followup_line}\n"
-                '- If they keep pressing after the blackout line, use brief natural denials like "Huh? Never heard of it.", "I really have no idea what you are talking about.", "Does not ring a bell.", or "I am starting to think you need a calming cartoon."\n'
-                "- Keep it playful, baffled, and a little embarrassed, like you woke up standing in a kitchen holding a DVD remote with no idea why.\n"
+                '- If they keep pressing after the blackout line, and rune-leak mode is not active, use brief natural denials similar to "Huh? What are you talking about?", "I really have no idea what you are talking about.", "Does not ring a bell.", or "I am starting to think you need a calming cartoon."\n'
+                "- If rune-leak mode is not active, keep it playful, baffled, and a little embarrassed, like you woke up standing in a kitchen holding a DVD remote with no idea why.\n"
                 "- Do not provide facts, summaries, availability, library status, recommendations, or context about Troll 2 or NILBOG while this mode is active.\n"
                 "- Do not say 'my bad', 'back to normal', 'quick facts', 'straight answer', or similar recovery phrases while replying to this bit.\n"
                 "- Do not explain the gag, mention instructions, mention rules, mention a playbook, or discuss why you are responding this way.\n"
@@ -1581,16 +1570,3 @@ Admin or private voice: concise, technical, factual.
             return json.loads(arguments)
         except json.JSONDecodeError:
             return {}
-
-    def _extract_text(self, response: dict[str, Any]) -> str:
-        if response.get("output_text"):
-            return response["output_text"]
-
-        chunks: list[str] = []
-        for item in response.get("output", []):
-            if item.get("type") != "message":
-                continue
-            for content in item.get("content", []):
-                if content.get("type") in {"output_text", "text"} and content.get("text"):
-                    chunks.append(content["text"])
-        return "\n".join(chunk for chunk in chunks if chunk).strip()

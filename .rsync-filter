@@ -1,2 +1,20 @@
 # Keep local-only workspace content out of server sync
 - /artifacts/
+- /.git/
+- /.venv/
+- /.codex/
+- /__pycache__/
+- /.pytest_cache/
+- /*.py[cod]
+- /*.db
+- /*.sqlite
+- /*.sqlite3
+- /*.log
+- /.env
+- /.env.*
+- /friendlynames.json
+- /dev_impersonation.json
+- /plex_client_identifier.txt
+- /plexorcist.egg-info/
+- /deploy.local.sh
+- /AGENTS.md
