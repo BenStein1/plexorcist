@@ -48,8 +48,37 @@ Ben's explicit call.
 | 1 — MCP tool catalog + FastMCP server | DONE | 161842c |
 | 2 — provider layer on official SDKs | DONE (Sonnet 5, reviewed) | 06ba4c9 |
 | 3 — agent loop rewrite + prompt shrink | DONE (Sonnet 5, reviewed) | cea3d7c (main change 8562764) |
-| 4 — external /mcp endpoint + docs | DONE (Sonnet 5, reviewed) | pending |
-| 5 — final verification (live chat flows per provider) | pending | — |
+| 4 — external /mcp endpoint + docs | DONE (Sonnet 5, reviewed) | 624b7eb |
+| 5 — final verification | DONE | — (no code change) |
+
+## Phase 5 verification results
+
+- Full pytest suite: 55/55 passing (`.venv/bin/python -m pytest tests/ -q`).
+- `from backend.main import app` boots clean.
+- Real end-to-end check: built a `ConciergeAgent` via `build_agent()` with the
+  deployment's actual `OPENAI_API_KEY` from `.env` but every backend service
+  URL (Ombi/Plex/SickChill/Radarr/Jackett/Transmission) pointed at a
+  guaranteed-closed local port and `PROWL_API_KEY` cleared -- so the real
+  OpenAI Responses API round-trips through `clients/llm_providers.py`, and
+  `search_media` genuinely fails with a connection error, without touching
+  production infra or sending Ben a Prowl push. The model correctly saw the
+  `is_error` tool result, stayed in character, didn't hallucinate success,
+  offered to retry, and asked a sane disambiguation question -- confirming
+  the core fix (tool errors reach the model and it recovers) works against
+  the real deployed provider, not just mocks.
+- Only `openai` is configured in the real `.env` (no Anthropic key, no Ollama
+  host) -- Anthropic and Ollama adapters are structurally identical and
+  covered by the Phase 2 mocked unit tests (`tests/test_llm_providers.py`);
+  no live key/instance existed to test them against, so that's the
+  appropriate verification depth for providers not actually in use.
+- NOT done, and intentionally left for Ben: a live movie-request / repair
+  flow against real Ombi/Radarr/SickChill, and `claude mcp add` against the
+  running `/mcp` endpoint from an actual Claude Code session. Both require
+  either production credentials+side effects (real requests, possible Prowl
+  notifications) or Ben's own client-side setup step -- not something to
+  trigger autonomously.
+- **Deploy is still Ben's call** -- nothing here has touched 10.0.0.93. See
+  "Deploy reality" above.
 
 ## What exists after Phases 0-1
 
