@@ -47,7 +47,7 @@ Ben's explicit call.
 | 0 — pydantic v2 + pytest harness | DONE | 196fbd2 |
 | 1 — MCP tool catalog + FastMCP server | DONE | 161842c |
 | 2 — provider layer on official SDKs | DONE (Sonnet 5, reviewed) | 06ba4c9 |
-| 3 — agent loop rewrite + prompt shrink | DONE (Sonnet 5, reviewed) | this commit |
+| 3 — agent loop rewrite + prompt shrink | DONE (Sonnet 5, reviewed) | 8562764 |
 | 4 — external /mcp endpoint + docs | pending | — |
 | 5 — final verification (live chat flows per provider) | pending | — |
 
