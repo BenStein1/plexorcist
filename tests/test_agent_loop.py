@@ -55,6 +55,9 @@ class FakeToolkit:
     async def boom(self) -> dict:
         raise RuntimeError("handler exploded")
 
+    async def notice(self, summary: str, priority: int | None = None) -> dict:
+        return {"ok": True, "summary": summary}
+
 
 FAKE_SPECS = [
     ToolSpec(
@@ -68,6 +71,12 @@ FAKE_SPECS = [
         description="always raises",
         input_model=schemas.EmptyInput,
         resolve=lambda tk: tk.boom,
+    ),
+    ToolSpec(
+        name="send_admin_prowl_notice",
+        description="fake admin notice",
+        input_model=schemas.ProwlNoticeInput,
+        resolve=lambda tk: tk.notice,
     ),
 ]
 
@@ -157,6 +166,7 @@ async def test_malformed_arguments_json_becomes_error_result():
     assert result.call_id == "c2"
     assert result.is_error is True
     assert "search_media" in str(result.content)
+    assert "parse" in str(result.content).lower()
 
 
 # --- (c) missing required argument -> validation error names the field ------
@@ -190,12 +200,22 @@ async def test_missing_required_argument_names_the_field():
 
 @pytest.mark.asyncio
 async def test_final_text_not_overwritten_when_tool_calls_succeeded():
+    # send_admin_prowl_notice is one of the tools _plain_support_reply_from_tool_calls
+    # actively synthesizes a reply for ("Done — I let the admin know.") when the
+    # model leaves the reply blank. Driving it here and asserting the model's own
+    # text wins is what actually catches a regression to the old "synthesis can
+    # overwrite a real model reply" bug — a tool outside that synthesis set (like
+    # search_media) would pass this assertion even with the bug present.
     client = FakeLlmClient(
         [
             LlmResponse(
                 text="",
                 tool_calls=[
-                    ToolCall(call_id="c4", name="search_media", arguments_json=json.dumps({"query": "heat"}))
+                    ToolCall(
+                        call_id="c4",
+                        name="send_admin_prowl_notice",
+                        arguments_json=json.dumps({"summary": "issue"}),
+                    )
                 ],
                 native_turn=[],
             ),
@@ -203,11 +223,11 @@ async def test_final_text_not_overwritten_when_tool_calls_succeeded():
         ]
     )
     agent = _agent(client, _bridge())
-    reply, tool_calls = await agent.respond(_user(), _state(), "find heat")
+    reply, tool_calls = await agent.respond(_user(), _state(), "let the admin know about this")
 
     assert reply == "Custom final reply from the model."
     assert len(tool_calls) == 1
-    assert tool_calls[0].name == "search_media"
+    assert tool_calls[0].name == "send_admin_prowl_notice"
 
 
 # --- (e) max-turns exhaustion -> fallback reply, no crash/hang --------------
