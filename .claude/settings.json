@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(systemctl --user is-active *)",
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(systemctl --user status *)",
+      "Bash(.venv/bin/pip show *)",
+      "Bash(.venv/bin/pip list *)"
+    ]
+  }
+}

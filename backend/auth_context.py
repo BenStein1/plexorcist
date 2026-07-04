@@ -53,6 +53,39 @@ class FriendlyNameDirectory:
 
         return display_name.strip() if display_name and display_name.strip() else normalized_username
 
+    def set_friendly_name(self, username: str, friendly_name: str) -> None:
+        """Persist a new friendly-name mapping for `username`, preserving every
+        other entry and the EXCLUDED_USERS list. Refreshes the in-memory cache
+        so subsequent resolve() calls in this process see the change without
+        waiting for the next mtime-triggered reload."""
+        normalized_username = username.strip()
+        normalized_name = friendly_name.strip()
+        if not normalized_username or not normalized_name:
+            raise ValueError("username and friendly_name must both be non-empty")
+        if self.path is None:
+            raise ValueError("No friendly-names file is configured")
+
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            payload = {}
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("EXCLUDED_USERS", [])
+        raw_map = payload.get("USER_FRIENDLY_NAMES")
+        mapping = dict(raw_map) if isinstance(raw_map, dict) else {}
+        mapping[normalized_username] = normalized_name
+        payload["USER_FRIENDLY_NAMES"] = mapping
+
+        self.path.write_text(json.dumps(payload, indent=4), encoding="utf-8")
+        self._cached = {str(k): str(v) for k, v in mapping.items()}
+        try:
+            self._cached_mtime = self.path.stat().st_mtime
+        except FileNotFoundError:
+            self._cached_mtime = None
+
     def summarize_aliases(self, max_names: int = 20) -> str:
         mapping = self._load_mapping()
         reverse: dict[str, list[str]] = {}

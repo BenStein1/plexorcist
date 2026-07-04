@@ -81,6 +81,7 @@ class AdminTools:
             metadata = self._parse_json(row.get("metadata_json"), default={})
             tasks.append(
                 {
+                    "note_id": row["note_id"],
                     "user_id": user_id,
                     "user_label": user_label,
                     "note_type": row["note_type"],
@@ -117,6 +118,140 @@ class AdminTools:
             "task_count": len(tasks),
             "tasks": tasks,
             "user_summary": summary,
+        }
+
+    async def resolve_admin_task(
+        self,
+        note_id: int | None = None,
+        task_query: str | None = None,
+    ) -> dict[str, Any]:
+        if self.store is None:
+            return {
+                "ok": False,
+                "action": "admin_task_resolve_unavailable",
+                "reason": "store_unavailable",
+                "user_summary": "Task resolution is unavailable because the memory store is not configured.",
+            }
+
+        if note_id is not None:
+            resolved = self.store.resolve_user_memory_note(int(note_id))
+            if not resolved:
+                return {
+                    "ok": False,
+                    "action": "admin_task_resolve",
+                    "reason": "task_not_found",
+                    "note_id": note_id,
+                    "user_summary": f"I couldn't find an open task with id {note_id} to resolve.",
+                }
+            return {
+                "ok": True,
+                "action": "admin_task_resolve",
+                "note_id": note_id,
+                "user_summary": "Marked that task resolved.",
+            }
+
+        query = str(task_query or "").strip()
+        if not query:
+            return {
+                "ok": False,
+                "action": "admin_task_resolve",
+                "reason": "target_required",
+                "user_summary": "I need either a note_id from a recent task summary or a description of the task to resolve.",
+            }
+
+        rows = self._query_open_tasks(days=365, limit=200)
+        users = self._load_user_labels()
+        matches: list[dict[str, Any]] = []
+        lowered_query = query.lower()
+        for row in rows:
+            metadata = self._parse_json(row.get("metadata_json"), default={})
+            searchable = " ".join(
+                str(item or "")
+                for item in (
+                    row.get("content"),
+                    row.get("task_id"),
+                    json.dumps(metadata, ensure_ascii=False) if metadata else "",
+                )
+            ).lower()
+            if lowered_query not in searchable:
+                continue
+            user_id = str(row["user_id"])
+            matches.append(
+                {
+                    "note_id": row["note_id"],
+                    "user_id": user_id,
+                    "user_label": self._format_user_label(user_id, users.get(user_id)),
+                    "content": row["content"],
+                    "status": row["status"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+
+        if not matches:
+            return {
+                "ok": False,
+                "action": "admin_task_resolve",
+                "reason": "task_not_found",
+                "task_query": task_query,
+                "user_summary": f"I could not find an open task matching {task_query}.",
+            }
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "action": "admin_task_resolve",
+                "reason": "task_ambiguous",
+                "task_query": task_query,
+                "candidates": matches[:10],
+                "user_summary": "That matches multiple open tasks. Which one? "
+                + "; ".join(f"{m['user_label']}: {m['content']}" for m in matches[:5]),
+            }
+
+        match = matches[0]
+        resolved = self.store.resolve_user_memory_note(int(match["note_id"]))
+        return {
+            "ok": bool(resolved),
+            "action": "admin_task_resolve",
+            "note_id": match["note_id"],
+            "resolved_task": match,
+            "user_summary": f"Marked resolved: {match['user_label']}: {match['content']}"
+            if resolved
+            else f"I found a matching task but couldn't update it (id {match['note_id']}).",
+        }
+
+    async def set_user_friendly_name(self, user_query: str, friendly_name: str) -> dict[str, Any]:
+        if self.friendly_names is None:
+            return {
+                "ok": False,
+                "action": "set_user_friendly_name_unavailable",
+                "reason": "friendly_names_unavailable",
+                "user_summary": "Friendly-name storage is not configured.",
+            }
+        resolved = self._resolve_user_query(user_query)
+        if not resolved.get("ok"):
+            return {**resolved, "action": "set_user_friendly_name"}
+        username = str(resolved["user"].get("username") or "").strip()
+        if not username:
+            return {
+                "ok": False,
+                "action": "set_user_friendly_name",
+                "reason": "user_has_no_username",
+                "user_summary": "That user doesn't have a Plex username on file to key the friendly name by.",
+            }
+        try:
+            self.friendly_names.set_friendly_name(username, friendly_name)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "action": "set_user_friendly_name",
+                "reason": "invalid_input",
+                "user_summary": str(exc),
+            }
+        return {
+            "ok": True,
+            "action": "set_user_friendly_name",
+            "username": username,
+            "friendly_name": friendly_name.strip(),
+            "user_summary": f"Updated {username}'s friendly name to {friendly_name.strip()}.",
         }
 
     async def send_admin_message(
@@ -363,7 +498,7 @@ class AdminTools:
         with self.store._connect() as conn:  # type: ignore[union-attr, protected-access]
             rows = conn.execute(
                 """
-                SELECT user_id, note_type, content, task_id, status, tier, metadata_json, created_at, updated_at
+                SELECT id, user_id, note_type, content, task_id, status, tier, metadata_json, created_at, updated_at
                 FROM user_memory_notes
                 WHERE status IN ('open', 'unresolved')
                   AND datetime(updated_at) >= datetime('now', ?)
@@ -372,7 +507,7 @@ class AdminTools:
                 """,
                 (f"-{int(days)} days", int(limit)),
             ).fetchall()
-        columns = ["user_id", "note_type", "content", "task_id", "status", "tier", "metadata_json", "created_at", "updated_at"]
+        columns = ["note_id", "user_id", "note_type", "content", "task_id", "status", "tier", "metadata_json", "created_at", "updated_at"]
         return [dict(zip(columns, row)) for row in rows]
 
     def _load_user_labels(self) -> dict[str, dict[str, str]]:

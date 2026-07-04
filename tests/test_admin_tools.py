@@ -1,0 +1,197 @@
+"""Task resolution and friendly-name management on AdminTools/FriendlyNameDirectory."""
+
+import json
+
+import pytest
+
+from backend.auth_context import FriendlyNameDirectory
+from backend.auth_store import PlexAuthSessionStore
+from backend.models import PlexAuthSession
+from backend.state import ConversationStore
+from tools.admin_tools import AdminTools
+
+
+def _store(tmp_path) -> ConversationStore:
+    db_url = f"sqlite:///{tmp_path / 'admin_tools.db'}"
+    # AdminTools' user-label lookups query plex_auth_sessions, which only
+    # ConversationStore's sibling PlexAuthSessionStore creates — instantiate
+    # it here (no rows needed) so that table exists even in tests that never
+    # save a session.
+    PlexAuthSessionStore(db_url)
+    return ConversationStore(db_url)
+
+
+def _add_note(store: ConversationStore, *, user_id: str, content: str, status: str = "open") -> None:
+    store.add_user_memory_note(user_id=user_id, note_type="interaction_note", content=content, status=status, tier=1)
+
+
+def _admin_tools(tmp_path, store: ConversationStore) -> AdminTools:
+    names_path = tmp_path / "friendlynames.json"
+    names_path.write_text(json.dumps({"EXCLUDED_USERS": [], "USER_FRIENDLY_NAMES": {"steve1": "Steve"}}), encoding="utf-8")
+    return AdminTools(transmission=None, store=store, friendly_names=FriendlyNameDirectory(str(names_path)))
+
+
+def _note_id(store: ConversationStore, user_id: str) -> int:
+    # get_user_memory_context doesn't expose the numeric row id; query directly.
+    with store._connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT id FROM user_memory_notes WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+# --- resolve by note_id -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_by_note_id_closes_task(tmp_path):
+    store = _store(tmp_path)
+    _add_note(store, user_id="u1", content="Oak Island episode stuck")
+    note_id = _note_id(store, "u1")
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(note_id=note_id)
+
+    assert result["ok"] is True
+    assert result["note_id"] == note_id
+    summary = await tools.get_admin_task_summary(scope="all_users")
+    assert summary["task_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_by_unknown_note_id_reports_not_found(tmp_path):
+    store = _store(tmp_path)
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(note_id=999999)
+
+    assert result["ok"] is False
+    assert result["reason"] == "task_not_found"
+
+
+# --- resolve by task_query ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_by_task_query_single_match(tmp_path):
+    store = _store(tmp_path)
+    _add_note(store, user_id="u1", content="Heat is missing from Plex")
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(task_query="Heat")
+
+    assert result["ok"] is True
+    summary = await tools.get_admin_task_summary(scope="all_users")
+    assert summary["task_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_by_task_query_no_match(tmp_path):
+    store = _store(tmp_path)
+    _add_note(store, user_id="u1", content="Heat is missing from Plex")
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(task_query="Interstellar")
+
+    assert result["ok"] is False
+    assert result["reason"] == "task_not_found"
+
+
+@pytest.mark.asyncio
+async def test_resolve_by_task_query_ambiguous_does_not_guess(tmp_path):
+    store = _store(tmp_path)
+    _add_note(store, user_id="u1", content="Oak Island season 12 stuck")
+    _add_note(store, user_id="u2", content="Oak Island missing episode 3")
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(task_query="Oak Island")
+
+    assert result["ok"] is False
+    assert result["reason"] == "task_ambiguous"
+    assert len(result["candidates"]) == 2
+    # neither task was actually closed
+    summary = await tools.get_admin_task_summary(scope="all_users")
+    assert summary["task_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_requires_note_id_or_task_query(tmp_path):
+    store = _store(tmp_path)
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task()
+
+    assert result["ok"] is False
+    assert result["reason"] == "target_required"
+
+
+# --- friendly names ------------------------------------------------------------
+
+
+def test_friendly_name_directory_set_and_resolve(tmp_path):
+    path = tmp_path / "friendlynames.json"
+    path.write_text(json.dumps({"EXCLUDED_USERS": [], "USER_FRIENDLY_NAMES": {"alice1": "Alice"}}), encoding="utf-8")
+    directory = FriendlyNameDirectory(str(path))
+
+    assert directory.resolve("alice1") == "Alice"
+
+    directory.set_friendly_name("alice1", "Ali")
+    assert directory.resolve("alice1") == "Ali"
+
+    # persisted to disk, not just the in-memory cache
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["USER_FRIENDLY_NAMES"]["alice1"] == "Ali"
+
+
+def test_friendly_name_directory_set_preserves_other_entries(tmp_path):
+    path = tmp_path / "friendlynames.json"
+    path.write_text(
+        json.dumps({"EXCLUDED_USERS": ["N/A"], "USER_FRIENDLY_NAMES": {"bob1": "Bob", "carl1": "Carl"}}),
+        encoding="utf-8",
+    )
+    directory = FriendlyNameDirectory(str(path))
+
+    directory.set_friendly_name("bob1", "Robert")
+
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["USER_FRIENDLY_NAMES"]["bob1"] == "Robert"
+    assert on_disk["USER_FRIENDLY_NAMES"]["carl1"] == "Carl"
+    assert on_disk["EXCLUDED_USERS"] == ["N/A"]
+
+
+def test_friendly_name_directory_rejects_empty_name(tmp_path):
+    path = tmp_path / "friendlynames.json"
+    path.write_text(json.dumps({"EXCLUDED_USERS": [], "USER_FRIENDLY_NAMES": {}}), encoding="utf-8")
+    directory = FriendlyNameDirectory(str(path))
+
+    with pytest.raises(ValueError):
+        directory.set_friendly_name("someone", "   ")
+
+
+@pytest.mark.asyncio
+async def test_set_user_friendly_name_by_admin_resolves_via_plex_session(tmp_path):
+    store = _store(tmp_path)
+    db_path = str(tmp_path / "admin_tools.db")
+    PlexAuthSessionStore(f"sqlite:///{db_path}").save(
+        PlexAuthSession(session_id="s1", user_id="u1", username="steve1", display_name="Steve", is_admin=False)
+    )
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.set_user_friendly_name(user_query="steve1", friendly_name="Steven")
+
+    assert result["ok"] is True
+    assert result["username"] == "steve1"
+    assert tools.friendly_names.resolve("steve1") == "Steven"
+
+
+@pytest.mark.asyncio
+async def test_set_user_friendly_name_unknown_user(tmp_path):
+    store = _store(tmp_path)
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.set_user_friendly_name(user_query="nobody-here", friendly_name="Whoever")
+
+    assert result["ok"] is False
+    assert result["reason"] == "user_not_found"

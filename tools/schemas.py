@@ -179,6 +179,26 @@ class SetMotdInput(ToolInput):
     message: str = Field(description="The system-wide notice text.")
 
 
+class ResolveAdminTaskInput(ToolInput):
+    note_id: int | None = Field(default=None, ge=1, description="The exact task's note_id from a recent get_admin_task_summary result in this conversation. Prefer this when available — it resolves unambiguously.")
+    task_query: str | None = Field(default=None, description="Fallback when note_id is unknown: describe the task/title/issue in plain language. If it matches more than one open task, you'll be asked to pick one instead of guessing.")
+
+    @model_validator(mode="after")
+    def _require_target(self) -> "ResolveAdminTaskInput":
+        if self.note_id is None and not (self.task_query and self.task_query.strip()):
+            raise ValueError("Provide either note_id (from a prior get_admin_task_summary result) or task_query describing the task.")
+        return self
+
+
+class SetUserFriendlyNameInput(ToolInput):
+    user_query: str = Field(description="The target user: friendly name, username, display name, or user ID.")
+    friendly_name: str = Field(min_length=1, max_length=60, description="The new friendly name for that user.")
+
+
+class SetMyFriendlyNameInput(ToolInput):
+    friendly_name: str = Field(min_length=1, max_length=60, description="The new friendly name for the current authenticated user.")
+
+
 # --- Escalation -------------------------------------------------------------
 
 

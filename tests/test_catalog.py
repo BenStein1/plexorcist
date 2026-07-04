@@ -53,8 +53,11 @@ def _user(is_admin: bool = False) -> UserContext:
 
 
 def test_catalog_covers_all_legacy_tools():
+    # Superset, not exact match: the catalog has grown beyond the original
+    # 29 tools (e.g. resolve_admin_task, friendly-name tools) since the
+    # MCP migration, and is expected to keep growing.
     catalog_names = {spec.name for spec in CATALOG}
-    assert catalog_names == LEGACY_TOOL_NAMES
+    assert catalog_names >= LEGACY_TOOL_NAMES
 
 
 def test_every_schema_forbids_extra_args():
@@ -139,3 +142,29 @@ def test_admin_summary_specific_user_requires_user_query():
     with pytest.raises(ValidationError, match="user_query"):
         schemas.AdminTaskSummaryInput.model_validate({"scope": "specific_user"})
     schemas.AdminTaskSummaryInput.model_validate({"scope": "all_users"})
+
+
+def test_resolve_admin_task_requires_note_id_or_task_query():
+    with pytest.raises(ValidationError):
+        schemas.ResolveAdminTaskInput.model_validate({})
+    schemas.ResolveAdminTaskInput.model_validate({"note_id": 1})
+    schemas.ResolveAdminTaskInput.model_validate({"task_query": "Oak Island"})
+
+
+def test_friendly_name_inputs_enforce_length_bounds():
+    with pytest.raises(ValidationError):
+        schemas.SetMyFriendlyNameInput.model_validate({"friendly_name": ""})
+    with pytest.raises(ValidationError):
+        schemas.SetUserFriendlyNameInput.model_validate({"user_query": "steve", "friendly_name": "x" * 61})
+    schemas.SetMyFriendlyNameInput.model_validate({"friendly_name": "Steve"})
+
+
+def test_resolve_admin_task_and_set_user_friendly_name_are_admin_only():
+    settings = Settings()
+    admin_names = {spec.name for spec in visible_specs(_user(is_admin=True), settings)}
+    normal_names = {spec.name for spec in visible_specs(_user(is_admin=False), settings)}
+    for name in ("resolve_admin_task", "set_user_friendly_name"):
+        assert name in admin_names
+        assert name not in normal_names
+    # self-service rename is not admin-gated
+    assert "set_my_friendly_name" in normal_names

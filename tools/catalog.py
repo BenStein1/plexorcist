@@ -76,6 +76,7 @@ class Toolkit:
     escalation: EscalationTools
     admin_tools: AdminTools
     admin_alerts: AdminAlertReporter
+    friendly_names: "FriendlyNameDirectory"
 
     # -- auth-bound wrappers --------------------------------------------
 
@@ -163,6 +164,30 @@ class Toolkit:
             return self._admin_required()
         return await self.admin_tools.clear_admin_motd()
 
+    async def resolve_admin_task(self, note_id: int | None = None, task_query: str | None = None) -> dict:
+        if not self.is_admin:
+            return self._admin_required()
+        return await self.admin_tools.resolve_admin_task(note_id=note_id, task_query=task_query)
+
+    async def set_user_friendly_name(self, user_query: str, friendly_name: str) -> dict:
+        if not self.is_admin:
+            return self._admin_required()
+        return await self.admin_tools.set_user_friendly_name(user_query=user_query, friendly_name=friendly_name)
+
+    async def set_my_friendly_name(self, friendly_name: str) -> dict:
+        if not self.user or not self.user.username:
+            return self._auth_required()
+        try:
+            self.friendly_names.set_friendly_name(self.user.username, friendly_name)
+        except ValueError as exc:
+            return {"ok": False, "action": "set_my_friendly_name", "reason": "invalid_input", "user_summary": str(exc)}
+        return {
+            "ok": True,
+            "action": "set_my_friendly_name",
+            "friendly_name": friendly_name.strip(),
+            "user_summary": f"Done — you're {friendly_name.strip()} now.",
+        }
+
 
 def build_toolkit(settings: Settings, store: ConversationStore, user: UserContext | None) -> Toolkit:
     ombi = OmbiClient(settings.ombi_base_url, settings.ombi_api_key)
@@ -200,6 +225,7 @@ def build_toolkit(settings: Settings, store: ConversationStore, user: UserContex
             verify_wait_seconds=settings.transmission_maintenance_verify_wait_seconds,
         ),
         admin_alerts=AdminAlertReporter(prowl),
+        friendly_names=friendly_names,
     )
 
 
@@ -430,6 +456,16 @@ CATALOG: list[ToolSpec] = [
         resolve=lambda tk: tk.get_user_watch_context,
         tags=_tags(READONLY),
     ),
+    ToolSpec(
+        name="set_my_friendly_name",
+        description=(
+            "Set how the CURRENT authenticated user is addressed by name in chat and in admin notices. "
+            "Use only when the user explicitly asks to change their own name/nickname (e.g. 'call me X', 'change my name to X'). "
+            "Never use this to rename anyone else — for that, an admin uses set_user_friendly_name."
+        ),
+        input_model=schemas.SetMyFriendlyNameInput,
+        resolve=lambda tk: tk.set_my_friendly_name,
+    ),
     # --- Admin ------------------------------------------------------------
     ToolSpec(
         name="get_openai_token_usage",
@@ -453,11 +489,35 @@ CATALOG: list[ToolSpec] = [
         description=(
             "Admin-only task dashboard over compact memory/task summaries (not raw conversations). "
             "Use when the admin asks about open user tasks, unresolved issues, or what a named user has pending. "
-            "scope='all_users' for broad questions ('any open tasks?', 'anything new?'); scope='specific_user' only when a user is named."
+            "scope='all_users' for broad questions ('any open tasks?', 'anything new?'); scope='specific_user' only when a user is named. "
+            "Each returned task includes a note_id — use it with resolve_admin_task to close a task once it's actually fixed, so it stops showing up here."
         ),
         input_model=schemas.AdminTaskSummaryInput,
         resolve=lambda tk: tk.get_admin_task_summary,
         tags=_tags(ADMIN, READONLY),
+    ),
+    ToolSpec(
+        name="resolve_admin_task",
+        description=(
+            "Admin-only: mark an open task/issue as resolved so it stops appearing in get_admin_task_summary. "
+            "Use when the admin says a task/issue is fixed, done, resolved, handled, or no longer needed. "
+            "Prefer note_id from a get_admin_task_summary result seen earlier in this conversation — it's unambiguous. "
+            "Otherwise pass task_query describing it; if that matches more than one open task, ask the admin which one instead of guessing which to close."
+        ),
+        input_model=schemas.ResolveAdminTaskInput,
+        resolve=lambda tk: tk.resolve_admin_task,
+        tags=_tags(ADMIN),
+    ),
+    ToolSpec(
+        name="set_user_friendly_name",
+        description=(
+            "Admin-only: set how a specific user is addressed by name in chat and in admin notices. "
+            "Use when the admin asks to rename/relabel a user or set someone else's nickname. "
+            "Resolve the target with user_query (friendly name, username, display name, or user ID) — if ambiguous, ask which user before guessing."
+        ),
+        input_model=schemas.SetUserFriendlyNameInput,
+        resolve=lambda tk: tk.set_user_friendly_name,
+        tags=_tags(ADMIN),
     ),
     ToolSpec(
         name="send_admin_message",

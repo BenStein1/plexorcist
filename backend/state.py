@@ -614,6 +614,20 @@ class ConversationStore:
             )
         return messages
 
+    def resolve_user_memory_note(self, note_id: int) -> bool:
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE user_memory_notes
+                SET status = 'resolved', updated_at = ?
+                WHERE id = ?
+                  AND status IN ('open', 'unresolved')
+                """,
+                (now, int(note_id)),
+            )
+            return int(cursor.rowcount or 0) > 0
+
     def mark_admin_messages_read(self, user_id: str, message_ids: list[int]) -> int:
         ids = [int(item) for item in message_ids if item is not None]
         if not ids:
