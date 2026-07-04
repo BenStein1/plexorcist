@@ -27,7 +27,7 @@ The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage,
 
 `backend/`
 
-- `main.py`: FastAPI routes, app startup, tool registration, auth callback, static UI, memory sweeper.
+- `main.py`: FastAPI routes, app startup, agent/tool-bridge construction, auth callback, static UI, memory sweeper, `/mcp` mount.
 - `agent.py`: LLM response orchestration, prompt assembly, tool-call handling, admin alert behavior.
 - `auth_context.py`: user context providers for development, Plex OAuth, Ombi session, and header passthrough modes.
 - `auth_store.py`: Plex OAuth session persistence.
@@ -39,11 +39,14 @@ The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage,
 
 `clients/`
 
-- Service adapters for Ombi, Plex auth, Plex, SickChill/SickRage, Radarr, Tautulli, Jackett, Transmission, Prowl, and LLM providers.
+- Service adapters for Ombi, Plex auth, Plex, SickChill/SickRage, Radarr, Tautulli, Jackett, Transmission, and Prowl.
+- `llm_providers.py`: the provider-agnostic LLM layer (official `openai`/`anthropic` SDKs, `httpx` for Ollama) behind a neutral internal tool-call format.
 
 `tools/`
 
-- Narrow backend operations exposed to the assistant, grouped around media search, requests, repairs, recommendations, and escalation.
+- `catalog.py`/`schemas.py`: the single source of truth for every tool — typed pydantic input models, when-to-use descriptions, and role/flag gating (admin-only, escalation-only).
+- `bridge.py`: adapts the catalog to the LLM tool-call contract for the in-process chat agent (every call gets a result, including validation/handler errors).
+- `server.py`: builds the same catalog as a real MCP (FastMCP) server for the `/mcp` endpoint and external clients.
 
 `static/`
 
@@ -188,6 +191,10 @@ The deploy helper should sync the repo root with `.rsync-filter` exclusions, not
 
 If the service fails to start after deploy, check that any new runtime module was actually included in the sync and then read the server-side `plexorcist.log` before assuming the database is at fault.
 
+**See [`DEPLOY_NOTES.md`](DEPLOY_NOTES.md)** for the server venv/pip gotchas and
+the FreeBSD Rust-toolchain workaround needed for some dependencies — required
+reading before running `pip install` on the production host.
+
 ## Status
 
 The original scaffold goals are mostly complete:
@@ -196,6 +203,6 @@ The original scaffold goals are mostly complete:
 - Plex OAuth session handling is implemented.
 - Conversation state now tracks media context, pending actions, memory, and support context.
 - Service clients are implemented for the active media stack.
-- The LLM tool-calling loop operates against bounded real tools, with OpenAI, Anthropic, and Ollama provider adapters implemented behind the local `clients/llm.py` connector.
+- The LLM tool-calling loop operates against bounded real tools, with OpenAI, Anthropic, and Ollama provider adapters implemented behind `clients/llm_providers.py`.
 
 Remaining work is mostly refinement rather than foundational plumbing: more diagnostics, better ranking/disambiguation, UI polish, and continued tuning of assistant behavior.
