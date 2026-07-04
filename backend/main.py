@@ -27,26 +27,12 @@ from backend.config import Settings, get_settings
 from backend.logging import AuditLogger, configure_logging
 from backend.models import ChatRequest, ChatResponse, DevImpersonationRequest, PlexAuthSession, UserContext
 from backend.state import ConversationStore
-from clients.jackett_client import JackettClient
-from clients.llm import LlmClient, LlmProviderConfig, UsageRecorder, build_llm_client
+from clients.llm_providers import ChatTurn, LlmClient, LlmProviderConfig, UsageRecorder, build_llm_client
 from clients.ombi_client import OmbiClient
 from clients.plex_auth_client import PlexAuthClient
-from clients.plex_client import PlexClient
 from clients.prowl_client import ProwlClient
-from clients.radarr_client import RadarrClient
-from clients.sickchill_client import SickChillClient
 from clients.tautulli_client import TautulliClient
-from clients.transmission_client import TransmissionClient
-from tools.escalation_tools import EscalationTools
-from tools.episode_tools import EpisodeTools
-from tools.media_search import MediaSearchTools
-from tools.movie_repair_tools import MovieRepairTools
-from tools.repair_tools import RepairTools
-from tools.recommendation_tools import RecommendationTools
-from tools.registry import ToolRegistry
-from tools.request_tools import RequestTools
-from tools.admin_tools import AdminTools
-from tools.admin_alerts import AdminAlertReporter
+from tools.bridge import build_bridge
 
 app = FastAPI(title="Plexorcist Concierge")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -76,53 +62,6 @@ _NILBOG_PUSHBACK_TERMS = (
     "hissing tape",
     "hissing tapes",
 )
-_OPENAI_TOKEN_PRICES_PER_MILLION = {
-    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
-    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
-    "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.20, "output": 1.25},
-}
-
-
-def _estimate_openai_cost_usd(model: str, totals: dict) -> float | None:
-    prices = _OPENAI_TOKEN_PRICES_PER_MILLION.get(model)
-    if not prices:
-        return None
-    uncached_input = max(0, int(totals.get("uncached_input_tokens") or 0))
-    cached_input = max(0, int(totals.get("cached_input_tokens") or 0))
-    output = max(0, int(totals.get("output_tokens") or 0))
-    return round(
-        (
-            (uncached_input * float(prices["input"]))
-            + (cached_input * float(prices["cached_input"]))
-            + (output * float(prices["output"]))
-        )
-        / 1_000_000,
-        6,
-    )
-
-
-def _build_openai_usage_report(store: ConversationStore, model: str) -> dict:
-    now = datetime.utcnow()
-    month_start = datetime(now.year, now.month, 1)
-    year_start = datetime(now.year, 1, 1)
-    mtd = store.summarize_openai_token_usage_since(model=model, since=month_start)
-    ytd = store.summarize_openai_token_usage_since(model=model, since=year_start)
-    mtd["estimated_cost_usd"] = _estimate_openai_cost_usd(model, mtd)
-    ytd["estimated_cost_usd"] = _estimate_openai_cost_usd(model, ytd)
-    other_models = store.list_openai_usage_other_models_since(model=model, since=year_start)
-    return {
-        "ok": True,
-        "action": "openai_token_usage_summary",
-        "model": model,
-        "currency": "USD",
-        "cost_basis": "estimated_raw_cost_before_credits_or_grants",
-        "mtd": mtd,
-        "ytd": ytd,
-        "other_models_present": bool(other_models),
-        "other_models": other_models,
-    }
-
-
 def _build_llm_client(settings: Settings, usage_recorder: UsageRecorder | None) -> LlmClient | None:
     return build_llm_client(
         LlmProviderConfig(
@@ -267,559 +206,23 @@ def _load_plex_client_identifier(settings: Settings) -> str:
 
 def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[ConciergeAgent, ConversationStore, AuditLogger]:
     store = ConversationStore(settings.database_url)
-    ombi = OmbiClient(settings.ombi_base_url, settings.ombi_api_key)
-    plex = PlexClient(settings.plex_base_url, settings.plex_token)
-    radarr = RadarrClient(settings.radarr_base_url, settings.radarr_api_key)
-    sickchill = SickChillClient(settings.sickchill_base_url, settings.sickchill_api_key, tv_root=settings.sickchill_tv_root)
-    tautulli = TautulliClient(settings.tautulli_base_url, settings.tautulli_api_key)
-    jackett = JackettClient(settings.jackett_base_url, settings.jackett_api_key)
-    transmission = TransmissionClient(
-        settings.transmission_host,
-        username=settings.transmission_user,
-        password=settings.transmission_password,
-    )
+    bridge = build_bridge(settings, store, user, after_call=None)
     prowl = ProwlClient(settings.prowl_api_key)
-    friendly_names = FriendlyNameDirectory(settings.friendly_names_path)
-    admin_alerts = AdminAlertReporter(prowl)
-
-    media = MediaSearchTools(ombi, plex)
-    requests = RequestTools(ombi)
-    episodes = EpisodeTools(plex, sickchill)
-    movie_repairs = MovieRepairTools(ombi, radarr)
-    repairs = RepairTools(ombi, sickchill)
-    recs = RecommendationTools(tautulli)
-    escalation = EscalationTools(jackett, transmission, prowl, user_label=_user_label(user) if user else None)
-    admin_tools = AdminTools(
-        transmission,
-        store=store,
-        friendly_names=friendly_names,
-        verify_wait_seconds=settings.transmission_maintenance_verify_wait_seconds,
-    )
-
-    bound_username = user.username if user else None
-    bound_user_id = user.user_id if user else None
-
-    async def _request_movie_for_authenticated_user(
-        tmdb_id: int | None = None,
-        title: str | None = None,
-        year: int | None = None,
-    ) -> dict:
-        if not bound_username:
-            return {"ok": False, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await requests.request_movie_for_user(
-            username=bound_username,
-            tmdb_id=tmdb_id,
-            title=title,
-            year=year,
-        )
-
-    async def _request_show_scope_for_authenticated_user(tvdb_id: int, scope: str) -> dict:
-        if not bound_username:
-            return {"ok": False, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await requests.request_show_scope_for_user(username=bound_username, tvdb_id=tvdb_id, scope=scope)
-
-    async def _request_episode_for_authenticated_user(tvdb_id: int, season: int, episode: int) -> dict:
-        if not bound_username:
-            return {"ok": False, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await requests.request_episode_for_user(
-            username=bound_username,
-            tvdb_id=tvdb_id,
-            season=season,
-            episode=episode,
-        )
-
-    async def _check_movie_request_status_for_authenticated_user(query: str) -> dict:
-        if not bound_username:
-            return {"ok": False, "query": query, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await requests.check_movie_request_status(query=query, username=bound_username)
-
-    async def _check_show_request_status_for_authenticated_user(query: str) -> dict:
-        if not bound_username:
-            return {"ok": False, "query": query, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await requests.check_show_request_status(query=query, username=bound_username)
-
-    async def _get_authenticated_user_watch_context() -> dict:
-        if not bound_username and not bound_user_id:
-            return {"resolved": False, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await recs.get_user_watch_context(user_id=bound_user_id, username=bound_username)
-
-    async def _get_openai_token_usage() -> dict:
-        if not user or not user.is_admin:
-            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return _build_openai_usage_report(store, settings.effective_llm_model)
-
-    async def _run_transmission_maintenance() -> dict:
-        if not user or not user.is_admin:
-            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return await admin_tools.run_transmission_maintenance()
-
-    async def _get_admin_task_summary(
-        user_query: str | None = None,
-        scope: str = "all_users",
-        days: int = 30,
-        limit: int = 20,
-    ) -> dict:
-        if not user or not user.is_admin:
-            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return await admin_tools.get_admin_task_summary(user_query=user_query, scope=scope, days=days, limit=limit)
-
-    async def _send_admin_message(message: str, user_query: str | None = None, task_query: str | None = None) -> dict:
-        if not user or not user.is_admin:
-            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return await admin_tools.send_admin_message(
-            user_query=user_query,
-            task_query=task_query,
-            message=message,
-            sender_user_id=user.user_id,
-            sender_name=user.display_name or user.username or "Ben",
-        )
-
-    async def _set_admin_motd(message: str) -> dict:
-        if not user or not user.is_admin:
-            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return await admin_tools.set_admin_motd(
-            message=message,
-            sender_user_id=user.user_id,
-            sender_name=user.display_name or user.username or "Ben",
-        )
-
-    async def _clear_admin_motd() -> dict:
-        if not user or not user.is_admin:
-            return {"ok": False, "action": "admin_required", "reason": "admin_only"}
-        return await admin_tools.clear_admin_motd()
-
-    async def _after_tool_call(tool_record) -> None:
-        await admin_alerts.report_tool_call(user, tool_record)
-
-    registry = ToolRegistry(after_call=_after_tool_call)
-    registry.register(
-        "search_media",
-        media.search_media,
-        "Search for movie or TV show candidates and include whether Plex already has the best match. Use this to resolve a title before requesting. If multiple plausible candidates are returned, ask the user which one they mean instead of guessing.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_movie_availability",
-        media.check_movie_availability,
-        "Check whether a movie is already available in Plex.",
-        {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-            },
-            "required": ["title"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_movies_availability_batch",
-        media.check_movies_availability_batch,
-        "Check several concrete movie titles in Plex in one pass. Use this when you already know likely titles for a person/catalog question and need to verify them before claiming the library has none.",
-        {
-            "type": "object",
-            "properties": {
-                "titles": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-            "required": ["titles"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_existing_media_status",
-        media.check_existing_media_status,
-        "Read-only title status check. Use this to answer availability or request questions, or to resolve title ambiguity. For requested TV troubleshooting, prefer `repair_requested_show` first.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_library_inventory",
-        media.check_library_inventory,
-        "Read-only side-by-side inventory search. Use this when the user asks what is actually in Plex versus what exists in Ombi, especially for broad library questions like an actor, director, collection, or 'what do we have and what do we need'.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "request_movie_for_user",
-        _request_movie_for_authenticated_user,
-        "Submit a movie request through Ombi for the authenticated user. Pass either a positive TMDB ID, or both exact movie title and release year. Do not call this with title only.",
-        {
-            "type": "object",
-            "properties": {
-                "tmdb_id": {"type": "integer"},
-                "title": {"type": "string"},
-                "year": {"type": "integer"},
-            },
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "request_show_scope_for_user",
-        _request_show_scope_for_authenticated_user,
-        "Submit a TV request through Ombi for the authenticated user with a specific scope such as first_season or full_series. Only call this with a positive show ID returned by a prior search/status tool or explicitly provided by the user.",
-        {
-            "type": "object",
-            "properties": {
-                "tvdb_id": {"type": "integer", "minimum": 1},
-                "scope": {"type": "string"},
-            },
-            "required": ["tvdb_id", "scope"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "request_episode_for_user",
-        _request_episode_for_authenticated_user,
-        "Submit a single-episode TV request through Ombi for the authenticated user. Only call this with a positive show ID returned by a prior search/status tool or explicitly provided by the user.",
-        {
-            "type": "object",
-            "properties": {
-                "tvdb_id": {"type": "integer", "minimum": 1},
-                "season": {"type": "integer"},
-                "episode": {"type": "integer"},
-            },
-            "required": ["tvdb_id", "season", "episode"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_movie_request_status",
-        _check_movie_request_status_for_authenticated_user,
-        "Check whether a movie already exists in Ombi for the authenticated user.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "repair_requested_movie",
-        movie_repairs.repair_requested_movie,
-        "Primary movie repair tool. Use directly when a user says a movie downloaded wrong, has bad language/audio, needs a replacement/refetch/retry, or needs to be re-added to Radarr. Pass clean movie identity in title/year, and put the complaint or desired action in issue. Do not include repair instructions or complaint text in title. The tool performs Ombi/Radarr checks internally and never deletes files.",
-        {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "year": {"type": "integer"},
-                "issue": {"type": "string"},
-                "query": {"type": "string"},
-            },
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_show_request_status",
-        _check_show_request_status_for_authenticated_user,
-        "Check whether a TV show already exists in Ombi for the authenticated user.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "get_show_season_status",
-        requests.get_show_season_status,
-        "Read-only Ombi episode table for a show or season. Use this when the user explicitly wants a status listing, not as the first repair step for a requested TV problem.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "season": {"type": "integer"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "repair_requested_show",
-        repairs.repair_requested_show,
-        "Primary TV troubleshooting tool. It runs the SickChill repair loop episode-by-episode: if ignored set wanted, if wanted/missing/processing trigger manual search, then continue. Ombi request lookup is a soft gate; if Ombi lookup fails and a concrete season/episode target is provided, the tool still checks SickChill. Pass `tvdb_id` only when the user provides it or an earlier tool result returned it; do not infer one from memory.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "scope": {"type": "string", "enum": ["show", "season", "episode"]},
-                "season": {"type": "integer", "minimum": 1},
-                "episode": {"type": "integer", "minimum": 1},
-                "tvdb_id": {"type": "integer", "minimum": 1},
-            },
-            "required": ["query", "scope"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "add_requested_show_to_sickchill",
-        repairs.add_requested_show_to_sickchill,
-        "Repair a requested TV show that exists in Ombi but is missing in SickChill. Without `season`, add the full show. Pass `season` only when the user explicitly asks to repair one season.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "tvdb_id": {"type": "integer", "minimum": 1},
-                "season": {"type": "integer", "minimum": 1},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_episode_status",
-        episodes.check_episode_status,
-        "Read-only support tool. Inspect a specific TV episode across Plex and SickChill without changing state.",
-        {
-            "type": "object",
-            "properties": {
-                "show": {"type": "string"},
-                "season": {"type": "integer"},
-                "episode": {"type": "integer"},
-                "tvdb_id": {"type": "integer", "minimum": 1},
-            },
-            "required": ["show", "season", "episode"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "check_episode_file",
-        episodes.check_episode_file,
-        "Support tool. Check whether a specific TV episode exists in Plex and SickChill-backed storage.",
-        {
-            "type": "object",
-            "properties": {
-                "show": {"type": "string"},
-                "season": {"type": "integer"},
-                "episode": {"type": "integer"},
-            },
-            "required": ["show", "season", "episode"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "trigger_sickchill_manual_search",
-        episodes.trigger_sickchill_manual_search,
-        "Support tool. If Plex confirms a TV episode is missing, ensure SickChill has it marked wanted and trigger the manual search button for that episode.",
-        {
-            "type": "object",
-            "properties": {
-                "show": {"type": "string"},
-                "season": {"type": "integer"},
-                "episode": {"type": "integer"},
-            },
-            "required": ["show", "season", "episode"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "clear_sickchill_ignored_episodes",
-        episodes.clear_sickchill_ignored_episodes,
-        "Support tool. Clear SickChill ignored status by marking episodes wanted again, without starting a search unless the user asks for one.",
-        {
-            "type": "object",
-            "properties": {
-                "show": {"type": "string"},
-                "season": {"type": "integer"},
-            },
-            "required": ["show"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "get_user_watch_context",
-        _get_authenticated_user_watch_context,
-        "Get read-only watch history context for the authenticated user to support recommendations and gentle nudges.",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "get_openai_token_usage",
-        _get_openai_token_usage,
-        "Admin-only OpenAI token odometer. Use when the admin asks about OpenAI token usage, MTD/YTD usage, billing estimate, API cost, or current model cost. Returns MTD and YTD token totals plus estimated raw cost before credits for the configured model.",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "run_transmission_maintenance",
-        _run_transmission_maintenance,
-        "Admin-only Transmission maintenance action. Use only when the admin asks to clean up Transmission, clear old/bad torrents, remove errored torrents, refresh stalled torrents, or ask trackers for more peers. Verifies completed torrents, removes torrents still reporting errors, and reannounces stalled 0% active torrents. Return a short count summary only.",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "get_admin_task_summary",
-        _get_admin_task_summary,
-        "Admin-only task dashboard. Use when the admin asks about open user tasks, unresolved user issues, pending user problems, or what a named user has pending. Use scope=all_users for broad/system-wide questions like 'any open tasks' or 'anything new'. Use scope=specific_user only when the admin names a user/friendly name/username/user ID. Reads compact memory/task summaries, not raw conversations.",
-        {
-            "type": "object",
-            "properties": {
-                "user_query": {"type": "string"},
-                "scope": {"type": "string", "enum": ["all_users", "specific_user"]},
-                "days": {"type": "integer", "minimum": 1, "maximum": 365},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-            },
-            "required": ["scope"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "send_admin_message",
-        _send_admin_message,
-        "Admin-only message delivery. Use when the admin asks to send an admin note/message to a user. If the admin names a user, pass that in user_query. If the admin says whoever/requester/person tied to a title or issue, pass the title/issue in task_query and leave user_query empty so the backend resolves the affected user from open tasks. Do not guess the recipient from prior chat prose. Do not validate media titles or call media tools. The message should preserve the admin's intended note in plain language.",
-        {
-            "type": "object",
-            "properties": {
-                "user_query": {"type": "string"},
-                "task_query": {"type": "string"},
-                "message": {"type": "string"},
-            },
-            "required": ["message"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "set_admin_motd",
-        _set_admin_motd,
-        "Admin-only global message of the day. Use when the admin asks to set a system-wide MOTD or system issue notice. Do not validate media titles or call media tools.",
-        {
-            "type": "object",
-            "properties": {
-                "message": {"type": "string"},
-            },
-            "required": ["message"],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "clear_admin_motd",
-        _clear_admin_motd,
-        "Admin-only MOTD clear action. Use when the admin says the system issue is over or asks to clear/remove the MOTD.",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-    )
-    registry.register(
-        "broad_jackett_episode_search",
-        escalation.broad_jackett_episode_search,
-        "Privately search configured sources broadly for a specific episode after normal automation has failed. Do not cap results at 1080p; sort by seeders and treat quality as metadata only.",
-        {
-            "type": "object",
-            "properties": {
-                "query_variants": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-            "required": ["query_variants"],
-            "additionalProperties": False,
-        },
-    )
-    if settings.movie_direct_source_enabled:
-        registry.register(
-            "broad_jackett_movie_search",
-            escalation.broad_jackett_movie_search,
-            "Privately search configured sources broadly for a missing movie after normal automation has failed. Do not cap results at 1080p; sort by seeders and treat quality as metadata only.",
-            {
-                "type": "object",
-                "properties": {
-                    "query_variants": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                },
-                "required": ["query_variants"],
-                "additionalProperties": False,
-            },
-        )
-    registry.register(
-        "send_admin_prowl_notice",
-        escalation.send_admin_prowl_notice,
-        "Send a short private operational notice to the admin when policy says an issue needs attention.",
-        {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string"},
-                "priority": {"type": "integer"},
-            },
-            "required": ["summary"],
-            "additionalProperties": False,
-        },
-    )
-    if settings.movie_direct_source_enabled:
-        registry.register(
-            "add_transmission_candidate",
-            escalation.add_transmission_candidate,
-            "Add a vetted magnet link or torrent URL to the downloader with the correct label.",
-            {
-                "type": "object",
-                "properties": {
-                    "magnet_or_url": {"type": "string"},
-                    "label": {"type": "string"},
-                },
-                "required": ["magnet_or_url", "label"],
-                "additionalProperties": False,
-            },
-        )
     return (
         ConciergeAgent(
-            registry,
+            bridge,
             ombi_continue_url=settings.ombi_continue_url,
             llm_client=_build_llm_client(settings, store.record_openai_token_usage),
             admin_label=settings.admin_display_name or "the admin",
             prowl=prowl,
             movie_direct_source_enabled=settings.movie_direct_source_enabled,
+            max_turns=settings.agent_max_turns,
         ),
         store,
         AuditLogger(),
     )
 
 
-def _user_label(user: UserContext) -> str:
-    display_name = (user.display_name or "").strip()
-    username = (user.username or "").strip()
-    if display_name and username and display_name.lower() != username.lower():
-        return f"{display_name} ({username})"
-    return display_name or username or "Unknown user"
 async def _get_current_user_optional(request: Request, settings: Settings) -> UserContext | None:
     return await get_optional_user_context(request, settings)
 
@@ -1025,23 +428,23 @@ async def _summarize_inactive_conversation(
         "Keep it compact and factual."
     )
     prior_summary = str(existing_memory.get("rolling_summary") or "")
-    input_items = [
-        {"role": "developer", "content": instructions},
-        {
-            "role": "developer",
-            "content": (
+    conversation: list[ChatTurn] = [
+        ChatTurn("system", instructions),
+        ChatTurn(
+            "system",
+            (
                 "Existing rolling summary:\n"
                 f"{prior_summary}\n"
                 "Now summarize the completed interaction transcript below."
             ),
-        },
-        {"role": "user", "content": json.dumps(transcript, ensure_ascii=False)},
+        ),
+        ChatTurn("user", json.dumps(transcript, ensure_ascii=False)),
     ]
     try:
         response = await client.generate_response(
             instructions="Produce strict JSON only.",
-            input_items=input_items,
-            tool_schemas=[],
+            conversation=conversation,
+            tools=[],
             usage_context={
                 "user_id": user.user_id,
                 "username": user.username,

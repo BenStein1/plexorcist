@@ -115,6 +115,7 @@ class Settings(BaseSettings):
     memory_recent_notes_limit: int = env_field(default=12, env="MEMORY_RECENT_NOTES_LIMIT")
     memory_tier1_keep: int = env_field(default=40, env="MEMORY_TIER1_KEEP")
     memory_tier2_to_tier3_threshold: int = env_field(default=8, env="MEMORY_TIER2_TO_TIER3_THRESHOLD")
+    agent_max_turns: int = env_field(default=6, env="AGENT_MAX_TURNS")
 
     def is_dev_impersonation_mode(self) -> bool:
         return self.auth_mode in {"dev", "dev_impersonate"}

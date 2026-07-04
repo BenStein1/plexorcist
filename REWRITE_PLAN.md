@@ -46,8 +46,8 @@ Ben's explicit call.
 |---|---|---|
 | 0 — pydantic v2 + pytest harness | DONE | 196fbd2 |
 | 1 — MCP tool catalog + FastMCP server | DONE | 161842c |
-| 2 — provider layer on official SDKs | IN FLIGHT (Sonnet 5 subagent, full spec given) | — |
-| 3 — agent loop rewrite + prompt shrink | pending | — |
+| 2 — provider layer on official SDKs | DONE (Sonnet 5, reviewed) | 06ba4c9 |
+| 3 — agent loop rewrite + prompt shrink | DONE (Sonnet 5, reviewed) | this commit |
 | 4 — external /mcp endpoint + docs | pending | — |
 | 5 — final verification (live chat flows per provider) | pending | — |
 
@@ -131,6 +131,11 @@ Rewrite `backend/agent.py` `ConciergeAgent.respond()` on the new layer:
   the registration block + per-user closures in `backend/main.py` (build_agent
   slims down to: store + ToolBridge + ConciergeAgent + llm client from
   `clients/llm_providers.build_llm_client`).
+- Also port the memory summarizer call in `backend/main.py` (~line 1041,
+  `_compact_conversation_memory` area): it calls the OLD
+  `generate_response(instructions, input_items, tool_schemas=[])` — convert its
+  developer/user input_items to ChatTurn("system"/"user", ...) on the new
+  interface.
 - Tests: fake LlmClient driving the loop — scripted tool calls verifying error
   round-trip (bad JSON args, validation error, handler raise -> model sees
   is_error result and loop continues), max-turns fallback, no reply overwrite

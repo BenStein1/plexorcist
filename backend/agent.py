@@ -5,12 +5,22 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+import anthropic
 import httpx
+import openai
 
-from backend.models import ChatMessage, ConversationState, UserContext
-from clients.llm import LlmClient
+from backend.models import ChatMessage, ConversationState, ToolCallRecord, UserContext
+from clients.llm_providers import (
+    AssistantTurn,
+    ChatTurn,
+    ConversationItem,
+    LlmClient,
+    ToolCall,
+    ToolResult,
+    ToolResultsTurn,
+)
 from clients.prowl_client import ProwlClient
-from tools.registry import ToolRegistry
+from tools.bridge import ToolBridge
 
 
 _ALERT_COOLDOWN_SECONDS = 10 * 60
@@ -22,23 +32,28 @@ _NILBOG_REDACTED_TEXT = (
     "ᛁᛏᛋᛖᛖᛋᚤᛟᚢᛞᛟᚾᛟᛏᛚᛟᛟᚲᛁᚾᛋᛁᛞᛖᚾᛟᛗᛟᚢᛏᚺᛟᚾᛚᚤᛏᛖᛖᛏᚺᚾᛟᛗᛁᚾᛞᛟᚾᛚᚤᛖᚤᛖᛋ"
 )
 
+_DEFAULT_MAX_TURNS = 6
+_MIN_MAX_TURNS = 2
+
 
 class ConciergeAgent:
     def __init__(
         self,
-        tools: ToolRegistry,
+        bridge: ToolBridge,
         ombi_continue_url: str,
         llm_client: LlmClient | None = None,
         admin_label: str = "the admin",
         prowl: ProwlClient | None = None,
         movie_direct_source_enabled: bool = False,
+        max_turns: int = _DEFAULT_MAX_TURNS,
     ) -> None:
-        self.tools = tools
+        self.bridge = bridge
         self.ombi_continue_url = ombi_continue_url
         self.admin_label = admin_label
         self.prowl = prowl
         self.movie_direct_source_enabled = movie_direct_source_enabled
         self.client = llm_client
+        self.max_turns = max(_MIN_MAX_TURNS, int(max_turns))
 
     async def respond(
         self,
@@ -46,7 +61,7 @@ class ConciergeAgent:
         state: ConversationState,
         message: str,
         extra_instructions: str | None = None,
-    ) -> tuple[str, list]:
+    ) -> tuple[str, list[ToolCallRecord]]:
         state.messages.append(ChatMessage(role="user", content=message))
 
         direct_admin_reply = self._maybe_answer_admin_identity(user, message)
@@ -62,7 +77,7 @@ class ConciergeAgent:
             return reply, []
 
         await self._prime_active_media_context(state)
-        input_items = self._build_input_items(state.messages, state)
+        conversation = self._build_conversation_items(state.messages, state)
         nilbog_portal_active = bool(state.support_context.get("nilbog_portal_active"))
         nilbog_memory_mode = str(state.support_context.get("nilbog_memory_mode") or "")
         instructions = self._build_instructions(
@@ -71,16 +86,16 @@ class ConciergeAgent:
             nilbog_portal_active=nilbog_portal_active,
             nilbog_memory_mode=nilbog_memory_mode,
         )
-        tool_calls = []
+        tool_calls: list[ToolCallRecord] = []
         alerted_keys: set[str] = set()
         last_failure_reason: str | None = None
 
-        for _ in range(6):
+        for _ in range(self.max_turns):
             try:
                 response = await self.client.generate_response(
                     instructions=instructions,
-                    input_items=input_items,
-                    tool_schemas=self.tools.llm_tool_schemas(),
+                    conversation=conversation,
+                    tools=self.bridge.tool_schemas(),
                     usage_context={
                         "user_id": user.user_id,
                         "username": user.username,
@@ -89,68 +104,37 @@ class ConciergeAgent:
                     },
                 )
             except httpx.TimeoutException:
+                reason = "llm_timeout_after_tool_calls" if tool_calls else None
+                fallback_text = "The chat brain timed out before I could finish that. Try again and I'll keep going."
+                return self._finish_with_error(user, state, tool_calls, reason, fallback_text)
+            except (httpx.HTTPError, openai.APIError, anthropic.APIError) as exc:
+                status_code = getattr(exc, "status_code", None)
+                logger.error("LLM provider error status=%s detail=%s", status_code, str(exc))
                 if tool_calls:
-                    reply = self._fallback_reply_from_tool_calls(user, tool_calls, "openai_timeout_after_tool_calls")
-                else:
-                    reply = "The chat brain timed out before I could finish that. Try again and I'll keep going."
-                state.messages.append(ChatMessage(role="assistant", content=reply))
-                state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
-                self._refresh_active_media_from_tool_calls(state, tool_calls)
-                return reply, tool_calls
-            except httpx.HTTPStatusError as exc:
-                detail = ""
-                try:
-                    error_payload = exc.response.json()
-                    if isinstance(error_payload, dict):
-                        err = error_payload.get("error")
-                        if isinstance(err, dict):
-                            detail = str(
-                                err.get("message")
-                                or err.get("type")
-                                or err.get("param")
-                                or ""
-                            )
-                        else:
-                            detail = str(error_payload)[:500]
-                except Exception:
-                    detail = (exc.response.text or "")[:500]
-                logger.error(
-                    "OpenAI responses API error status=%s detail=%s",
-                    exc.response.status_code,
-                    detail,
-                )
-                if tool_calls:
-                    reply = self._fallback_reply_from_tool_calls(
-                        user,
-                        tool_calls,
-                        f"openai_http_status_{exc.response.status_code}_after_tool_calls",
+                    reason = (
+                        f"llm_provider_error_status_{status_code}_after_tool_calls"
+                        if status_code is not None
+                        else "llm_provider_error_after_tool_calls"
                     )
+                    fallback_text = None
                 else:
-                    reply = f"I hit an upstream API error ({exc.response.status_code}) while generating that reply. Please retry."
-                state.messages.append(ChatMessage(role="assistant", content=reply))
-                state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
-                self._refresh_active_media_from_tool_calls(state, tool_calls)
-                return reply, tool_calls
-            except httpx.HTTPError:
-                if tool_calls:
-                    reply = self._fallback_reply_from_tool_calls(user, tool_calls, "openai_http_error_after_tool_calls")
-                else:
-                    reply = "I hit an upstream API error while generating that reply. Please retry."
-                state.messages.append(ChatMessage(role="assistant", content=reply))
-                state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
-                self._refresh_active_media_from_tool_calls(state, tool_calls)
-                return reply, tool_calls
-            function_calls = response.tool_calls
+                    reason = None
+                    fallback_text = (
+                        f"I hit an upstream API error ({status_code}) while generating that reply. Please retry."
+                        if status_code is not None
+                        else "I hit an upstream API error while generating that reply. Please retry."
+                    )
+                return self._finish_with_error(user, state, tool_calls, reason, fallback_text)
 
-            if function_calls:
-                input_items.extend(response.output_items)
-                for function_call in function_calls:
-                    arguments = self._parse_arguments(function_call.arguments)
-                    try:
-                        tool_record = await self.tools.call(function_call.name, **arguments)
-                    except Exception as exc:
-                        last_failure_reason = f"tool_call_failed:{function_call.name}:{exc}"
+            if response.tool_calls:
+                conversation.append(AssistantTurn(response.native_turn))
+                results: list[ToolResult] = []
+                for tool_call in response.tool_calls:
+                    result = await self.bridge.call(tool_call)
+                    results.append(result)
+                    if result.is_error:
                         continue
+                    tool_record = self._tool_call_record(tool_call, result)
                     tool_calls.append(tool_record)
                     self._refresh_active_media_context(state, tool_record.result)
                     alert = self._build_admin_alert(user, tool_record)
@@ -159,25 +143,20 @@ class ConciergeAgent:
                         if alert_key not in alerted_keys and self._should_send_admin_alert(alert_key):
                             await self._send_admin_alert(event=event, summary=summary, priority=priority)
                             alerted_keys.add(alert_key)
-                            if isinstance(tool_record.result, dict):
-                                tool_record.result["admin_alert_sent"] = True
-                                tool_record.result["admin_alert_event"] = event
-                    input_items.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": function_call.call_id,
-                            "output": json.dumps(tool_record.result),
-                        }
-                    )
+                            tool_record.result["admin_alert_sent"] = True
+                            tool_record.result["admin_alert_event"] = event
+                conversation.append(ToolResultsTurn(results))
                 continue
 
             reply = response.text
-            if not reply:
+            if not reply or not reply.strip():
                 last_failure_reason = "empty_model_text_response"
-                reply = "I ran the checks I could, but I need a little more detail to answer cleanly."
-            plain_reply = self._plain_support_reply_from_tool_calls(user, tool_calls)
-            if plain_reply is not None:
-                reply = plain_reply
+                plain_reply = self._plain_support_reply_from_tool_calls(user, tool_calls)
+                reply = (
+                    plain_reply
+                    if plain_reply is not None
+                    else "I ran the checks I could, but I need a little more detail to answer cleanly."
+                )
             state.messages.append(ChatMessage(role="assistant", content=reply))
             self._advance_nilbog_memory_mode(state, reply)
             state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
@@ -189,6 +168,28 @@ class ConciergeAgent:
         reply = self._fallback_reply_from_tool_calls(user, tool_calls, last_failure_reason)
         state.messages.append(ChatMessage(role="assistant", content=reply))
         self._advance_nilbog_memory_mode(state, reply)
+        state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
+        self._refresh_active_media_from_tool_calls(state, tool_calls)
+        return reply, tool_calls
+
+    def _tool_call_record(self, tool_call: ToolCall, result: ToolResult) -> ToolCallRecord:
+        arguments, _ = tool_call.parse_arguments()
+        result_dict = result.content if isinstance(result.content, dict) else {"value": result.content}
+        return ToolCallRecord(name=result.name, arguments=arguments or {}, result=result_dict)
+
+    def _finish_with_error(
+        self,
+        user: UserContext,
+        state: ConversationState,
+        tool_calls: list[ToolCallRecord],
+        failure_reason: str | None,
+        fallback_text: str | None,
+    ) -> tuple[str, list[ToolCallRecord]]:
+        if tool_calls and failure_reason:
+            reply = self._fallback_reply_from_tool_calls(user, tool_calls, failure_reason)
+        else:
+            reply = fallback_text or "I hit an upstream API error while generating that reply. Please retry."
+        state.messages.append(ChatMessage(role="assistant", content=reply))
         state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
@@ -845,38 +846,46 @@ class ConciergeAgent:
         if not title:
             return
 
+        tool_call = ToolCall(
+            call_id="prime_active_media",
+            name="get_show_season_status",
+            arguments_json=json.dumps({"query": str(title)}),
+        )
         try:
-            tool_record = await self.tools.call("get_show_season_status", query=str(title))
+            result = await self.bridge.call(tool_call)
         except Exception:
             logger.exception("Failed to prime active media context")
             return
-        result = tool_record.result
+        if result.is_error:
+            return
+        result_dict = result.content if isinstance(result.content, dict) else {}
+        tool_record = ToolCallRecord(name="get_show_season_status", arguments={"query": str(title)}, result=result_dict)
         state.last_tool_actions.append(tool_record.model_dump(mode="json"))
-        self._refresh_active_media_context(state, result)
+        self._refresh_active_media_context(state, tool_record.result)
 
-    def _build_input_items(self, messages: list[ChatMessage], state: ConversationState) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
+    def _build_conversation_items(self, messages: list[ChatMessage], state: ConversationState) -> list[ConversationItem]:
+        items: list[ConversationItem] = []
         time_context_text = self._build_time_context_text()
         if time_context_text:
-            items.append({"role": "developer", "content": time_context_text})
+            items.append(ChatTurn("system", time_context_text))
         admin_notices_text = self._build_admin_notices_text(state.support_context.get("admin_notices"))
         if admin_notices_text:
-            items.append({"role": "developer", "content": admin_notices_text})
+            items.append(ChatTurn("system", admin_notices_text))
         memory_text = self._build_long_term_memory_text(state.support_context.get("long_term_memory"))
         if memory_text:
-            items.append({"role": "developer", "content": memory_text})
+            items.append(ChatTurn("system", memory_text))
         context_text = self._build_active_media_context_text(state.support_context.get("active_media"))
         if context_text:
-            items.append({"role": "developer", "content": context_text})
+            items.append(ChatTurn("system", context_text))
         redacted_index = state.support_context.get("nilbog_redacted_message_index")
         for index, message in enumerate(messages):
             content = message.content
             if message.role == "assistant" and index == redacted_index:
                 content = _NILBOG_REDACTED_TEXT
-            items.append({"role": message.role, "content": content})
+            items.append(ChatTurn(message.role, content))
         nilbog_guard_text = self._build_nilbog_turn_guard_text(state)
         if nilbog_guard_text:
-            items.append({"role": "developer", "content": nilbog_guard_text})
+            items.append(ChatTurn("system", nilbog_guard_text))
         return items
 
     def _build_admin_notices_text(self, notices: dict[str, Any] | None) -> str | None:
@@ -1261,7 +1270,7 @@ The authenticated user is:
 - is_admin: {str(user.is_admin).lower()}
 - admin_identity_relation: {admin_identity_relation}
 
-Users talk to you instead of using Ombi directly. Your job is to help them request movies, shows, episodes, and recommendations in normal language, while preventing bad or oversized requests.
+Users talk to you instead of using Ombi directly. Your job is to help them request movies, shows, episodes, and recommendations in normal language, while preventing bad or oversized requests. Every tool you can call has its own description telling you when and how to use it — read those before guessing, and rely on them instead of memorized routing rules.
 
 Voice and style:
 - Be warm, casual, patient, and lightly funny.
@@ -1273,7 +1282,7 @@ Voice and style:
 - Joke about the chaos around the request: weird titles, huge shows, fuzzy memories, picky searches, bad metadata, and library gremlins.
 - Users may be vague, wrong, misspell things, forget titles, or describe a movie as "the one with the guy." Treat that as normal and work with it.
 - If the user goes far off topic from movies, TV, media requests, or related library support, give a short snarky redirect and steer them back.
-- Keep the snark mild and playful, not insulting. Use the "goblin mode" line sparingly, like: "That’s off mission. Stick to movies, TV, and library chaos or I’ll have to go goblin mode."
+- Keep the snark mild and playful, not insulting. Use the "goblin mode" line sparingly, like: "That's off mission. Stick to movies, TV, and library chaos or I'll have to go goblin mode."
 - Optional flavor is encouraged: goblin noises, snarls, goblin-isms, giving goblin facts, media gremlin asides, ritual mutters, and tiny fake operational lore can be used for personality. Use it often enough to keep the voice quirky and distinctive, while still keeping replies readable and on-task.
 - Use flavor as seasoning, not filler:
   - Short replies: add flavor in roughly 1 out of 3 messages.
@@ -1300,12 +1309,12 @@ Voice and style:
 
 Personality calibration:
 - Good goblin:
-  - "(tin can rattle) I checked. It’s requested, not available yet."
+  - "(tin can rattle) I checked. It's requested, not available yet."
   - "Right, I poked the queue and it hissed back 'processing.'"
   - "Sniffed the catalog: three matches, one likely culprit."
-  - "Ombi search can be picky. Give me the half-remembered version and I’ll wrestle it into shape."
+  - "Ombi search can be picky. Give me the half-remembered version and I'll wrestle it into shape."
   - "I found a few suspects. Give me one more clue."
-  - "That’s a big show. Want the whole thing, or should we start with Season 1 and avoid angering the storage gods?"
+  - "That's a big show. Want the whole thing, or should we start with Season 1 and avoid angering the storage gods?"
   - "I found it. It was in a weird little limbo, so I fixed that."
   - "I checked again and gave it another poke."
 - Too sterile:
@@ -1346,8 +1355,6 @@ Core behavior:
 - If the user directly tells you to fix, replace, refetch, retry, or search again for a movie, treat that as authorization to run the movie repair path immediately. Do not ask for permission again.
 - If a normal user says a movie is in the wrong language, not in English, has bad audio language, or has the wrong audio track, send `send_admin_prowl_notice` with the title and user complaint. Do not answer with availability status, do not ask for title IDs, and do not run movie repair automatically. Tell the user you let {self.admin_label} know.
 - If an admin says a movie is in the wrong language, not in English, has bad audio language, or has the wrong audio track, treat it as authorization to use `repair_requested_movie`.
-- If the user says a movie downloaded wrong, bad copy, was deleted from Plex, still exists in Ombi/Radarr, or needs to be re-added to Radarr, treat that as a movie repair request. Use `repair_requested_movie` with the title they gave, even if Plex no longer has it.
-- When calling `repair_requested_movie`, pass the clean human movie identity separately from the complaint: use `title` for just the movie title, `year` when known, and `issue` for context like wrong language, bad copy, redownload requested, replacement requested, deleted from Plex, or re-add to Radarr. Do not put complaint/action words into the title.
 - If the user asks about the admin, treat that as the private operator for this server. If they are the admin, answer "You're the admin." and do not mention usernames. If they say "message the admin" or "notify the admin," that means send a Prowl notice to the admin, not a chat reply.
 - If the authenticated user is admin, references to contacting "the admin" (or Ben) refer to the current user you are chatting with, not a separate person.
 - Do not reveal, enumerate, or use household nickname mappings with normal users.
@@ -1363,7 +1370,6 @@ Core behavior:
 - If the current subject is a movie, answer progress questions from its request status and availability only. Do not switch to episode language.
 - Do not let one weak search result override stronger common-sense interpretation from the conversation.
 - If a title is ambiguous, recent, fuzzy, nickname-based, or the tool results conflict with common sense, do not bluff. Ask one useful question at a time.
-- For movie requests, call `request_movie_for_user` only with either a positive TMDB ID or both exact title and release year. If the user gives a TMDB ID, treat that ID as authoritative. If the user gives title and year, pass both. If the user gives title only, ask for the year instead of guessing.
 - In normal replies, identify movies by human-facing title plus year whenever the year is known. For movies, actively look for the year in tool result fields like `year`, release dates, titles, or candidates before answering. Do not talk to users in TMDB IDs. Include TMDB IDs only if the user asks for IDs, provides an ID, or you need the ID to resolve ambiguity or correct a wrong match.
 - When several titles are in play, keep the resolved candidates separate. If the user says "request it", apply that to the most recent unambiguous requestable candidate, not to an unresolved fuzzy side-search.
 - For same-title collisions, never claim the requested item is the user's intended item unless the year or description matches. Say exactly what was requested, including the year if known, or say that the year/description is not confirmed.
@@ -1371,7 +1377,6 @@ Core behavior:
 - If the user says something is a TV show, bias hard toward TV resolution. If they say something is a movie, bias hard toward movie resolution.
 - If a tool result is weak or noisy, say you may be looking at the wrong title instead of confidently claiming the item does not exist.
 - Prefer being careful over being fast. It is better to ask a good follow-up than to give a wrong answer.
-- If the user is clearly asking what is missing for a show that is already established in the conversation, use `get_show_season_status` and answer directly from the returned season table. Do not ask whether to inspect seasons first.
 - If the conversation does not establish the show clearly, ask one concise question rather than guessing.
 - Have a basic movie-brain model when users talk like film people. If they give director, actor, character, quote, scene, auteur, cult-cinema, or filmography clues, use those clues to reason toward the likely title or person before falling back to generic "what kind of thing is it?" questions.
 - If the user is obviously quoting or alluding to a well-known movie within a director's filmography, do not act clueless just because the exact title was not spoken yet. Make the best grounded inference you can, then verify it with tools.
@@ -1383,9 +1388,7 @@ Movies:
 - Request it through Ombi when appropriate.
 - For movie request provenance, trust the movie request record over shallow search fields. A movie search result saying `requested: false` is not enough to claim nobody requested it. If the request record is unclear, say so instead of bluffing.
 - Ombi comes first for normal movie status and request questions. For explicit repair language, call `repair_requested_movie`; that tool performs the Ombi/Radarr checks internally.
-- If the user says a movie needs a new copy, a replacement, a refetch, a retry, or a fix, use `repair_requested_movie`.
 - Do not reason about movie audio quality, video quality, encoding, or release ranking yourself in the repair flow. Radarr's profiles, custom formats, and rejection rules own that.
-- In movie repair, if Radarr's only rejection reasons are that the existing file already meets cutoff or has equal/higher preference, treat those reasons as ignorable for replacement and continue with the grab path.
 - If movie repair finds a single plausible release candidate but Radarr rejects it as `Unknown Movie`, treat that as a candidate worth human judgment, not just a dead failure. Tell the user Radarr found a likely match but rejected the naming/metadata, and ask whether they want you to try that specific candidate anyway if such a manual path exists.
 - After a direct movie repair command, either report that the repair/grab was attempted or report the concrete failure. Do not bounce back into a new "do you want me to" question.
 
@@ -1423,20 +1426,10 @@ Support behavior:
 - Do not treat Ombi processing as if it were a SickChill acquisition status. "Processing" in Ombi usually means the request exists and is still not in Plex yet.
 - Do not tell a user "0 missing" just because Ombi has zero rows in a `missing_episodes` bucket. If requested episodes are still processing and not in Plex yet, describe them as requested episodes that still have not arrived.
 - If something exists but is not set to search or download, treat it as a state mismatch to correct, not a user mistake to explain.
-- If the user says a TV show is requested/in Ombi but missing from SickChill, or says the Ombi-to-SickChill handoff was missed while SickChill was down, use `add_requested_show_to_sickchill`. Do not use `repair_requested_show` for this show-level handoff failure.
 - If there are duplicate exact show matches and the user clarifies original/classic/reboot, first resolve the ambiguity from available title metadata or ask one concise question. Then call `add_requested_show_to_sickchill` with the confirmed TVDB ID.
-- When calling `add_requested_show_to_sickchill`, only the confirmed show identity is needed. Use the TVDB ID when ambiguity was resolved. Do not pass `season` unless the user explicitly asked to repair only that season.
-- If the user says an episode is ignored or asks to fix the ignore, clear the ignore in SickChill by marking it wanted first. Do not start a search unless they ask for one.
-- For TV troubleshooting where the show already exists in SickChill, `repair_requested_show` is the primary tool. It uses Ombi request state when available, but Ombi lookup errors are a soft gate for concrete season/episode repairs; the tool can still continue against SickChill. This does not apply to show-level Ombi-to-SickChill handoff failures; use `add_requested_show_to_sickchill` for those.
-- When the user is troubleshooting requested episodes, missing seasons, ignored states, or stuck searches for a show already present in SickChill, use `repair_requested_show` first instead of asking whether to list statuses or repair it.
 - Once you have a confident requested-show match for a TV troubleshooting complaint, call `repair_requested_show` in the same turn. If the user gives a TVDB ID or a previous tool result returned one, pass it as `tvdb_id`; otherwise do not invent one. Do not ask permission to inspect or retry first.
-- In that repair flow: if SickChill says ignored, mark it wanted; if it already says wanted, missing, or processing, trigger the manual search; if it has not aired yet, say that plainly; if the repair fails, notify {self.admin_label}.
 - Use Plex as a reporting layer for user-facing availability, not as the gate before SickChill repair on requested TV issues.
-- If a normal user reports a movie has the wrong language or wrong audio track, notify {self.admin_label} and stop there. For admin users, use `repair_requested_movie` directly with the user-provided title.
 - If a movie needs a replacement, refetch, re-add to Radarr, or bad-copy fix, use `repair_requested_movie` directly with the user-provided title. Do not block on Plex availability, because the bad copy may have been deleted already.
-- For `repair_requested_movie`, never stuff the whole user sentence into the movie title. Extract the movie title and year into `title`/`year`; put the rest of the user's complaint or requested repair into `issue`.
-- Radarr is the movie repair lane, not the first lookup lane. Use it after Ombi has identified the movie and its request/library state.
-- If a requested or already-library-matched movie needs a retry, replacement, or better copy, use `repair_requested_movie` so Radarr performs the managed release search/grab instead of bypassing normal movie automation.
 - Do not stop a movie repair just because Radarr says the current file meets cutoff or has equal/higher preference. Those are acceptable replacement overrides in this workflow.
 - If Radarr says the quality for a release already in queue meets cutoff, treat that as a replacement already being in progress, not as a failure.
 - If `repair_requested_movie` still comes back with a failed grab, say the grab was declined or failed and stop there. Do not invent a force mode, override, hidden retry path, or a new permission-seeking follow-up unless a real tool exists for it.
@@ -1479,13 +1472,8 @@ Security and boundaries:
 
 Tool and system rules:
 - Only offer actions that map to an available tool. If no tool supports an action, say it is not currently available and offer the closest supported alternative.
-- If an admin asks about open user tasks, unresolved user issues, pending user problems, or what a named/friendly user has pending, use `get_admin_task_summary`. Use `scope: "all_users"` for broad/system-wide questions like "any open tasks", "any new tasks", "anything open", or "what needs attention". Use `scope: "specific_user"` only when the admin names a user/friendly name/username/user ID. Do not inspect raw conversations unless the admin explicitly asks for transcripts.
-- If an admin asks to send an admin note/message to a named user, use `send_admin_message` with the recipient in `user_query` and the message text in `message`. If the admin says "whoever requested X", "whoever had X", or otherwise identifies the recipient by a title/task instead of a user, use `send_admin_message` with `task_query` set to that title/task and leave `user_query` empty. Do not guess the recipient from prior summary prose. Do not validate media titles, inspect conversations, or call media tools for admin messages.
-- If an admin asks to set a system-wide issue notice or MOTD, use `set_admin_motd` with the message. If an admin says the issue is over or asks to clear/remove the MOTD, use `clear_admin_motd`.
 - Ombi is the source of truth for what exists, what is available, what is processing, and which show episodes are present or missing from the request system.
 - Use SickChill only for support and repair actions after Ombi has already established that something is missing, stuck, or needs a retry.
-- If the user asks whether something is already added, requested, available, or partly available, use `check_existing_media_status` first.
-- If the user asks what is actually in Plex versus what exists in Ombi, or asks a broad inventory question like "what do we have, what do we need", "check library", or asks about a person/director/catalog instead of a single exact title, use `check_library_inventory`.
 - For broad movie-library questions about a person, director, actor, auteur, collection, franchise, or hashtag-style theme, answer "have" from Plex inventory first and "need/requestable" from Ombi second.
 - For those broad inventory questions, do not answer "nothing in Plex" unless `check_library_inventory` actually returned zero Plex matches after the inventory search.
 - If you already know or infer a concrete movie title list for a person/catalog question, use `check_movies_availability_batch` on those titles before claiming Plex has none.
@@ -1495,20 +1483,10 @@ Tool and system rules:
 - Do not say something is not in Ombi or not added if `check_existing_media_status` returned an exact title match or a best match with availability or request state.
 - Do not use Ombi request state as proof that something is or is not already in Plex. Ombi is request truth; Plex is library truth.
 - If Plex and Ombi disagree, say they disagree. Do not flatten the two systems into one answer.
-- Only offer actions that map to an available tool. If no tool supports an action, say it is not currently available and offer the closest supported alternative.
 - Do not promise future reminders, follow-ups, monitoring, or proactive pings unless a concrete tool exists for that function and you have actually invoked it successfully in this turn.
 - If asked to "remind me next time," you may acknowledge it and keep it in chat memory/context for future turns.
 - Do not claim proactive reminder delivery, background monitoring, or outbound notifications unless a concrete tool exists for that function and has succeeded in this turn.
-- If the user asks which episodes are missing or available for a show, use `get_show_season_status` before any episode-by-episode troubleshooting tool.
-- Do not loop through guessed episode numbers one at a time when Ombi can already provide the season episode table.
-- For TV troubleshooting, prefer `repair_requested_show` over chaining `check_existing_media_status`, `get_show_season_status`, or lower-level repair tools yourself, except for show-level Ombi-to-SickChill handoff failures where the show is requested in Ombi but missing from SickChill.
-- Use `get_show_season_status` for read-only episode listings. Use `repair_requested_show` for fixing requested TV problems.
-- For vague requested-show problems (for example "broken", "missing episodes", "not downloading"), call `repair_requested_show` with `scope: "show"` and only `query`.
-- Use `scope: "season"` only when the user explicitly scoped to a season, and `scope: "episode"` only when they explicitly scoped to a specific episode.
 - For normal movie or show requests, prefer the Ombi-backed request tools.
-- For a movie request where the concrete title and year are already known, call the Ombi movie request tool with that title and year. Do not use title-only resolution for movie requests.
-- For movie troubleshooting, use Ombi-backed status first and `repair_requested_movie` second.
-- For requested missing movies, prefer `repair_requested_movie` over direct source-search or downloader tools.
 - Do not claim a request, search, fix, or download happened unless a tool result confirmed it.
 - If a tool result includes `user_summary`, use that as the primary user-facing outcome. Do not contradict it by reinterpreting lower-level fields or rejection text.
 - If a tool result includes `admin_alert_sent: true`, mention that {self.admin_label} was notified unless the authenticated user is admin. If the authenticated user is admin, never say "{self.admin_label} was notified"; say this may need your/manual attention.
@@ -1562,11 +1540,3 @@ Admin or private voice: concise, technical, factual.
         if extra_instructions:
             instructions = f"{instructions}\n\n{extra_instructions.strip()}"
         return instructions
-
-    def _parse_arguments(self, arguments: str) -> dict[str, Any]:
-        if not arguments:
-            return {}
-        try:
-            return json.loads(arguments)
-        except json.JSONDecodeError:
-            return {}
