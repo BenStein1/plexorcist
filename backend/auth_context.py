@@ -146,6 +146,53 @@ class FriendlyNameDirectory:
         return self._cached
 
 
+class BlockedUsersDirectory:
+    """File-backed access denylist, mirroring FriendlyNameDirectory's shape:
+    `{"blocked_usernames": ["someuser", ...]}`, mtime-cached, re-read whenever
+    the file changes on disk so a block takes effect without a restart."""
+
+    def __init__(self, path: str | None) -> None:
+        self.path = Path(path) if path else None
+        self._cached: set[str] | None = None
+        self._cached_mtime: float | None = None
+
+    def is_blocked(self, username: str | None) -> bool:
+        normalized = (username or "").strip().lower()
+        if not normalized:
+            return False
+        return normalized in self._load_blocked()
+
+    def _load_blocked(self) -> set[str]:
+        if self.path is not None and self._cached is not None:
+            try:
+                current_mtime = self.path.stat().st_mtime
+            except FileNotFoundError:
+                current_mtime = None
+            if current_mtime is not None and self._cached_mtime == current_mtime:
+                return self._cached
+        elif self._cached is not None:
+            return self._cached
+
+        self._cached = set()
+        self._cached_mtime = None
+        if self.path is None:
+            return self._cached
+
+        try:
+            self._cached_mtime = self.path.stat().st_mtime
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return self._cached
+        except Exception:
+            return self._cached
+
+        if isinstance(payload, dict):
+            raw_list = payload.get("blocked_usernames")
+            if isinstance(raw_list, list):
+                self._cached = {str(item).strip().lower() for item in raw_list if str(item).strip()}
+        return self._cached
+
+
 class DevUserContextProvider:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -303,21 +350,27 @@ async def get_user_context(
     x_plex_user_id: str | None = Header(default=None),
     x_plex_display_name: str | None = Header(default=None),
     x_plex_is_admin: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
     provider: UserContextProvider = Depends(get_user_context_provider),
 ) -> UserContext:
-    return await provider.resolve_user(
+    user = await provider.resolve_user(
         request=request,
         x_plex_user=x_plex_user,
         x_plex_user_id=x_plex_user_id,
         x_plex_display_name=x_plex_display_name,
         x_plex_is_admin=x_plex_is_admin,
     )
+    if BlockedUsersDirectory(settings.blocked_users_path).is_blocked(user.username):
+        # Defense-in-depth for a session issued before the user was blocked --
+        # deliberately no detail message, just a bare denial.
+        raise HTTPException(status_code=403)
+    return user
 
 
 async def get_optional_user_context(request: Request, settings: Settings) -> UserContext | None:
     provider = get_user_context_provider(settings)
     try:
-        return await provider.resolve_user(
+        user = await provider.resolve_user(
             request=request,
             x_plex_user=None,
             x_plex_user_id=None,
@@ -326,3 +379,6 @@ async def get_optional_user_context(request: Request, settings: Settings) -> Use
         )
     except HTTPException:
         return None
+    if BlockedUsersDirectory(settings.blocked_users_path).is_blocked(user.username):
+        return None
+    return user

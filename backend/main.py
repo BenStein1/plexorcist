@@ -19,6 +19,7 @@ from starlette.types import Receive, Scope, Send
 
 from backend.agent import ConciergeAgent
 from backend.auth_context import (
+    BlockedUsersDirectory,
     DevUserContextProvider,
     FriendlyNameDirectory,
     PlexOAuthUserContextProvider,
@@ -1734,6 +1735,13 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
     is_admin = is_admin or settings.is_admin_identity(user_id)
     if not user_id or not username:
         raise HTTPException(status_code=502, detail="Plex login did not return user details")
+
+    # Access gate: blocked usernames never get a session, silently -- same
+    # bounce as the "not in Ombi" case below, no error shown.
+    if BlockedUsersDirectory(settings.blocked_users_path).is_blocked(username):
+        response = RedirectResponse(settings.ombi_continue_url, status_code=303)
+        response.delete_cookie("plexorcist_pending_pin")
+        return response
 
     # Login gate: user must exist in Ombi before they can proceed into Plexorcist.
     # Match Plex identity first (user_id claims), then username fallback.

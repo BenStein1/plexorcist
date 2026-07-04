@@ -25,3 +25,8 @@ def test_effective_ollama_base_url_fallback(monkeypatch):
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
     settings = Settings()
     assert settings.effective_ollama_base_url == "http://localhost:11434"
+
+
+def test_blocked_users_path_defaults_to_local_json_file():
+    settings = Settings()
+    assert settings.blocked_users_path.endswith("blockedusers.json")

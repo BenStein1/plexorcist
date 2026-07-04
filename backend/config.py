@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     login_notify_enabled: bool = env_field(default=True, env="LOGIN_NOTIFY_ENABLED")
     login_notify_scope: Literal["all", "admin_only", "none"] = env_field(default="all", env="LOGIN_NOTIFY_SCOPE")
     login_notify_include_ip: bool = env_field(default=False, env="LOGIN_NOTIFY_INCLUDE_IP")
+    blocked_users_path: str = env_field(default="./blockedusers.json", env="BLOCKED_USERS_PATH")
 
     long_show_episode_threshold: int = 50
     huge_show_episode_threshold: int = 100
@@ -129,6 +130,7 @@ class Settings(BaseSettings):
         expected_user_id = (self.admin_user_id or "").strip()
         actual_user_id = (user_id or "").strip()
         return bool(expected_user_id and actual_user_id == expected_user_id)
+
 
     @property
     def effective_llm_model(self) -> str:

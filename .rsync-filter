@@ -13,6 +13,7 @@
 - /.env
 - /.env.*
 - /friendlynames.json
+- /blockedusers.json
 - /dev_impersonation.json
 - /plex_client_identifier.txt
 - /plexorcist.egg-info/
