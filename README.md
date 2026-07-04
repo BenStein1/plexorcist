@@ -68,6 +68,46 @@ Support/repair flow:
 - Use Radarr for movie acquisition repair.
 - Notify the admin through Prowl for meaningful corrective actions or repair failures.
 
+## MCP Endpoint
+
+The same tool catalog (`tools/catalog.py`) that powers the in-process chat agent is
+also exposed over the network as a real MCP (Model Context Protocol) server, so
+external MCP clients — Claude Code, Overlord, other agents — can call it
+directly. This is a separate surface from the chat path; it does not change how
+in-app chat works.
+
+It's mounted at `/mcp` (FastMCP streamable-HTTP transport) and is gated by two
+static bearer tokens, both optional:
+
+- `MCP_AUTH_TOKEN` — non-admin principal. Grants the same tools a regular signed-in
+  user sees (search, requests, repairs, recommendations); admin-only and
+  direct-source-gated tools are hidden.
+- `MCP_ADMIN_TOKEN` — admin principal. Grants the full catalog, including
+  admin-only tools (token usage, admin task summary, admin messages/MOTD).
+
+If neither variable is set, `/mcp` is not mounted at all (a plain 404, not a
+401) — the endpoint doesn't exist until you opt in. If only one token is set,
+only that principal works; requests with a missing, wrong, or mismatched-tier
+token get 401. Each configured token maps to its own gated FastMCP server built
+from `tools/server.py:build_mcp_server`, sharing one real `ConversationStore` so
+tool calls made over MCP persist state the same way chat does.
+
+To connect Claude Code to a running instance, add to `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "plexorcist": {
+      "type": "streamable-http",
+      "url": "http://<host>:<port>/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN or MCP_ADMIN_TOKEN value>"
+      }
+    }
+  }
+}
+```
+
 ## Memory
 
 Plexorcist has tiered memory:
@@ -130,6 +170,7 @@ Important groups:
 - Anthropic: `ANTHROPIC_API_KEY`
 - Ollama: `OLLAMA_BASE_URL`, `OLLAMA_HOST`
 - Memory: `MEMORY_INACTIVITY_MINUTES`, `MEMORY_COMPACTION_TIMEOUT_SECONDS`, `MEMORY_RECENT_NOTES_LIMIT`, `MEMORY_TIER1_KEEP`
+- MCP endpoint: `MCP_AUTH_TOKEN`, `MCP_ADMIN_TOKEN` (see [MCP Endpoint](#mcp-endpoint); unset = `/mcp` disabled)
 
 Secrets, local DBs, logs, friendly-name data, deployment helpers, and scratch artifacts are intentionally ignored by Git.
 

@@ -48,7 +48,7 @@ Ben's explicit call.
 | 1 — MCP tool catalog + FastMCP server | DONE | 161842c |
 | 2 — provider layer on official SDKs | DONE (Sonnet 5, reviewed) | 06ba4c9 |
 | 3 — agent loop rewrite + prompt shrink | DONE (Sonnet 5, reviewed) | cea3d7c (main change 8562764) |
-| 4 — external /mcp endpoint + docs | pending | — |
+| 4 — external /mcp endpoint + docs | DONE (Sonnet 5, reviewed) | pending |
 | 5 — final verification (live chat flows per provider) | pending | — |
 
 ## What exists after Phases 0-1
@@ -153,6 +153,48 @@ Rewrite `backend/agent.py` `ConciergeAgent.respond()` on the new layer:
   token check middleware choosing the server). Bearer token via
   `Authorization: Bearer`.
 - README section: what the MCP endpoint is + Claude Code `.mcp.json` snippet.
+
+### Phase 4 — what was built
+
+- `backend/config.py`: `mcp_auth_token`/`mcp_admin_token` (`MCP_AUTH_TOKEN` /
+  `MCP_ADMIN_TOKEN`, default `None`).
+- `backend/main.py`: single mount point `/mcp`. `McpTokenRouter` is a plain
+  ASGI callable mounted there; it reads `Authorization: Bearer <token>`,
+  matches it against whichever of the two tokens are configured, and forwards
+  the request to that principal's FastMCP `http_app()` (built via
+  `tools.server.build_mcp_server`), or returns 401 on a missing/wrong token.
+  If neither token is set, `build_mcp_router`/`mount_mcp` return `None` and
+  `/mcp` is never mounted at all (404). Both principals share one
+  `ConversationStore` built once at import time (`_MCP_STORE`), matching the
+  chat path's state.
+  - Lifespan: confirmed empirically (see `tests/test_mcp_endpoint.py`) that
+    Starlette does **not** propagate the ASGI `lifespan` scope into mounted
+    sub-apps — `Router.app` intercepts `scope["type"] == "lifespan"` before
+    ever consulting routes/mounts. FastMCP's `http_app()` needs its own
+    lifespan entered to start its streamable-HTTP session manager, so
+    `backend/main.py`'s old `@app.on_event("startup"/"shutdown")` handlers
+    were replaced with a single `@contextlib.asynccontextmanager _lifespan`
+    passed to `FastAPI(..., lifespan=_lifespan)`. It does what the old
+    handlers did (start/cancel the memory-sweeper task) and additionally
+    enters `McpTokenRouter.lifespan_context()` (an `AsyncExitStack` over each
+    mounted sub-app's `sub_app.lifespan(sub_app)`) so the FastMCP session
+    manager(s) actually run for the life of the process.
+- `tests/test_mcp_endpoint.py`: builds small isolated `FastAPI()` instances
+  per test (via `backend.main.mount_mcp`/`build_mcp_router`, the same
+  production code the real `app` uses) rather than reloading the
+  `backend.main` singleton — `get_settings()` is process-wide `lru_cache`'d,
+  so reloading the shared module to test multiple token configurations would
+  leak mutated global state into other test files. Drives real requests
+  through `httpx.ASGITransport` + `fastmcp.Client(StreamableHttpTransport(...,
+  httpx_client_factory=...))`, executed via `TestClient(app).portal.call(...)`
+  so the FastMCP session manager's task group and the actual HTTP calls run
+  on the same event loop (the `TestClient`'s background portal loop).
+  Additionally hand-verified (not just the isolated-app tests) against the
+  real `backend.main.app`/`_MCP_ROUTER` singleton in a clean subprocess with
+  `MCP_AUTH_TOKEN`/`MCP_ADMIN_TOKEN` set before import: lifespan enters both
+  sub-app session managers, no-auth `/mcp` gets 401, and `list_tools()`
+  through the actual mounted endpoint returns the correct per-principal
+  toolset (21 tools non-admin, 27 admin).
 
 ## Phase 5 verification
 

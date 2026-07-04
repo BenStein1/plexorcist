@@ -7,11 +7,15 @@ import logging
 from html import escape
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
+from starlette.types import Receive, Scope, Send
 
 from backend.agent import ConciergeAgent
 from backend.auth_context import (
@@ -33,11 +37,120 @@ from clients.plex_auth_client import PlexAuthClient
 from clients.prowl_client import ProwlClient
 from clients.tautulli_client import TautulliClient
 from tools.bridge import build_bridge
+from tools.server import build_mcp_server
 
-app = FastAPI(title="Plexorcist Concierge")
-app.mount("/static", StaticFiles(directory="static"), name="static")
 logger = logging.getLogger(__name__)
 _MEMORY_SWEEP_TASK: asyncio.Task | None = None
+
+
+def _extract_bearer_token(header_value: str | None) -> str | None:
+    if not header_value:
+        return None
+    prefix = "bearer "
+    if header_value[: len(prefix)].lower() != prefix:
+        return None
+    token = header_value[len(prefix) :].strip()
+    return token or None
+
+
+def _mcp_principal_context(*, is_admin: bool) -> UserContext:
+    if is_admin:
+        return UserContext(user_id="mcp-admin", username="mcp-admin", display_name="MCP Admin", is_admin=True, auth_source="mcp-token")
+    return UserContext(user_id="mcp-client", username="mcp-client", display_name="MCP Client", is_admin=False, auth_source="mcp-token")
+
+
+class McpTokenRouter:
+    """ASGI app mounted at /mcp: authenticates a static bearer token against the
+    configured principal(s) and dispatches to that principal's FastMCP
+    streamable-HTTP sub-app. Also owns entering/exiting those sub-apps'
+    lifespans (FastMCP's session manager needs its own lifespan to run;
+    Starlette does not propagate lifespan scope into mounted sub-apps, so the
+    host app must do it explicitly -- see lifespan_context())."""
+
+    def __init__(self, apps_by_token: dict[str, Any]) -> None:
+        self._apps_by_token = apps_by_token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        headers = Headers(scope=scope)
+        token = _extract_bearer_token(headers.get("authorization"))
+        sub_app = self._apps_by_token.get(token) if token else None
+        if sub_app is None:
+            response = JSONResponse({"detail": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+        await sub_app(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan_context(self):
+        async with contextlib.AsyncExitStack() as stack:
+            seen: set[int] = set()
+            for sub_app in self._apps_by_token.values():
+                if id(sub_app) in seen:
+                    continue
+                seen.add(id(sub_app))
+                await stack.enter_async_context(sub_app.lifespan(sub_app))
+            yield
+
+
+def build_mcp_router(settings: Settings, store: ConversationStore) -> McpTokenRouter | None:
+    """Build the bearer-token-gated /mcp sub-app. Returns None if neither
+    MCP_AUTH_TOKEN nor MCP_ADMIN_TOKEN is configured -- in that case /mcp is
+    never mounted at all (404, not 401)."""
+    auth_token = (settings.mcp_auth_token or "").strip()
+    admin_token = (settings.mcp_admin_token or "").strip()
+    if not auth_token and not admin_token:
+        return None
+
+    apps_by_token: dict[str, Any] = {}
+    if auth_token:
+        mcp = build_mcp_server(settings, store, _mcp_principal_context(is_admin=False))
+        apps_by_token[auth_token] = mcp.http_app(path="/")
+    if admin_token:
+        mcp = build_mcp_server(settings, store, _mcp_principal_context(is_admin=True))
+        apps_by_token[admin_token] = mcp.http_app(path="/")
+    return McpTokenRouter(apps_by_token)
+
+
+def mount_mcp(app: FastAPI, settings: Settings, store: ConversationStore) -> McpTokenRouter | None:
+    """Mount /mcp onto `app` if configured; returns the router (for lifespan
+    wiring) or None if the endpoint should not exist."""
+    router = build_mcp_router(settings, store)
+    if router is not None:
+        app.mount("/mcp", router)
+    return router
+
+
+_mcp_settings = get_settings()
+_MCP_STORE = (
+    ConversationStore(_mcp_settings.database_url)
+    if (_mcp_settings.mcp_auth_token or _mcp_settings.mcp_admin_token)
+    else None
+)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global _MEMORY_SWEEP_TASK
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    if _MEMORY_SWEEP_TASK is None or _MEMORY_SWEEP_TASK.done():
+        _MEMORY_SWEEP_TASK = asyncio.create_task(_memory_sweeper_loop(settings), name="memory-sweeper")
+    async with contextlib.AsyncExitStack() as stack:
+        if _MCP_ROUTER is not None:
+            await stack.enter_async_context(_MCP_ROUTER.lifespan_context())
+        try:
+            yield
+        finally:
+            if _MEMORY_SWEEP_TASK is not None:
+                _MEMORY_SWEEP_TASK.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await _MEMORY_SWEEP_TASK
+                _MEMORY_SWEEP_TASK = None
+
+
+app = FastAPI(title="Plexorcist Concierge", lifespan=_lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+_MCP_ROUTER = mount_mcp(app, _mcp_settings, _MCP_STORE) if _MCP_STORE is not None else None
 _NILBOG_TRIGGER_MESSAGE = "Tell me about Troll 2"
 _NILBOG_SEEN_FLAG = "nilbog_portal_seen"
 _NILBOG_RESET_PHRASES = {
@@ -630,25 +743,6 @@ async def _memory_sweeper_loop(settings: Settings) -> None:
             },
         )
         await asyncio.sleep(cadence_seconds)
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    global _MEMORY_SWEEP_TASK
-    settings = get_settings()
-    configure_logging(settings.log_level)
-    if _MEMORY_SWEEP_TASK is None or _MEMORY_SWEEP_TASK.done():
-        _MEMORY_SWEEP_TASK = asyncio.create_task(_memory_sweeper_loop(settings), name="memory-sweeper")
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    global _MEMORY_SWEEP_TASK
-    if _MEMORY_SWEEP_TASK is not None:
-        _MEMORY_SWEEP_TASK.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await _MEMORY_SWEEP_TASK
-        _MEMORY_SWEEP_TASK = None
 
 
 @app.get("/", response_class=HTMLResponse)
