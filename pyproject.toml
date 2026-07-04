@@ -5,10 +5,12 @@ description = "Conversational concierge for Plex and Ombi request workflows"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "anthropic>=0.116,<1",
   "fastapi>=0.130.0,<1",
   "fastmcp>=3.4,<4",
   "gunicorn>=23.0.0",
   "httpx>=0.28.0",
+  "openai>=2.44,<3",
   "pydantic>=2.9,<3",
   "pydantic-settings>=2.6",
   "python-dotenv>=1.0.0",

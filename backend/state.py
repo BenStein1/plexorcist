@@ -98,6 +98,8 @@ class ConversationStore:
         columns = {str(row[1]) for row in rows}
         if "resolved_model" not in columns:
             conn.execute("ALTER TABLE openai_token_usage ADD COLUMN resolved_model TEXT")
+        if "provider" not in columns:
+            conn.execute("ALTER TABLE openai_token_usage ADD COLUMN provider TEXT")
 
     def _ensure_conversation_compaction_columns(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("PRAGMA table_info(conversations)").fetchall()
@@ -334,8 +336,8 @@ class ConversationStore:
                 """
                 INSERT INTO openai_token_usage (
                     created_at, model, resolved_model, input_tokens, cached_input_tokens,
-                    output_tokens, total_tokens, user_id, username, conversation_id, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    output_tokens, total_tokens, user_id, username, conversation_id, source, provider
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now,
@@ -349,6 +351,7 @@ class ConversationStore:
                     event.get("username"),
                     event.get("conversation_id"),
                     event.get("source"),
+                    event.get("provider"),
                 ),
             )
 
