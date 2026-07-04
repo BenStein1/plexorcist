@@ -30,3 +30,6 @@ artifacts/
 # Local deploy helpers with private host/path details
 deploy.local.sh
 AGENTS.md
+
+# Personal Claude Code overrides — never shared/committed as project defaults
+.claude/settings.local.json
