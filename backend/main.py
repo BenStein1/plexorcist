@@ -347,30 +347,20 @@ def _load_plex_client_identifier(settings: Settings) -> str:
     return client_identifier
 
 
-# Shown to a Plex account that simply isn't shared on the server yet -- it's fine
-# to tell them how to get access.
-_NO_ACCESS_PAGE = """
-<!doctype html>
-<html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>No access</title></head>
-  <body style="font-family: sans-serif; padding: 24px;">
-    <p>This is a private Plex concierge. Your Plex account doesn't have access to this server yet.</p>
-    <p>If you think that's a mistake, ask the server owner to share their library with you, then try again.</p>
-  </body>
-</html>
-"""
+# The internet-facing server is friends-only and fail-closed: anyone who can't
+# authenticate as a shared user -- non-shared accounts, blocked users, anyone at
+# all -- gets an inert 404 that discloses nothing about what this is. No trust,
+# no information. Same response for every unauthorized case so nothing can be
+# inferred from the difference.
+_HOLE_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Not Found</title></head><body></body></html>"""
 
-# Shown to a user the admin has explicitly blocked. Deliberately neutral -- it
-# does not reveal they're blocked or invite them to ask for access.
-_BLOCKED_PAGE = """
-<!doctype html>
-<html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>No access</title></head>
-  <body style="font-family: sans-serif; padding: 24px;">
-    <p>This is a private Plex concierge and isn't available for your account.</p>
-  </body>
-</html>
-"""
+
+def _hole() -> "HTMLResponse":
+    response = HTMLResponse(_HOLE_PAGE, status_code=404)
+    response.delete_cookie("plexorcist_pending_pin")
+    response.delete_cookie("plexorcist_session")
+    return response
 
 # Short-lived cache of the admin's shared Plex users. plex.tv reflects a share
 # immediately, but we don't want a plex.tv round trip cached longer than a
@@ -1842,13 +1832,9 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
     # actually shared the library with may enter. Blocked users and non-shared
     # accounts get a plain no-access page -- we never bounce anyone to Ombi.
     if BlockedUsersDirectory(settings.blocked_users_path).is_blocked(username):
-        response = HTMLResponse(_BLOCKED_PAGE, status_code=403)
-        response.delete_cookie("plexorcist_pending_pin")
-        return response
+        return _hole()
     if not (is_admin or await _is_shared_plex_user(settings, user_id=user_id, username=username)):
-        response = HTMLResponse(_NO_ACCESS_PAGE, status_code=403)
-        response.delete_cookie("plexorcist_pending_pin")
-        return response
+        return _hole()
 
     # Onboarding: a just-shared user has no Ombi account yet, because Ombi's Plex
     # User Importer only runs on a schedule. An Ombi account backs request
