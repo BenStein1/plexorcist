@@ -1430,7 +1430,7 @@ async def index(
         </div>
         <div class="composer-meta">
           <div class="composer-meta-actions">
-            <a href="{settings.ombi_continue_url}">Continue to Ombi</a>
+            {(f'<a href="{settings.ombi_continue_url}">Continue to Ombi</a>' if (current_user and current_user.is_admin) else '')}
             {('<a href="/auth/logout">Log out</a>' if authenticated and settings.is_plex_oauth_mode() else '')}
           </div>
         </div>
@@ -1744,13 +1744,38 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
         return response
 
     # Login gate: user must exist in Ombi before they can proceed into Plexorcist.
-    # Match Plex identity first (user_id claims), then username fallback.
+    # A brand-new Plex user (just shared by the admin) has no Ombi account yet,
+    # because Ombi's Plex User Importer only runs on a schedule. Rather than punt
+    # them to Ombi's own login -- which breaks for Apple-ID Plex accounts -- fire
+    # the importer on demand and wait briefly for the account to appear, then let
+    # them straight into Plexorcist. We never bounce a user to Ombi to self-register.
     ombi = OmbiClient(settings.ombi_base_url, settings.ombi_api_key)
     ombi_user_check = await ombi.find_user_by_identity(username=username, user_id=user_id)
     if ombi_user_check.get("ok") and not ombi_user_check.get("exists"):
-        response = RedirectResponse(settings.ombi_continue_url, status_code=303)
-        response.delete_cookie("plexorcist_pending_pin")
-        return response
+        await ombi.trigger_plex_user_importer()
+        for _ in range(12):
+            await asyncio.sleep(1)
+            recheck = await ombi.find_user_by_identity(username=username, user_id=user_id)
+            if recheck.get("ok") and recheck.get("exists"):
+                ombi_user_check = recheck
+                break
+        else:
+            # Importer ran but this user still isn't in Ombi -- almost always means
+            # they aren't actually shared on the Plex server yet. Show a friendly
+            # "setting up access" page instead of the old broken Ombi punt.
+            return HTMLResponse(
+                """
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Setting up your access</title></head>
+  <body style="font-family: sans-serif; padding: 24px;">
+    <p>Hang tight &mdash; we're setting up your access. This can take a moment the first time.</p>
+    <p><a href="/auth/plex/start">Try again</a></p>
+  </body>
+</html>
+""",
+                status_code=202,
+            )
 
     session_id = str(uuid4())
     session_cookie = cookie_provider._verify_cookie(request.cookies.get("plexorcist_session"))

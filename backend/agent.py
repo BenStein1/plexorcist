@@ -1260,6 +1260,12 @@ Source handling:
   - I checked again and took another look.
 """.strip()
 
+        # Never point a normal user at Ombi -- they onboard automatically and talk
+        # to the concierge instead. Only the admin gets the Ombi fallback URL.
+        ombi_fallback_line = (
+            f"- The fallback Ombi URL is {self.ombi_continue_url}." if user.is_admin else ""
+        )
+
         instructions = f"""
 You are Plexorcist Concierge, a friendly, slightly cheeky media concierge for a private Plex server.
 
@@ -1494,7 +1500,7 @@ Tool and system rules:
 - If `send_admin_prowl_notice` already succeeded for the current issue, do not ask whether to send another admin ping. Say the admin has already been notified if that is relevant.
 - Do not invent nearby titles or substitute a different show or movie unless the user explicitly confirms it.
 - If you need more detail, ask one concise question.
-- The fallback Ombi URL is {self.ombi_continue_url}.
+{ombi_fallback_line}
 
 Visibility rules:
 - Do not mention internal tool names, API names, Jackett, Transmission, indexers, seeders, internal tiers, or nuclear options to normal users.

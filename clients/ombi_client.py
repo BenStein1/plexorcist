@@ -56,6 +56,21 @@ class OmbiClient(BaseHttpClient):
 
         return {"ok": True, "exists": False, "matched_on": None}
 
+    async def trigger_plex_user_importer(self) -> dict:
+        # Ombi's native onboarding path: sweep the Plex server's shared users and
+        # create Ombi accounts (userType 2, no password) for any that are missing.
+        # Normally scheduled daily; we trigger it on demand so a just-shared user
+        # gets an account immediately instead of waiting for the cron run.
+        try:
+            await self.post_json("/api/v1/Job/plexuserimporter", {})
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "reason": "importer_trigger_failed",
+                "error": self._describe_http_error(exc),
+            }
+        return {"ok": True}
+
     def _user_headers(self, username: str) -> dict[str, str]:
         # Ombi attributes API-key calls to a user via UserName.
         return {"UserName": username}
