@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import urlencode
 
@@ -52,6 +53,49 @@ class PlexAuthClient:
             )
             response.raise_for_status()
             return response.json()
+
+    async def list_shared_users(self, client_identifier: str, admin_token: str) -> dict[str, set[str]]:
+        """Return the user ids and (lowercased) usernames/emails the admin has
+        shared the Plex server with.
+
+        Authoritative and immediate: plex.tv reflects a share the moment it is
+        made, unlike Tautulli which only knows a user after they have streamed.
+        """
+        ids: set[str] = set()
+        names: set[str] = set()
+        headers = {**self._headers(client_identifier), "X-Plex-Token": admin_token}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resources = await client.get(
+                "https://plex.tv/api/v2/resources",
+                params={"includeHttps": 1},
+                headers=headers,
+            )
+            resources.raise_for_status()
+            machine_id = ""
+            for res in resources.json():
+                if isinstance(res, dict) and "server" in (res.get("provides") or ""):
+                    machine_id = str(res.get("clientIdentifier") or "")
+                    if machine_id:
+                        break
+            if not machine_id:
+                return {"ids": ids, "names": names}
+            shared = await client.get(
+                f"https://plex.tv/api/servers/{machine_id}/shared_servers",
+                headers=headers,
+            )
+            shared.raise_for_status()
+            root = ET.fromstring(shared.text)
+        for node in root.iter("SharedServer"):
+            uid = str(node.get("userID") or "").strip()
+            uname = str(node.get("username") or "").strip()
+            email = str(node.get("email") or "").strip()
+            if uid:
+                ids.add(uid)
+            if uname:
+                names.add(uname.lower())
+            if email:
+                names.add(email.lower())
+        return {"ids": ids, "names": names}
 
     def _headers(self, client_identifier: str) -> dict[str, str]:
         return {

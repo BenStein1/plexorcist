@@ -154,6 +154,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 _MCP_ROUTER = mount_mcp(app, _mcp_settings, _MCP_STORE) if _MCP_STORE is not None else None
 _NILBOG_TRIGGER_MESSAGE = "Tell me about Troll 2"
 _NILBOG_SEEN_FLAG = "nilbog_portal_seen"
+_ONBOARDING_SEEN_FLAG = "onboarding_tour_seen"
 _NILBOG_RESET_PHRASES = {
     "drop the bit",
     "end the bit",
@@ -212,6 +213,34 @@ def _load_admin_motd(store: ConversationStore) -> dict[str, object] | None:
 def _is_nilbog_pushback(message: str) -> bool:
     normalized = message.strip().lower()
     return any(term in normalized for term in _NILBOG_PUSHBACK_TERMS)
+
+
+def _build_welcome_tour_instructions(username: str) -> str:
+    return f"""
+FIRST-TIME USER -- this is this person's very first message in Plexorcist. Before
+anything else, give them a warm, short guided tour in your own goblin voice. Weave
+it into a natural reply that ALSO addresses whatever they just asked; do not dump a
+numbered manual. Keep the whole thing tight and friendly, not a wall of text.
+
+Cover, briefly and in your own words:
+- They can just ASK you for a movie and you'll add it -- both movies already out AND
+  ones that aren't released yet (you'll queue an upcoming movie so it lands the moment
+  it's available). Same deal for TV: a whole show, a season, or a single episode.
+- If something's broken -- a movie downloaded as a bad copy, wrong audio/language, got
+  deleted, or a show is missing episodes -- they just tell you what's wrong and you'll
+  try to fix it. Give a concrete example of how to ask ("the new Dune is a cam rip,
+  can you get a better copy" / "Severance is missing the last two episodes").
+- If something needs the server owner's attention, they can ask you to pass a message
+  along and you'll relay it to the admin for them.
+
+Then the name: you currently only know them by their Plex username "{username}", which
+is just a handle. Warmly ask what they'd actually like you to call them, and make it
+clear it's easy -- if they tell you a name, immediately use set_my_friendly_name to
+save it. Nudge them to set it now as part of getting settled in.
+
+Do not mention Ombi, importers, accounts, or any of the setup happening behind the
+scenes. Just be a friendly goblin showing a newcomer around.
+""".strip()
 
 
 def _build_nilbog_portal_instructions() -> str:
@@ -316,6 +345,62 @@ def _load_plex_client_identifier(settings: Settings) -> str:
     client_identifier = str(uuid4())
     path.write_text(client_identifier, encoding="utf-8")
     return client_identifier
+
+
+_NO_ACCESS_PAGE = """
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>No access</title></head>
+  <body style="font-family: sans-serif; padding: 24px;">
+    <p>This is a private Plex concierge. Your Plex account doesn't have access to this server yet.</p>
+    <p>If you think that's a mistake, ask the server owner to share their library with you, then try again.</p>
+  </body>
+</html>
+"""
+
+# Short-lived cache of the admin's shared Plex users. plex.tv reflects a share
+# immediately, but we don't want a plex.tv round trip cached longer than a
+# minute so a just-shared user isn't kept waiting.
+_SHARED_USERS_TTL = 60.0
+_shared_users_cache: dict[str, Any] = {"ids": set(), "names": set(), "fetched_at": 0.0}
+
+# Hold references to fire-and-forget background tasks so they aren't GC'd.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro: Any) -> None:
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _get_shared_plex_users(settings: Settings, *, force: bool = False) -> dict[str, set[str]]:
+    now = asyncio.get_event_loop().time()
+    fetched_at = _shared_users_cache["fetched_at"]
+    if not force and fetched_at and (now - fetched_at) < _SHARED_USERS_TTL:
+        return {"ids": _shared_users_cache["ids"], "names": _shared_users_cache["names"]}
+    if not settings.plex_token:
+        return {"ids": _shared_users_cache["ids"], "names": _shared_users_cache["names"]}
+    client_identifier = _load_plex_client_identifier(settings)
+    auth_client = PlexAuthClient(product_name=settings.plex_auth_product_name)
+    try:
+        result = await auth_client.list_shared_users(client_identifier, settings.plex_token)
+    except Exception:  # noqa: BLE001 -- on a plex.tv hiccup, reuse the last known set
+        return {"ids": _shared_users_cache["ids"], "names": _shared_users_cache["names"]}
+    _shared_users_cache.update(ids=result["ids"], names=result["names"], fetched_at=now)
+    return result
+
+
+async def _is_shared_plex_user(settings: Settings, *, user_id: str, username: str) -> bool:
+    uid = str(user_id or "").strip()
+    uname = str(username or "").strip().lower()
+    shared = await _get_shared_plex_users(settings)
+    if (uid and uid in shared["ids"]) or (uname and uname in shared["names"]):
+        return True
+    # A just-shared user may not be in a slightly stale cache yet -- force one
+    # fresh fetch before turning them away.
+    shared = await _get_shared_plex_users(settings, force=True)
+    return bool((uid and uid in shared["ids"]) or (uname and uname in shared["names"]))
 
 
 def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[ConciergeAgent, ConversationStore, AuditLogger]:
@@ -1443,6 +1528,7 @@ async def index(
       const composerBaseHeight = 42;
       let conversationId = null;
       let isSending = false;
+      let isFirstTime = false;
       const isAuthenticated = {str(authenticated).lower()};
 {dev_panel_js}
 
@@ -1457,6 +1543,7 @@ async def index(
         if (!isAuthenticated) return;
         const res = await fetch("/api/welcome");
         const data = await res.json();
+        isFirstTime = Boolean(data.first_time);
         renderTranscript([{{ role: "assistant", content: data.message }}]);
       }}
 
@@ -1470,6 +1557,7 @@ async def index(
           <h3>I'm here to help with your media.</h3>
           <p>Ask for a movie, show, episode, recommendation, or help with something missing.</p>
           <div class="starter-chips">
+            ${{isFirstTime ? '<button type="button" class="starter-chip" data-prompt="Give me a quick tour of what you can do.">✨ Show me around</button>' : ''}}
             <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now by listing the most popular movies and most popular TV shows from Tautulli.">What’s popular right now?</button>
             <button type="button" class="starter-chip" data-prompt="Recommend three movies based on what I watch, and keep at least one weird pick.">Smart recommendations</button>
             <button type="button" class="starter-chip" data-prompt="Check if my shows are missing episodes in Plex, and tell me exactly what’s missing.">Find missing episodes</button>
@@ -1736,46 +1824,25 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
     if not user_id or not username:
         raise HTTPException(status_code=502, detail="Plex login did not return user details")
 
-    # Access gate: blocked usernames never get a session, silently -- same
-    # bounce as the "not in Ombi" case below, no error shown.
-    if BlockedUsersDirectory(settings.blocked_users_path).is_blocked(username):
-        response = RedirectResponse(settings.ombi_continue_url, status_code=303)
+    # Access gate: only the server owner (admin) and Plex accounts the admin has
+    # actually shared the library with may enter. Blocked users and non-shared
+    # accounts get a plain no-access page -- we never bounce anyone to Ombi.
+    blocked = BlockedUsersDirectory(settings.blocked_users_path).is_blocked(username)
+    shared = is_admin or await _is_shared_plex_user(settings, user_id=user_id, username=username)
+    if blocked or not shared:
+        response = HTMLResponse(_NO_ACCESS_PAGE, status_code=403)
         response.delete_cookie("plexorcist_pending_pin")
         return response
 
-    # Login gate: user must exist in Ombi before they can proceed into Plexorcist.
-    # A brand-new Plex user (just shared by the admin) has no Ombi account yet,
-    # because Ombi's Plex User Importer only runs on a schedule. Rather than punt
-    # them to Ombi's own login -- which breaks for Apple-ID Plex accounts -- fire
-    # the importer on demand and wait briefly for the account to appear, then let
-    # them straight into Plexorcist. We never bounce a user to Ombi to self-register.
+    # Onboarding: a just-shared user has no Ombi account yet, because Ombi's Plex
+    # User Importer only runs on a schedule. An Ombi account backs request
+    # attribution, not read access -- so we let the user straight in and kick off
+    # the importer in the background. By the time they make a real request, the
+    # scan has finished and the account exists. We never make login wait on Ombi.
     ombi = OmbiClient(settings.ombi_base_url, settings.ombi_api_key)
     ombi_user_check = await ombi.find_user_by_identity(username=username, user_id=user_id)
     if ombi_user_check.get("ok") and not ombi_user_check.get("exists"):
-        await ombi.trigger_plex_user_importer()
-        for _ in range(12):
-            await asyncio.sleep(1)
-            recheck = await ombi.find_user_by_identity(username=username, user_id=user_id)
-            if recheck.get("ok") and recheck.get("exists"):
-                ombi_user_check = recheck
-                break
-        else:
-            # Importer ran but this user still isn't in Ombi -- almost always means
-            # they aren't actually shared on the Plex server yet. Show a friendly
-            # "setting up access" page instead of the old broken Ombi punt.
-            return HTMLResponse(
-                """
-<!doctype html>
-<html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Setting up your access</title></head>
-  <body style="font-family: sans-serif; padding: 24px;">
-    <p>Hang tight &mdash; we're setting up your access. This can take a moment the first time.</p>
-    <p><a href="/auth/plex/start">Try again</a></p>
-  </body>
-</html>
-""",
-                status_code=202,
-            )
+        _fire_and_forget(ombi.trigger_plex_user_importer())
 
     session_id = str(uuid4())
     session_cookie = cookie_provider._verify_cookie(request.cookies.get("plexorcist_session"))
@@ -1834,11 +1901,27 @@ async def plex_auth_logout(request: Request, settings: Settings = Depends(get_se
 
 
 @app.get("/api/welcome")
-async def welcome(user: UserContext = Depends(get_user_context)) -> dict[str, str]:
+async def welcome(
+    user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
     greeting_name = user.display_name or user.username
-    return {
-        "message": f"Hey {greeting_name}. I’m warmed up. Ask me for a movie, show, episode, recommendation, or help with something missing."
-    }
+    store = ConversationStore(settings.database_url)
+    first_time = (
+        store.get_user_flag(user.user_id, _ONBOARDING_SEEN_FLAG) != "true"
+        and not store.has_conversation_history(user.user_id)
+    )
+    if first_time:
+        message = (
+            f"Hey {greeting_name} — welcome to Plexorcist! I’m your media goblin. "
+            "First time here? Tap “Show me around” and I’ll give you the quick tour."
+        )
+    else:
+        message = (
+            f"Hey {greeting_name}. I’m warmed up. Ask me for a movie, show, episode, "
+            "recommendation, or help with something missing."
+        )
+    return {"message": message, "first_time": first_time}
 
 
 @app.get("/api/dev-user")
@@ -1947,6 +2030,17 @@ async def chat(
             extra_instructions = _build_nilbog_portal_instructions()
             nilbog_triggered_this_turn = True
             store.set_user_flag(user.user_id, _NILBOG_SEEN_FLAG, "true")
+
+        # First-ever message from a brand-new user: give them the welcome tour.
+        # Guarded by both a flag and a genuine "never chatted" check so existing
+        # users are never re-onboarded.
+        if (
+            extra_instructions is None
+            and store.get_user_flag(user.user_id, _ONBOARDING_SEEN_FLAG) != "true"
+            and not store.has_conversation_history(user.user_id)
+        ):
+            extra_instructions = _build_welcome_tour_instructions(user.username)
+            store.set_user_flag(user.user_id, _ONBOARDING_SEEN_FLAG, "true")
 
         reply, tool_calls = await agent.respond(
             user=user,

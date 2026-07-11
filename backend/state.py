@@ -180,6 +180,16 @@ class ConversationStore:
             updated_at=datetime.fromisoformat(row[10]),
         )
 
+    def has_conversation_history(self, user_id: str) -> bool:
+        """True if this user has ever exchanged a message -- any conversation with
+        a non-empty transcript. Freshly-created empty conversations don't count."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM conversations WHERE user_id = ? AND messages_json != '[]' LIMIT 1",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
     def list_stale_conversations(
         self,
         user_id: str,
