@@ -71,12 +71,17 @@ class PlexAuthClient:
                 headers=headers,
             )
             resources.raise_for_status()
-            machine_id = ""
-            for res in resources.json():
-                if isinstance(res, dict) and "server" in (res.get("provides") or ""):
-                    machine_id = str(res.get("clientIdentifier") or "")
-                    if machine_id:
-                        break
+            servers = [
+                res
+                for res in resources.json()
+                if isinstance(res, dict) and "server" in (res.get("provides") or "")
+            ]
+            # Bind to the admin's OWN server -- never a server they're merely a
+            # guest on -- so we can't return a bogus membership set. Fall back to
+            # the first server only if none is flagged owned.
+            owned = [res for res in servers if res.get("owned")]
+            candidate = (owned or servers or [{}])[0]
+            machine_id = str(candidate.get("clientIdentifier") or "")
             if not machine_id:
                 return {"ids": ids, "names": names}
             shared = await client.get(

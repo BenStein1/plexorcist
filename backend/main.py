@@ -347,6 +347,8 @@ def _load_plex_client_identifier(settings: Settings) -> str:
     return client_identifier
 
 
+# Shown to a Plex account that simply isn't shared on the server yet -- it's fine
+# to tell them how to get access.
 _NO_ACCESS_PAGE = """
 <!doctype html>
 <html lang="en">
@@ -354,6 +356,18 @@ _NO_ACCESS_PAGE = """
   <body style="font-family: sans-serif; padding: 24px;">
     <p>This is a private Plex concierge. Your Plex account doesn't have access to this server yet.</p>
     <p>If you think that's a mistake, ask the server owner to share their library with you, then try again.</p>
+  </body>
+</html>
+"""
+
+# Shown to a user the admin has explicitly blocked. Deliberately neutral -- it
+# does not reveal they're blocked or invite them to ask for access.
+_BLOCKED_PAGE = """
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>No access</title></head>
+  <body style="font-family: sans-serif; padding: 24px;">
+    <p>This is a private Plex concierge and isn't available for your account.</p>
   </body>
 </html>
 """
@@ -1827,9 +1841,11 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
     # Access gate: only the server owner (admin) and Plex accounts the admin has
     # actually shared the library with may enter. Blocked users and non-shared
     # accounts get a plain no-access page -- we never bounce anyone to Ombi.
-    blocked = BlockedUsersDirectory(settings.blocked_users_path).is_blocked(username)
-    shared = is_admin or await _is_shared_plex_user(settings, user_id=user_id, username=username)
-    if blocked or not shared:
+    if BlockedUsersDirectory(settings.blocked_users_path).is_blocked(username):
+        response = HTMLResponse(_BLOCKED_PAGE, status_code=403)
+        response.delete_cookie("plexorcist_pending_pin")
+        return response
+    if not (is_admin or await _is_shared_plex_user(settings, user_id=user_id, username=username)):
         response = HTMLResponse(_NO_ACCESS_PAGE, status_code=403)
         response.delete_cookie("plexorcist_pending_pin")
         return response
