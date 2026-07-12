@@ -174,6 +174,16 @@ class Toolkit:
             return self._admin_required()
         return await self.admin_tools.set_user_friendly_name(user_query=user_query, friendly_name=friendly_name)
 
+    async def set_shabbos_mode(self, user_query: str, enabled: bool) -> dict:
+        if not self.is_admin:
+            return self._admin_required()
+        return await self.admin_tools.set_shabbos_mode(user_query=user_query, enabled=enabled)
+
+    async def get_shabbos_diagnostics(self, user_query: str | None = None) -> dict:
+        if not self.is_admin:
+            return self._admin_required()
+        return await self.admin_tools.get_shabbos_diagnostics(user_query=user_query)
+
     async def set_my_friendly_name(self, friendly_name: str) -> dict:
         if not self.user or not self.user.username:
             return self._auth_required()
@@ -543,6 +553,28 @@ CATALOG: list[ToolSpec] = [
         input_model=schemas.EmptyInput,
         resolve=lambda tk: tk.clear_admin_motd,
         tags=_tags(ADMIN),
+    ),
+    ToolSpec(
+        name="set_shabbos_mode",
+        description=(
+            "Admin-only: turn Shabbos Mode on or off for one user. "
+            "Shabbos Mode gives that account a deterministic slash-command interface and routes it AWAY from the language model entirely — "
+            "no model sees their messages, at request time or in any background job. Use when the admin says someone doesn't want AI, "
+            "or asks to put a named user on the command interface (or take them off it)."
+        ),
+        input_model=schemas.SetShabbosModeInput,
+        resolve=lambda tk: tk.set_shabbos_mode,
+        tags=_tags(ADMIN),
+    ),
+    ToolSpec(
+        name="get_shabbos_diagnostics",
+        description=(
+            "Admin-only: report what the Shabbos Mode audit log actually recorded — commands run and how many invoked a language model (must be zero). "
+            "Use when the admin asks whether Shabbos Mode is really AI-free, or wants to verify a specific user's route."
+        ),
+        input_model=schemas.ShabbosDiagnosticsInput,
+        resolve=lambda tk: tk.get_shabbos_diagnostics,
+        tags=_tags(ADMIN, READONLY),
     ),
     # --- Escalation ---------------------------------------------------------
     ToolSpec(

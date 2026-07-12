@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from backend.auth_context import FriendlyNameDirectory
+from backend.shabbos.flags import is_shabbos_user, set_shabbos_mode
 from backend.state import ConversationStore
 from clients.transmission_client import TransmissionClient
 
@@ -19,11 +20,107 @@ class AdminTools:
         store: ConversationStore | None = None,
         friendly_names: FriendlyNameDirectory | None = None,
         verify_wait_seconds: int = 30,
+        audit_path: str = "plexorcist.log",
     ) -> None:
         self.transmission = transmission
         self.store = store
         self.friendly_names = friendly_names
         self.verify_wait_seconds = max(0, int(verify_wait_seconds))
+        self.audit_path = audit_path
+
+    # -- Shabbos Mode ------------------------------------------------------
+
+    async def set_shabbos_mode(self, user_query: str, enabled: bool) -> dict[str, Any]:
+        """Admin-only: put an account into (or out of) the AI-free command interface."""
+        if self.store is None:
+            return {
+                "ok": False,
+                "action": "set_shabbos_mode",
+                "reason": "store_unavailable",
+                "user_summary": "Shabbos Mode can't be changed because the store is not configured.",
+            }
+        resolved = self._resolve_user_query(user_query)
+        if not resolved.get("ok"):
+            return {**resolved, "action": "set_shabbos_mode"}
+
+        user = resolved["user"]
+        user_id = str(user.get("user_id") or "").strip()
+        label = str(user.get("label") or user.get("username") or user_id)
+
+        set_shabbos_mode(self.store, user_id, bool(enabled))
+        state = "ON" if enabled else "OFF"
+        return {
+            "ok": True,
+            "action": "set_shabbos_mode",
+            "user_id": user_id,
+            "enabled": bool(enabled),
+            "user_summary": (
+                f"Shabbos Mode is now {state} for {label}. "
+                + (
+                    "They get the deterministic command interface — no language model touches their account."
+                    if enabled
+                    else "They're back on the normal conversational interface."
+                )
+            ),
+        }
+
+    async def get_shabbos_diagnostics(self, user_query: str | None = None) -> dict[str, Any]:
+        """Admin-only: prove the deterministic route is what actually ran.
+
+        This reads the real audit log rather than reporting a hardcoded zero -- a
+        constant would merely assert the guarantee; counting real traffic
+        demonstrates it.
+        """
+        if self.store is None:
+            return {"ok": False, "action": "shabbos_diagnostics", "reason": "store_unavailable"}
+
+        target_id: str | None = None
+        label = "all users"
+        if user_query:
+            resolved = self._resolve_user_query(user_query)
+            if not resolved.get("ok"):
+                return {**resolved, "action": "shabbos_diagnostics"}
+            target_id = str(resolved["user"].get("user_id") or "")
+            label = str(resolved["user"].get("label") or target_id)
+
+        commands = 0
+        ai_invoked = 0
+        by_command: dict[str, int] = {}
+        try:
+            with open(self.audit_path, encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if record.get("event_type") != "shabbos_command":
+                        continue
+                    if target_id and str(record.get("user_id")) != target_id:
+                        continue
+                    commands += 1
+                    if record.get("ai_invoked"):
+                        ai_invoked += 1
+                    name = str(record.get("command") or "?")
+                    by_command[name] = by_command.get(name, 0) + 1
+        except FileNotFoundError:
+            pass
+
+        enabled = is_shabbos_user(self.store, target_id) if target_id else None
+        return {
+            "ok": True,
+            "action": "shabbos_diagnostics",
+            "user": label,
+            "shabbos_mode": enabled,
+            "router": "deterministic",
+            "commands_run": commands,
+            "by_command": by_command,
+            "llm_calls": ai_invoked,
+            "embedding_calls": 0,  # the app has no embedding client at all
+            "user_summary": (
+                f"{label}: {commands} Shabbos command(s) recorded, {ai_invoked} of which invoked a language model. "
+                + ("Clean." if ai_invoked == 0 else "*** AI INVOCATION DETECTED — INVESTIGATE ***")
+            ),
+        }
 
     async def get_admin_task_summary(
         self,

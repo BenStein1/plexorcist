@@ -111,9 +111,36 @@ To connect Claude Code to a running instance, add to `.mcp.json`:
 }
 ```
 
+## Shabbos Mode
+
+> "I don't roll on Shabbos."
+
+A per-account, deterministic, **AI-free** interface for users who don't want to
+interact with a language model. They get a strict slash-command version of the
+full non-admin surface — search, request, status, repair, issue reporting — with
+**zero model involvement at runtime**: not in the request path, not in a
+background job, not after the fact.
+
+It works by being a *third consumer* of the same `tools/catalog.py` that powers
+the chat agent and the MCP server, so it reuses the real tools, the real
+permission gate, and the real service adapters — no duplicated request logic.
+
+The guarantee is structural: the fork in `/api/chat` sits upstream of
+`build_agent()`, so the Shabbos path is never handed an `LlmClient` at all. The
+background memory compactor is guarded too, so a Shabbos conversation never
+reaches a model even later.
+
+Admin-only. Enable it by asking the assistant: *"turn on Shabbos Mode for
+Richard."* Verify it with *"show me the Shabbos diagnostics"*, which reads the
+real audit log rather than asserting a constant.
+
+**See [`SHABBOS_MODE.md`](SHABBOS_MODE.md)** for the command reference, the
+architectural guarantee, and the checklist for adding a command.
+
 ## Memory
 
-Plexorcist has tiered memory:
+Plexorcist has tiered memory (and Shabbos Mode users are permanently excluded
+from it — see above):
 
 - Tier 1: recent user notes, preferences, corrections, and open tasks.
 - Tier 2: compacted per-conversation snapshots.

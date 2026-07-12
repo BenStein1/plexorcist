@@ -30,7 +30,16 @@ from backend.auth_context import (
 from backend.auth_store import PlexAuthSessionStore
 from backend.config import Settings, get_settings
 from backend.logging import AuditLogger, configure_logging
-from backend.models import ChatRequest, ChatResponse, DevImpersonationRequest, PlexAuthSession, UserContext
+from backend.models import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    DevImpersonationRequest,
+    PlexAuthSession,
+    UserContext,
+)
+from backend.shabbos import is_shabbos_user
+from backend.shabbos.router import BANNER as SHABBOS_BANNER, ShabbosRouter
 from backend.state import ConversationStore
 from clients.llm_providers import ChatTurn, LlmClient, LlmProviderConfig, UsageRecorder, build_llm_client
 from clients.ombi_client import OmbiClient
@@ -407,6 +416,21 @@ async def _is_shared_plex_user(settings: Settings, *, user_id: str, username: st
     return bool((uid and uid in shared["ids"]) or (uname and uname in shared["names"]))
 
 
+def build_store_and_audit(settings: Settings) -> tuple[ConversationStore, AuditLogger]:
+    """Everything a request needs EXCEPT a model client.
+
+    Shabbos Mode builds from this and never calls _build_llm_client, so nothing on
+    that path is ever handed an LlmClient. That is the isolation guarantee: you
+    cannot call what you were never given.
+    """
+    return ConversationStore(settings.database_url), AuditLogger()
+
+
+def build_shabbos_router(settings: Settings, user: UserContext) -> tuple[ShabbosRouter, ConversationStore, AuditLogger]:
+    store, audit = build_store_and_audit(settings)
+    return ShabbosRouter(settings, store, audit, user), store, audit
+
+
 def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[ConciergeAgent, ConversationStore, AuditLogger]:
     store = ConversationStore(settings.database_url)
     bridge = build_bridge(settings, store, user, after_call=None)
@@ -722,6 +746,21 @@ async def _compact_conversation_once(
     source: str,
     timeout_seconds: float = 30.0,
 ) -> dict[str, int | str]:
+    # THE NON-OBVIOUS LEAK. Compaction sends a stored conversation to the LLM to
+    # summarize it. Without this guard a Shabbos user's messages would reach a
+    # model *after the fact*, in a background job, despite a clean request path.
+    #
+    # Marking it compacted=True also means the conversation is never swept later,
+    # even if the user leaves the mode: content created under the no-AI promise
+    # stays out of a model permanently. That is deliberate.
+    if is_shabbos_user(store, state.user_id):
+        store.mark_conversation_compaction(
+            state.conversation_id,
+            status="skipped_shabbos",
+            compacted=True,
+        )
+        return {"status": "skipped_shabbos", "notes_added": 0}
+
     if not state.messages:
         store.mark_conversation_compaction(
             state.conversation_id,
@@ -835,6 +874,86 @@ async def _memory_sweeper_loop(settings: Settings) -> None:
         await asyncio.sleep(cadence_seconds)
 
 
+# The two starter cards, as plain (non-f) strings so their JS braces stay literal.
+# index() picks exactly one; the other is never emitted.
+
+_SHABBOS_STARTER_CARD_JS = """
+      function renderStarterCard(messages) {
+        // Deliberately simple, not second-class. No AI suggestions, no generated
+        // follow-ups, no natural-language autocomplete. The buttons INSERT a
+        // command for you to review -- they never send one on your behalf.
+        const hasUserMessage = messages.some((message) => message.role === "user");
+        if (hasUserMessage || !isAuthenticated) return;
+        const card = document.createElement("div");
+        card.className = "starter-card shabbos-card";
+        card.innerHTML = `
+          <h3>SHABBOS MODE</h3>
+          <p class="shabbos-sub">Deterministic command interface.<br>No language models are used for this account.</p>
+          <p class="shabbos-quote">“I don’t roll on Shabbos.”</p>
+          <div class="starter-chips">
+            <button type="button" class="starter-chip" data-insert="/help">/help</button>
+            <button type="button" class="starter-chip" data-insert="/search ">/search</button>
+            <button type="button" class="starter-chip" data-insert="/status movie ">/status</button>
+            <button type="button" class="starter-chip" data-insert="/library ">/library</button>
+            <button type="button" class="starter-chip" data-insert="/watching">/watching</button>
+            <button type="button" class="starter-chip" data-insert="/issue ">/issue</button>
+          </div>
+        `;
+        transcript.appendChild(card);
+        for (const chip of card.querySelectorAll(".starter-chip")) {
+          chip.addEventListener("click", () => {
+            if (isSending || !isAuthenticated) return;
+            messageBox.value = chip.getAttribute("data-insert") || "";
+            autoResizeComposer();
+            messageBox.focus();
+          });
+        }
+      }
+"""
+
+_CONCIERGE_STARTER_CARD_JS = """
+      function renderStarterCard(messages) {
+        const hasUserMessage = messages.some((message) => message.role === "user");
+        if (hasUserMessage || !isAuthenticated) return;
+        const card = document.createElement("div");
+        card.className = "starter-card";
+        card.innerHTML = `
+          <img class="starter-emblem" src="/static/images/star-icon.png?v=1" alt="">
+          <h3>I'm here to help with your media.</h3>
+          <p>Ask for a movie, show, episode, recommendation, or help with something missing.</p>
+          <div class="starter-chips">
+            ${isFirstTime ? '<button type="button" class="starter-chip" data-prompt="Give me a quick tour of what you can do.">✨ Show me around</button>' : ''}
+            <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now by listing the most popular movies and most popular TV shows from Tautulli.">What’s popular right now?</button>
+            <button type="button" class="starter-chip" data-prompt="Recommend three movies based on what I watch, and keep at least one weird pick.">Smart recommendations</button>
+            <button type="button" class="starter-chip" data-prompt="Check if my shows are missing episodes in Plex, and tell me exactly what’s missing.">Find missing episodes</button>
+            <button type="button" class="starter-chip" data-prompt="Help me search for a movie or show and request it if it is missing.">Search and request</button>
+            <button type="button" class="starter-chip" data-prompt="Give me a quick health check of my pending requests and anything stuck.">Request health check</button>
+            <button type="button" class="starter-chip" data-prompt="Summarize what I watched recently and suggest what to watch tonight.">What should I watch tonight?</button>
+          </div>
+        `;
+        transcript.appendChild(card);
+        for (const chip of card.querySelectorAll(".starter-chip")) {
+          chip.addEventListener("click", () => {
+            if (isSending || !isAuthenticated) return;
+            const prompt = chip.getAttribute("data-prompt") || "";
+            messageBox.value = prompt;
+            autoResizeComposer();
+            sendMessage();
+          });
+        }
+        const emblem = card.querySelector(".starter-emblem");
+        if (emblem) {
+          emblem.addEventListener("click", () => {
+            if (isSending || !isAuthenticated) return;
+            messageBox.value = "Tell me about Troll 2";
+            autoResizeComposer();
+            sendMessage({ easterEggMode: "nilbog_portal" });
+          });
+        }
+      }
+"""
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(
     request: Request,
@@ -843,7 +962,22 @@ async def index(
     dev_mode = settings.is_dev_impersonation_mode()
     current_user = await _get_current_user_optional(request, settings)
     authenticated = current_user is not None
-    hero_copy = _render_auth_greeting(current_user, settings)
+    # The UI is cosmetic, not the guarantee -- /api/chat enforces the mode
+    # server-side regardless of what this page renders. But the flashy bits are
+    # simply NOT EMITTED for a Shabbos user, rather than hidden client-side, so
+    # nothing AI-shaped is even present in their page.
+    shabbos = authenticated and is_shabbos_user(ConversationStore(settings.database_url), current_user.user_id)
+    shabbos_js = "true" if shabbos else "false"
+    composer_placeholder = "/help" if shabbos else "What media should I summon for you?"
+    # Only ONE of these two functions is ever sent to the browser. A Shabbos user's
+    # page does not merely hide the AI affordances -- the prompt strings, the
+    # recommendation chips and the easter egg are not in their HTML at all.
+    starter_card_js = _SHABBOS_STARTER_CARD_JS if shabbos else _CONCIERGE_STARTER_CARD_JS
+    hero_copy = (
+        "Deterministic command interface. No language models are used for this account."
+        if shabbos
+        else _render_auth_greeting(current_user, settings)
+    )
     dev_panel_html = ""
     dev_panel_js = ""
     if dev_mode:
@@ -1346,6 +1480,31 @@ async def index(
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 10px;
       }}
+      /* --- Shabbos Mode: deliberately simple, not second-class. --- */
+      .shabbos-card h3 {{
+        letter-spacing: 0.18em;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      }}
+      .shabbos-sub {{
+        color: var(--muted);
+      }}
+      .shabbos-quote {{
+        font-style: italic;
+        opacity: 0.75;
+        margin-bottom: 16px !important;
+      }}
+      body.shabbos .starter-chip {{
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        text-align: center;
+      }}
+      /* Command output is whitespace-aligned (result tables, episode lists), so
+         it must render in a monospace face with its newlines preserved. */
+      body.shabbos .composer-input,
+      body.shabbos .message .bubble,
+      body.shabbos .message {{
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        white-space: pre-wrap;
+      }}
       .starter-chip {{
         min-width: 0;
         box-sizing: border-box;
@@ -1514,7 +1673,7 @@ async def index(
       <div id="transcript" class="panel chat"></div>
       <div class="panel composer-panel">
         <div class="composer">
-          <textarea id="message" class="composer-input" rows="1" placeholder="What media should I summon for you?" {composer_disabled_attr}></textarea>
+          <textarea id="message" class="composer-input" rows="1" placeholder="{composer_placeholder}" {composer_disabled_attr}></textarea>
           <button id="send" {send_disabled_attr}>Send</button>
         </div>
         <div class="composer-meta">
@@ -1534,6 +1693,8 @@ async def index(
       let isSending = false;
       let isFirstTime = false;
       const isAuthenticated = {str(authenticated).lower()};
+      const isShabbos = {shabbos_js};
+      if (isShabbos) document.body.classList.add("shabbos");
 {dev_panel_js}
 
       function autoResizeComposer() {{
@@ -1551,45 +1712,7 @@ async def index(
         renderTranscript([{{ role: "assistant", content: data.message }}]);
       }}
 
-      function renderStarterCard(messages) {{
-        const hasUserMessage = messages.some((message) => message.role === "user");
-        if (hasUserMessage || !isAuthenticated) return;
-        const card = document.createElement("div");
-        card.className = "starter-card";
-        card.innerHTML = `
-          <img class="starter-emblem" src="/static/images/star-icon.png?v=1" alt="">
-          <h3>I'm here to help with your media.</h3>
-          <p>Ask for a movie, show, episode, recommendation, or help with something missing.</p>
-          <div class="starter-chips">
-            ${{isFirstTime ? '<button type="button" class="starter-chip" data-prompt="Give me a quick tour of what you can do.">✨ Show me around</button>' : ''}}
-            <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now by listing the most popular movies and most popular TV shows from Tautulli.">What’s popular right now?</button>
-            <button type="button" class="starter-chip" data-prompt="Recommend three movies based on what I watch, and keep at least one weird pick.">Smart recommendations</button>
-            <button type="button" class="starter-chip" data-prompt="Check if my shows are missing episodes in Plex, and tell me exactly what’s missing.">Find missing episodes</button>
-            <button type="button" class="starter-chip" data-prompt="Help me search for a movie or show and request it if it is missing.">Search and request</button>
-            <button type="button" class="starter-chip" data-prompt="Give me a quick health check of my pending requests and anything stuck.">Request health check</button>
-            <button type="button" class="starter-chip" data-prompt="Summarize what I watched recently and suggest what to watch tonight.">What should I watch tonight?</button>
-          </div>
-        `;
-        transcript.appendChild(card);
-        for (const chip of card.querySelectorAll(".starter-chip")) {{
-          chip.addEventListener("click", () => {{
-            if (isSending || !isAuthenticated) return;
-            const prompt = chip.getAttribute("data-prompt") || "";
-            messageBox.value = prompt;
-            autoResizeComposer();
-            sendMessage();
-          }});
-        }}
-        const emblem = card.querySelector(".starter-emblem");
-        if (emblem) {{
-          emblem.addEventListener("click", () => {{
-            if (isSending || !isAuthenticated) return;
-            messageBox.value = "Tell me about Troll 2";
-            autoResizeComposer();
-            sendMessage({{ easterEggMode: "nilbog_portal" }});
-          }});
-        }}
-      }}
+{starter_card_js}
 
       function renderTranscript(messages) {{
         transcript.innerHTML = "";
@@ -1909,6 +2032,12 @@ async def welcome(
 ) -> dict[str, object]:
     greeting_name = user.display_name or user.username
     store = ConversationStore(settings.database_url)
+
+    # The Shabbos greeting is the banner: stated once, not repeated after every
+    # command. No "media goblin", no tour -- both are LLM affordances.
+    if is_shabbos_user(store, user.user_id):
+        return {"message": SHABBOS_BANNER, "first_time": False, "shabbos": True}
+
     first_time = (
         store.get_user_flag(user.user_id, _ONBOARDING_SEEN_FLAG) != "true"
         and not store.has_conversation_history(user.user_id)
@@ -1989,12 +2118,54 @@ async def set_dev_user(
     }
 
 
+async def _shabbos_chat(payload: ChatRequest, user: UserContext, settings: Settings) -> ChatResponse:
+    """The deterministic turn. No agent, no prompt, no model client -- ever.
+
+    Note what is NOT here: long-term memory injection, admin-notice prompt
+    assembly, the welcome tour, the NILBOG easter egg. All of those exist only to
+    build a prompt, and there is no prompt on this path.
+    """
+    router, store, audit = build_shabbos_router(settings, user)
+    state = store.get_or_create(user.user_id, payload.conversation_id)
+    try:
+        reply = await router.handle(state, payload.message)
+    except Exception:  # noqa: BLE001 - fail closed; never hand the turn to the agent
+        logger.exception("Shabbos router failed for user %s", user.user_id)
+        reply = (
+            "That didn't work, and nothing was changed.\n"
+            "No language model was used. Use /help, or contact the admin."
+        )
+    state.messages.append(ChatMessage(role="user", content=payload.message))
+    state.messages.append(ChatMessage(role="assistant", content=reply))
+    store.save(state)
+    store.prune_user_conversations(user.user_id, keep=2)
+
+    response_state = state.model_copy(deep=True)
+    response_state.candidate_media = []
+    response_state.support_context = {}
+    response_state.last_tool_actions = []
+    response_state.escalation_history = []
+    return ChatResponse(
+        conversation_id=state.conversation_id,
+        reply=reply,
+        continue_to_ombi_url=settings.ombi_continue_url,
+        state=response_state,
+        tool_calls=[],
+    )
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
     user: UserContext = Depends(get_user_context),
     settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
+    # THE ENFORCEMENT POINT. This fork is upstream of build_agent(), which is what
+    # constructs the LlmClient -- so a Shabbos account cannot reach a model even by
+    # POSTing free-form text straight at this endpoint. Server-side, not cosmetic.
+    if is_shabbos_user(ConversationStore(settings.database_url), user.user_id):
+        return await _shabbos_chat(payload, user, settings)
+
     agent, store, audit = build_agent(settings, user)
     try:
         state = store.get_or_create(user.user_id, payload.conversation_id)
