@@ -216,49 +216,55 @@ async def test_fix_does_not_act_until_confirmed(settings, store):
     state = store.get_or_create(USER.user_id, None)
     reply = await router.handle(state, "/fix movie The Thing --year 1982")
 
-    assert "/confirm" in reply
+    assert "Confirm with:  /confirm" in reply
     pending = state.support_context[PENDING_KEY]
     assert pending["tool"] == "repair_requested_movie"
     assert pending["kwargs"]["title"] == "The Thing"
 
 
-def test_confirm_token_is_single_use():
+def test_confirm_asks_for_no_code():
+    """There is no shared secret to type -- the user is already authenticated.
+    The safety is that /confirm replays the STORED action."""
+    from backend.shabbos.commands import COMMANDS_BY_NAME
+
+    assert COMMANDS_BY_NAME["confirm"].usage == "/confirm"
+
+
+def test_confirm_is_single_use():
     context: dict = {}
-    action = mint(context, user_id=USER.user_id, tool="repair_requested_movie", kwargs={}, description="x")
-    assert consume(context, user_id=USER.user_id, token=action.token).tool == "repair_requested_movie"
+    mint(context, user_id=USER.user_id, tool="repair_requested_movie", kwargs={}, description="x")
+    assert consume(context, user_id=USER.user_id).tool == "repair_requested_movie"
     with pytest.raises(ValueError):
-        consume(context, user_id=USER.user_id, token=action.token)
+        consume(context, user_id=USER.user_id)
 
 
-def test_confirm_token_is_bound_to_the_user():
+def test_confirm_is_bound_to_the_user():
     context: dict = {}
-    action = mint(context, user_id=USER.user_id, tool="repair_requested_movie", kwargs={}, description="x")
+    mint(context, user_id=USER.user_id, tool="repair_requested_movie", kwargs={}, description="x")
     with pytest.raises(ValueError):
-        consume(context, user_id=OTHER.user_id, token=action.token)
+        consume(context, user_id=OTHER.user_id)
 
 
-def test_confirm_token_expires():
+def test_confirm_expires():
     from datetime import timedelta
 
     import backend.shabbos.confirm as confirm_mod
 
     context: dict = {}
-    action = mint(context, user_id=USER.user_id, tool="repair_requested_movie", kwargs={}, description="x")
+    mint(context, user_id=USER.user_id, tool="repair_requested_movie", kwargs={}, description="x")
 
     real_now = confirm_mod._now()
     confirm_mod._now = lambda: real_now + timedelta(minutes=6)
     try:
         with pytest.raises(ValueError, match="expired"):
-            consume(context, user_id=USER.user_id, token=action.token)
+            consume(context, user_id=USER.user_id)
     finally:
         confirm_mod._now = lambda: confirm_mod.datetime.now(confirm_mod.timezone.utc)
 
 
-def test_wrong_confirm_token_is_rejected():
-    context: dict = {}
-    mint(context, user_id=USER.user_id, tool="repair_requested_movie", kwargs={}, description="x")
+def test_confirm_with_nothing_pending_is_rejected():
     with pytest.raises(ValueError):
-        consume(context, user_id=USER.user_id, token="BADBAD")
+        consume({}, user_id=USER.user_id)
 
 
 @pytest.mark.asyncio
@@ -278,9 +284,9 @@ async def test_confirm_executes_the_stored_action_not_new_user_input(settings, s
     router = router_for(settings, store)
     state = store.get_or_create(USER.user_id, None)
     await router.handle(state, "/fix movie The Thing --year 1982")
-    token = state.support_context[PENDING_KEY]["token"]
+    assert PENDING_KEY in state.support_context
 
-    reply = await router.handle(state, f"/confirm {token}")
+    reply = await router.handle(state, "/confirm")
     assert "re-fetching" in reply
     assert seen["title"] == "The Thing"
     assert seen["year"] == 1982

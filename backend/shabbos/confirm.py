@@ -1,17 +1,18 @@
-"""Short-lived, user-bound, single-use confirmation tokens.
+"""The pending action behind `/confirm`.
 
 Expensive or destructive commands (the repair lane) do not act immediately: they
-describe exactly what they would do and mint a token. `/confirm <TOKEN>` executes
-the *stored* action -- the user's second message cannot change its arguments.
+describe exactly what they would do, and wait for a bare `/confirm`.
 
-The token is bound to the user_id and to the fully-resolved action. It expires,
-and it is consumed on first use. Stored in the conversation's support_context,
-which is already persisted per conversation.
+There is no code to type. The safety that matters is not a shared secret -- the
+user is already authenticated -- it is that `/confirm` executes the action that
+was STORED, so the second message cannot change what was agreed to. The action is
+still bound to the user, still single-use, and still expires.
+
+Stored in the conversation's support_context, which is already persisted.
 """
 
 from __future__ import annotations
 
-import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -22,7 +23,6 @@ TOKEN_TTL = timedelta(minutes=5)
 
 @dataclass(frozen=True)
 class PendingAction:
-    token: str
     user_id: str
     tool: str
     kwargs: dict[str, Any]
@@ -35,7 +35,6 @@ class PendingAction:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "token": self.token,
             "user_id": self.user_id,
             "tool": self.tool,
             "kwargs": self.kwargs,
@@ -48,7 +47,6 @@ class PendingAction:
     def from_dict(cls, raw: dict[str, Any]) -> "PendingAction | None":
         try:
             return cls(
-                token=str(raw["token"]),
                 user_id=str(raw["user_id"]),
                 tool=str(raw["tool"]),
                 kwargs=dict(raw["kwargs"]),
@@ -73,9 +71,12 @@ def mint(
     description: str,
     note: str = "",
 ) -> PendingAction:
-    """Create and store a pending action, replacing any previous one."""
+    """Store a pending action, replacing any previous one.
+
+    Only one action can be pending at a time, so a bare `/confirm` is never
+    ambiguous: it always means "the thing I was just shown".
+    """
     action = PendingAction(
-        token=secrets.token_hex(3).upper(),
         user_id=str(user_id),
         tool=tool,
         kwargs=kwargs,
@@ -87,35 +88,27 @@ def mint(
     return action
 
 
-def consume(support_context: dict[str, Any], *, user_id: str, token: str) -> PendingAction:
-    """Return the pending action for this token, or raise ValueError.
+def consume(support_context: dict[str, Any], *, user_id: str) -> PendingAction:
+    """Return and clear the pending action, or raise ValueError.
 
-    Rejects (deterministically, with no fallback): no pending action, a token
-    that doesn't match, a token belonging to another user, and an expired token.
-    The action is removed from the context on any terminal outcome, so a token is
-    strictly single-use.
+    Rejects deterministically (never with a fallback): nothing pending, an action
+    belonging to another user, or an expired one. Cleared on any terminal outcome,
+    so it is strictly single-use -- a second `/confirm` cannot repeat a repair.
     """
     raw = support_context.get(PENDING_KEY)
-    if not isinstance(raw, dict):
-        raise ValueError("There is nothing waiting to be confirmed.")
-
-    action = PendingAction.from_dict(raw)
+    action = PendingAction.from_dict(raw) if isinstance(raw, dict) else None
     if action is None:
         support_context.pop(PENDING_KEY, None)
         raise ValueError("There is nothing waiting to be confirmed.")
 
-    supplied = token.strip().upper()
-    if not secrets.compare_digest(action.token, supplied):
-        raise ValueError("That confirmation code doesn't match the pending action.")
-
-    # Bound to the authenticated user, not just to the conversation.
+    # Bound to the authenticated user, not merely to the conversation.
     if action.user_id != str(user_id):
         support_context.pop(PENDING_KEY, None)
-        raise ValueError("That confirmation code doesn't match the pending action.")
+        raise ValueError("There is nothing waiting to be confirmed.")
 
-    support_context.pop(PENDING_KEY, None)  # single use, even if expired
+    support_context.pop(PENDING_KEY, None)  # single use, even when expired
 
     if _now() > action.expires_at:
-        raise ValueError("That confirmation code has expired. Run the command again to get a new one.")
+        raise ValueError("That confirmation expired. Run the command again.")
 
     return action

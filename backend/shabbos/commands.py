@@ -338,7 +338,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
         build_issue,
     ),
     CommandSpec("name", "/name <what to call you>", "Change what I call you.", build_name),
-    CommandSpec("confirm", "/confirm <CODE>", "Confirm a pending action.", local=True),
+    CommandSpec("confirm", "/confirm", "Confirm the action you were just shown.", local=True),
     CommandSpec("whoami", "/whoami", "Who you're signed in as.", local=True),
     CommandSpec("logout", "/logout", "Sign out.", local=True),
 )

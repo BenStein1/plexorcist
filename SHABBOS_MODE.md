@@ -73,7 +73,7 @@ No migration. Rollback is clearing the flag.
 | `/watching` | Your recent watch history. |
 | `/issue <type> <note>` | Report a problem to the admin. |
 | `/name <name>` | Change what you're called. |
-| `/confirm <CODE>` | Confirm a pending action. |
+| `/confirm` | Confirm the action you were just shown. |
 | `/whoami`, `/logout` | Session. |
 
 Issue types are fixed tokens: `missing`, `wrong-version`, `bad-audio`,
@@ -191,7 +191,18 @@ destroy the entire point of the feature.
   records rather than merely raising, because the router and the sweeper both wrap
   work in `except Exception` and would otherwise swallow the evidence. Also covers
   the sweeper guard, the endpoint fork, and an import tripwire.
-- `tests/test_shabbos_commands.py` — parsing, confirmation tokens, permissions,
-  admin tasks, and renderer whitelisting.
+- `tests/test_shabbos_commands.py` — parsing, confirmation, permissions, the admin
+  toggle, admin tasks, and renderer whitelisting.
+
+## Notes on the UI
+
+The composer behaves like a shell: **Up/Down cycles your command history**, seeded
+from the transcript so it survives a reload.
+
+`/fix` is confirmed with a bare `/confirm` — there is no code to type. The safety
+is not a shared secret (the user is already authenticated); it is that `/confirm`
+replays the action that was **stored server-side**, so a second message cannot
+change what was agreed to. It is still user-bound, single-use, and expires after
+five minutes.
 
 Run: `.venv/bin/python -m pytest tests/ -q`

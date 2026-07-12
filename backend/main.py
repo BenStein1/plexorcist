@@ -878,7 +878,62 @@ async def _memory_sweeper_loop(settings: Settings) -> None:
 # index() picks exactly one; the other is never emitted.
 
 _SHABBOS_STARTER_CARD_JS = """
+      // Command history, like a real shell: Up/Down cycles what you've sent.
+      // Seeded from the transcript, so it survives a page reload.
+      const commandHistory = [];
+      let historyIndex = -1;
+      let historyDraft = "";
+
+      function rememberCommand(text) {
+        const command = String(text || "").trim();
+        if (!command) return;
+        if (commandHistory[commandHistory.length - 1] === command) return;
+        commandHistory.push(command);
+        if (commandHistory.length > 200) commandHistory.shift();
+        historyIndex = -1;
+      }
+
+      function recallHistory(direction) {
+        if (!commandHistory.length) return;
+        if (historyIndex === -1) {
+          if (direction > 0) return;          // already at the live line
+          historyDraft = messageBox.value;    // keep what they were typing
+          historyIndex = commandHistory.length - 1;
+        } else {
+          historyIndex += direction > 0 ? 1 : -1;
+        }
+
+        if (historyIndex < 0) historyIndex = 0;
+        if (historyIndex >= commandHistory.length) {
+          historyIndex = -1;
+          messageBox.value = historyDraft;    // back to the draft
+        } else {
+          messageBox.value = commandHistory[historyIndex];
+        }
+        autoResizeComposer();
+        // Caret to the end, so Up-then-edit behaves like a terminal.
+        window.requestAnimationFrame(() => {
+          const end = messageBox.value.length;
+          messageBox.setSelectionRange(end, end);
+        });
+      }
+
+      messageBox?.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        // Don't hijack the arrows mid-edit of a multi-line draft.
+        if (messageBox.value.includes("\\n")) return;
+        event.preventDefault();
+        recallHistory(event.key === "ArrowDown" ? 1 : -1);
+      });
+
       function renderStarterCard(messages) {
+        // renderTranscript() re-renders the whole transcript, so rebuild rather
+        // than append -- otherwise history would duplicate on every turn.
+        commandHistory.length = 0;
+        historyIndex = -1;
+        for (const message of messages) {
+          if (message.role === "user") rememberCommand(message.content);
+        }
         // Deliberately simple, not second-class. No AI suggestions, no generated
         // follow-ups, no natural-language autocomplete. The buttons INSERT a
         // command for you to review -- they never send one on your behalf.
@@ -1779,6 +1834,9 @@ async def index(
         if (isSending) return;
         const message = messageBox.value.trim();
         if (!message) return;
+        // Shabbos Mode only: record it so Up recalls it, like a shell.
+        // rememberCommand is defined only in the Shabbos build of this page.
+        if (isShabbos) rememberCommand(message);
         isSending = true;
         sendButton.disabled = true;
         sendButton.textContent = "Sending...";

@@ -117,7 +117,8 @@ class ShabbosRouter:
                 note=invocation.note_text,
             )
             self._audit(spec.name, ok=True, target=invocation.target, note="awaiting_confirmation")
-            return f"{invocation.confirm}\n\nConfirm with:  /confirm {action.token}\n(The code expires in 5 minutes.)"
+            del action  # stored; /confirm replays it from support_context
+            return f"{invocation.confirm}\n\nConfirm with:  /confirm\n(Expires in 5 minutes.)"
 
         return await self._execute(spec.name, invocation, state)
 
@@ -148,12 +149,10 @@ class ShabbosRouter:
         return UNAVAILABLE_REPLY
 
     async def _run_confirm(self, parsed, state: ConversationState) -> str:
-        if not parsed.args:
-            return "Usage: /confirm <CODE>"
         try:
-            action = consume(state.support_context, user_id=self.user.user_id, token=parsed.args[0])
+            action = consume(state.support_context, user_id=self.user.user_id)
         except ValueError as exc:
-            self._audit("confirm", ok=False, target="", note="rejected_token")
+            self._audit("confirm", ok=False, target="", note="nothing_pending")
             return str(exc)
 
         # Rebuild the invocation from the STORED action, not from user input, so

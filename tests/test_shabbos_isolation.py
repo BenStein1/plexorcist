@@ -139,7 +139,7 @@ COMMAND_SCRIPT = [
     "/name Richard",
     "/whoami",
     "/logout",
-    "/confirm ABC123",
+    "/confirm",
     "please just find me the thing movie",  # free-form
     "/nonsense",  # unknown command
     "/search",  # usage error
