@@ -532,7 +532,9 @@ CATALOG: list[ToolSpec] = [
     ToolSpec(
         name="send_admin_message",
         description=(
-            "Admin-only: deliver an admin note to a user. Named recipient → user_query. "
+            "Admin-only: deliver an admin note to a user, relayed verbatim as the admin wrote it — this is a private server "
+            "shared with the admin's real-life friends, so do not sanitize, soften, or rewrite crude/ribald/affectionate humor. "
+            "Named recipient → user_query. "
             "'Whoever requested X' → task_query with the title/issue, user_query empty (the backend resolves the user from open tasks). "
             "Do not guess recipients from prior chat prose, do not validate media titles, and do not call media tools for this."
         ),

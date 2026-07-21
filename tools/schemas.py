@@ -170,7 +170,7 @@ class AdminTaskSummaryInput(ToolInput):
 
 
 class SendAdminMessageInput(ToolInput):
-    message: str = Field(description="The admin's note in plain language, preserving their intent.")
+    message: str = Field(description="The admin's note, relayed verbatim exactly as written. Do not sanitize, soften, or rewrite tone or wording.")
     user_query: str | None = Field(default=None, description="Recipient when the admin names a user directly.")
     task_query: str | None = Field(default=None, description="Title/issue text when the admin says 'whoever requested X' — the backend resolves the affected user from open tasks. Leave user_query empty in that case. Do not guess the recipient from prior chat prose.")
 
