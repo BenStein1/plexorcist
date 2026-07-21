@@ -199,6 +199,10 @@ class SetMyFriendlyNameInput(ToolInput):
     friendly_name: str = Field(min_length=1, max_length=60, description="The new friendly name for the current authenticated user.")
 
 
+class SetAdminNicknameInput(ToolInput):
+    friendly_name: str = Field(min_length=1, max_length=60, description="What the current authenticated user wants to call the admin/owner. Pass 'default' or 'reset' to clear it and go back to the default label.")
+
+
 class SetShabbosModeInput(ToolInput):
     user_query: str = Field(description="The target user: friendly name, username, display name, or user ID.")
     enabled: bool = Field(description="True to put them on the AI-free deterministic command interface; False to restore normal chat.")

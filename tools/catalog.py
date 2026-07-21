@@ -198,6 +198,26 @@ class Toolkit:
             "user_summary": f"Done — you're {friendly_name.strip()} now.",
         }
 
+    async def set_admin_nickname(self, friendly_name: str) -> dict:
+        if not self.user:
+            return self._auth_required()
+        cleaned = friendly_name.strip()
+        if cleaned.lower() in {"", "default", "reset"}:
+            self.store.clear_user_flag(self.user.user_id, "admin_alias")
+            return {
+                "ok": True,
+                "action": "set_admin_nickname",
+                "friendly_name": None,
+                "user_summary": "Done — back to the default name for the admin.",
+            }
+        self.store.set_user_flag(self.user.user_id, "admin_alias", cleaned)
+        return {
+            "ok": True,
+            "action": "set_admin_nickname",
+            "friendly_name": cleaned,
+            "user_summary": f'Done — you\'ll see the owner as "{cleaned}" now.',
+        }
+
 
 def build_toolkit(settings: Settings, store: ConversationStore, user: UserContext | None) -> Toolkit:
     ombi = OmbiClient(settings.ombi_base_url, settings.ombi_api_key)
@@ -475,6 +495,16 @@ CATALOG: list[ToolSpec] = [
         ),
         input_model=schemas.SetMyFriendlyNameInput,
         resolve=lambda tk: tk.set_my_friendly_name,
+    ),
+    ToolSpec(
+        name="set_admin_nickname",
+        description=(
+            "Set what the CURRENT authenticated user calls the ADMIN/OWNER (Ben) in their own chats — e.g. 'call the owner X', "
+            "'I want to call Ben X', 'rename the admin to X'. Only changes what this user sees; it does not rename the user "
+            "themselves (that's set_my_friendly_name) and does not affect what anyone else sees. Pass 'default' or 'reset' to clear it."
+        ),
+        input_model=schemas.SetAdminNicknameInput,
+        resolve=lambda tk: tk.set_admin_nickname,
     ),
     # --- Admin ------------------------------------------------------------
     ToolSpec(

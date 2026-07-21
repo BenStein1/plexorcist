@@ -435,12 +435,17 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
     store = ConversationStore(settings.database_url)
     bridge = build_bridge(settings, store, user, after_call=None)
     prowl = ProwlClient(settings.prowl_api_key)
+    admin_label = settings.admin_display_name or "the admin"
+    if user and not user.is_admin:
+        alias = store.get_user_flag(user.user_id, "admin_alias")
+        if alias:
+            admin_label = alias
     return (
         ConciergeAgent(
             bridge,
             ombi_continue_url=settings.ombi_continue_url,
             llm_client=_build_llm_client(settings, store.record_openai_token_usage),
-            admin_label=settings.admin_display_name or "the admin",
+            admin_label=admin_label,
             prowl=prowl,
             movie_direct_source_enabled=settings.movie_direct_source_enabled,
             max_turns=settings.agent_max_turns,
