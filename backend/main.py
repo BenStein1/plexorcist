@@ -2135,14 +2135,19 @@ async def welcome(
         admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
         if admin_block_text:
             message = f"{message}\n\n{admin_block_text}"
-        payload = {"message": message, "first_time": False, "shabbos": True}
-        if admin_note_ids:
+            state = store.get_or_create(user.user_id)
+            state.messages.append(ChatMessage(role="assistant", content=admin_block_text))
+            store.save(state)
             try:
                 store.mark_admin_messages_read(user.user_id, admin_note_ids)
             except Exception:
                 logger.exception("Failed to mark admin messages read for user %s", user.user_id)
-        return payload
+        return {"message": message, "first_time": False, "shabbos": True}
 
+    # Computed BEFORE any persistence below: get_or_create()/save() write a
+    # conversation row, and has_conversation_history() looks at exactly that
+    # table, so persisting first would make a brand-new user look like a
+    # returning one on this very request.
     first_time = (
         store.get_user_flag(user.user_id, _ONBOARDING_SEEN_FLAG) != "true"
         and not store.has_conversation_history(user.user_id)
@@ -2160,13 +2165,17 @@ async def welcome(
     admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
     if admin_block_text:
         message = f"{message}\n\n{admin_block_text}"
-    payload = {"message": message, "first_time": first_time}
-    if admin_note_ids:
+        # Only persist (and only now, after first_time was already decided)
+        # when there is actually something to deliver -- a no-op /api/welcome
+        # call must not write anything.
+        state = store.get_or_create(user.user_id)
+        state.messages.append(ChatMessage(role="assistant", content=admin_block_text))
+        store.save(state)
         try:
             store.mark_admin_messages_read(user.user_id, admin_note_ids)
         except Exception:
             logger.exception("Failed to mark admin messages read for user %s", user.user_id)
-    return payload
+    return {"message": message, "first_time": first_time}
 
 
 @app.get("/api/dev-user")
@@ -2251,14 +2260,19 @@ async def _shabbos_chat(payload: ChatRequest, user: UserContext, settings: Setti
             "That didn't work, and nothing was changed.\n"
             "No language model was used. Use /help, or contact the admin."
         )
+    admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
+
     state.messages.append(ChatMessage(role="user", content=payload.message))
     state.messages.append(ChatMessage(role="assistant", content=reply))
+    if admin_block_text:
+        # A separate message, not appended to the reply above and saved --
+        # otherwise a page reload or second tab replays only the reply half of
+        # what the user was shown, and the block is never in history for the
+        # model to see on the next turn.
+        state.messages.append(ChatMessage(role="assistant", content=admin_block_text))
+        reply = f"{reply}\n\n{admin_block_text}"
     store.save(state)
     store.prune_user_conversations(user.user_id, keep=2)
-
-    admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
-    if admin_block_text:
-        reply = f"{reply}\n\n{admin_block_text}"
 
     response_state = state.model_copy(deep=True)
     response_state.candidate_media = []
@@ -2351,16 +2365,27 @@ async def chat(
                 store.clear_user_flag(user.user_id, _NILBOG_SEEN_FLAG)
                 state.support_context["nilbog_memory_mode"] = "rune_leak"
                 state.support_context["nilbog_pushback_count"] = pushback_count
-        store.save(state)
-        store.prune_user_conversations(user.user_id, keep=2)
 
         # Deterministic admin-message delivery. Fetched fresh here (not reused
         # from earlier in the turn) so the note_ids we mark read always match
-        # exactly what got appended to this response. If anything above this
-        # point raised, we never reach here and nothing is marked read.
+        # exactly what got appended to this response. Appended as its OWN
+        # message rather than folded into `reply` in place: nilbog_redacted_
+        # message_index above already points at agent.respond()'s trailing
+        # assistant message, and agent.py replaces THAT message's content on
+        # later turns for the NILBOG easter egg. Rewriting it here would let
+        # the easter egg eat Ben's words; a separate message leaves the index
+        # (computed before this append) pointing at the right one.
         admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
         if admin_block_text:
+            state.messages.append(ChatMessage(role="assistant", content=admin_block_text))
             reply = f"{reply}\n\n{admin_block_text}"
+
+        # Saved AFTER the admin-message append above, so the block -- if any
+        # -- is durable before we build the response and mark it read. If
+        # anything above this point raised, we never reach here and nothing
+        # is marked read.
+        store.save(state)
+        store.prune_user_conversations(user.user_id, keep=2)
 
         audit.log(
             "chat_turn",

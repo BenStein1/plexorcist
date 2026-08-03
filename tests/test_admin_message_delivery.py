@@ -1,6 +1,6 @@
 """Admin -> user message delivery is deterministic, not a soft LLM request.
 
-Regression coverage for two prod bugs found against real data:
+Regression coverage for three prod bugs found against real data:
 
 1. /api/welcome never looked at pending admin messages at all -- a user could
    log in repeatedly and never see a message sent to them (they'd have to type
@@ -9,12 +9,18 @@ Regression coverage for two prod bugs found against real data:
    of whether the model's reply actually mentioned them. The "delivery" was
    only a soft prompt request the model could skip (e.g. in favor of a
    tool-call flow) or paraphrase.
+3. The first fix pass appended the block to ChatResponse.reply only. The web
+   UI's chat view never reads .reply -- it renders data.state.messages -- so
+   that fix was a no-op in the actual product even though .reply-only tests
+   were green. The block must land in state.messages (persisted), not just
+   the reply string.
 
-The fix delivers pending messages by deterministic text append in
-backend/main.py, and only marks them read once that text is in the payload
-being returned.
+The fix delivers pending messages by appending them as their own assistant
+message in state.messages, persists that with store.save(), and only marks
+them read once that save has happened.
 """
 
+import json
 import time
 
 import pytest
@@ -27,6 +33,23 @@ from backend.shabbos.flags import set_shabbos_mode
 from backend.state import ConversationStore
 
 USER = UserContext(user_id="u-rmk", username="rmk1900", display_name="RMK", is_admin=False, auth_source="test")
+
+
+def _persisted_assistant_texts(store: ConversationStore, user_id: str) -> list[str]:
+    """Every assistant-role message content across every conversation row this
+    user has, read straight from the DB -- independent of any in-memory
+    ChatResponse -- so it can prove the block is durably saved, not just
+    present in the string a caller happened to return."""
+    texts: list[str] = []
+    with store._connect() as conn:  # noqa: SLF001
+        rows = conn.execute(
+            "SELECT messages_json FROM conversations WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    for (messages_json,) in rows:
+        for msg in json.loads(messages_json):
+            if msg.get("role") == "assistant":
+                texts.append(str(msg.get("content") or ""))
+    return texts
 
 
 class _FakeAgent:
@@ -74,6 +97,13 @@ async def test_chat_delivers_pending_admin_message_verbatim_and_only_then_marks_
     # not a replacement.
     assert "It's already in Plex." in response.reply
 
+    # The web UI's chat view renders data.state.messages, not data.reply --
+    # so the block being in .reply alone is not delivery. It must be a
+    # persisted assistant message too.
+    assert any(message_text in msg.content for msg in response.state.messages if msg.role == "assistant")
+    persisted = _persisted_assistant_texts(store, USER.user_id)
+    assert any(message_text in text for text in persisted)
+
     remaining_unread = store.get_unread_admin_messages(USER.user_id)
     assert remaining_unread == []
 
@@ -92,6 +122,23 @@ async def test_welcome_delivers_pending_admin_message_verbatim_and_marks_it_read
 
     remaining_unread = store.get_unread_admin_messages(USER.user_id)
     assert remaining_unread == []
+
+    # /api/welcome's response is a one-shot greeting string, not the transcript
+    # the UI renders on subsequent turns -- so delivery isn't real until the
+    # block is durably saved. Without persistence, a page refresh or a second
+    # browser tab (both call /api/welcome again) would burn the note the
+    # instant it's marked read, with nothing left anywhere for the user to see.
+    persisted = _persisted_assistant_texts(store, USER.user_id)
+    assert any(message_text in text for text in persisted)
+
+    # A second /api/welcome call (refresh, second tab) must not re-deliver --
+    # the note is already read -- but the text must still be sitting in the
+    # persisted transcript from the first call.
+    second_result = await main.welcome(user=USER, settings=settings)
+    assert "Message from" not in second_result["message"]
+    assert message_text not in second_result["message"]
+    persisted_after_second = _persisted_assistant_texts(store, USER.user_id)
+    assert any(message_text in text for text in persisted_after_second)
 
 
 @pytest.mark.asyncio
@@ -168,6 +215,14 @@ async def test_shabbos_chat_delivers_pending_admin_message_verbatim_and_marks_it
     assert isinstance(response, ChatResponse)
     assert message_text in response.reply
     assert "Message from Ben" in response.reply
+
+    # Same trap as /api/chat: the UI's chat view renders data.state.messages,
+    # not data.reply. Shabbos Mode has its own append path (_shabbos_chat),
+    # so it needs its own proof the block landed in persisted history too.
+    assert any(message_text in msg.content for msg in response.state.messages if msg.role == "assistant")
+    persisted = _persisted_assistant_texts(store, USER.user_id)
+    assert any(message_text in text for text in persisted)
+
     assert store.get_unread_admin_messages(USER.user_id) == []
 
 
