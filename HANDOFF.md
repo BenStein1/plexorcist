@@ -209,3 +209,45 @@ AUTO-RESUME ARMED: overlord-resume-autoresume-dd06be3a.timer (fires ~5 min after
 continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-dd06be3a.timer
 If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## Session checkpoint (auto: session (5-hour) usage at 98.0%) — 2026-08-03 14:18 MST
+The session (5-hour) usage cap is at 98.0% and resets in ~3h 21m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+DEPLOYED AND RESTARTED 2026-08-03 14:19 MST, at Ben's explicit "deploy and
+restart it please". The admin->user messaging fix is now LIVE in prod. Nothing
+is in flight. See the checkpoint directly above for the full technical story
+(4 commits c562b69 / 26ced07 / e1cdb6f / 3e97693, the invariant, and the
+UI-renders-state.messages-not-reply trap that made round 1 a green-tested
+no-op). Do not re-derive any of it.
+
+What was done this turn:
+- ./deploy.local.sh rsynced the repo to
+  /mnt/NALA/.../apps_webroot/apps/plexorcist (backend/main.py, backend/state.py,
+  backend/agent.py, tests). Local rsync over the NFS mount; no ssh needed.
+- net_ssh to root@10.0.0.12 (NALA), jexec 5 (jail sandbox_1),
+  `supervisorctl restart plexorcist`: pid 94541 (11d uptime) -> 94915. Session
+  CLOSED afterwards. NOTE: that ssh clearance was ONE TIME for that request and
+  does NOT carry forward — ask Ben again before any future connection.
+- Verified live, not assumed: new code present on the prod host (3 hits for
+  _persist_admin_block_at_welcome in backend/main.py, 2 for json_each in
+  backend/state.py), gunicorn workers 94920/94921 up and stable on 0.0.0.0:5500,
+  app answering HTTP (unauthenticated request returns the inert 404, which is
+  the auth gate behaving correctly), supervisor RUNNING, no crash loop.
+
+NEXT STEP: nothing to build or deploy. Prod notes 484 (Jeff) and 517 (rmk1900)
+are still unread by design and will now be delivered on those users' next login.
+If Ben wants confirmation it worked, the check is whether those two notes flip
+to read with a real delivery behind them — but do NOT write to the prod DB; that
+earlier authorization covered one specific write and is spent.
+
+STILL OPEN, UNANSWERED, DO NOT ACT ALONE: overlord-bridge.service has been
+inactive AND disabled since 2026-07-30 19:29 with 14 stale AutoResume dispatch
+files queued (4 Overlord_v2 Jul 30, 10 migraine-log-agent Jul 31). Restarting it
+fires all 14 at once. Ben has not said whether the stop was a deliberate kill
+switch or an unnoticed failure. Ask before touching it. (His "restart it" this
+turn meant plexorcist — it was bound to "deploy" — not the bridge.)
+
+AUTO-RESUME ARMED: overlord-resume-autoresume-7bf3bbbf.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-7bf3bbbf.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
