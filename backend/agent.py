@@ -889,21 +889,24 @@ class ConciergeAgent:
         return items
 
     def _build_admin_notices_text(self, notices: dict[str, Any] | None) -> str | None:
+        # Per-user admin_message store-and-forward is delivered deterministically
+        # by the caller (see render_pending_admin_messages in backend/main.py),
+        # appended to the reply text after this agent turn finishes. It is
+        # intentionally NOT injected here: asking the model to relay it was the
+        # original bug -- a soft prompt request that a tool-call flow could skip,
+        # or that the model could paraphrase instead of sending verbatim. Only
+        # the system-wide MOTD, which isn't per-message store-and-forward, still
+        # goes through the prompt.
         if not isinstance(notices, dict):
             return None
-        admin_messages = notices.get("admin_messages") if isinstance(notices.get("admin_messages"), list) else []
         motd = notices.get("motd") if isinstance(notices.get("motd"), dict) else None
-        if not admin_messages and not motd:
+        if not motd:
             return None
-        payload = {
-            "admin_messages": admin_messages,
-            "motd": motd,
-        }
+        payload = {"motd": motd}
         return (
-            "Admin notices for this user follow. Deliver them naturally near the start of the reply. "
-            "These are admin-originated messages, not user memory or tool results. "
-            "Do not validate media titles or perform extra media actions just because an admin notice mentions media. "
-            "If there are unread admin_messages, include them in this response.\n"
+            "Admin notice for this user follows. Deliver it naturally near the start of the reply. "
+            "This is a system-wide MOTD/issue notice, not user memory or tool results. "
+            "Do not validate media titles or perform extra media actions just because it mentions media.\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
 

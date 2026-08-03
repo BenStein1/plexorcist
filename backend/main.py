@@ -200,6 +200,36 @@ def _build_llm_client(settings: Settings, usage_recorder: UsageRecorder | None) 
     )
 
 
+def render_pending_admin_messages(store: ConversationStore, user_id: str) -> tuple[str, list[int]]:
+    """Deterministically render a user's unread admin messages, verbatim.
+
+    This is the ONLY delivery mechanism for admin -> user messages. It does not
+    ask a model to relay anything, so it cannot be skipped by a tool-call flow
+    and it cannot paraphrase Ben's wording. Returns ("", []) when there is
+    nothing pending -- no stray block, no note ids to mark read.
+
+    Callers MUST append the returned text to the response payload before
+    calling `store.mark_admin_messages_read(user_id, note_ids)`, and only with
+    the note_ids this call returned. That ordering is what guarantees a
+    message is never marked read unless its text actually went out on this
+    request -- if anything raises before the append, nothing gets burned.
+    """
+    unread = store.get_unread_admin_messages(user_id, limit=50)
+    entries: list[str] = []
+    note_ids: list[int] = []
+    for item in unread:
+        note_id = item.get("id")
+        content = str(item.get("content") or "").strip()
+        if note_id is None or not content:
+            continue
+        from_admin_name = str((item.get("metadata") or {}).get("from_admin_name") or "Ben")
+        entries.append(f"Message from {from_admin_name}:\n{content}")
+        note_ids.append(int(note_id))
+    if not entries:
+        return "", []
+    return "---\n" + "\n\n".join(entries), note_ids
+
+
 def _load_admin_motd(store: ConversationStore) -> dict[str, object] | None:
     raw = store.get_user_flag("__global__", "admin_motd")
     if not raw:
@@ -2097,9 +2127,21 @@ async def welcome(
     store = ConversationStore(settings.database_url)
 
     # The Shabbos greeting is the banner: stated once, not repeated after every
-    # command. No "media goblin", no tour -- both are LLM affordances.
+    # command. No "media goblin", no tour -- both are LLM affordances. Pending
+    # admin messages are still delivered here, deterministically -- that needs
+    # no LLM either.
     if is_shabbos_user(store, user.user_id):
-        return {"message": SHABBOS_BANNER, "first_time": False, "shabbos": True}
+        message = SHABBOS_BANNER
+        admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
+        if admin_block_text:
+            message = f"{message}\n\n{admin_block_text}"
+        payload = {"message": message, "first_time": False, "shabbos": True}
+        if admin_note_ids:
+            try:
+                store.mark_admin_messages_read(user.user_id, admin_note_ids)
+            except Exception:
+                logger.exception("Failed to mark admin messages read for user %s", user.user_id)
+        return payload
 
     first_time = (
         store.get_user_flag(user.user_id, _ONBOARDING_SEEN_FLAG) != "true"
@@ -2115,7 +2157,16 @@ async def welcome(
             f"Hey {greeting_name}. I’m warmed up. Ask me for a movie, show, episode, "
             "recommendation, or help with something missing."
         )
-    return {"message": message, "first_time": first_time}
+    admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
+    if admin_block_text:
+        message = f"{message}\n\n{admin_block_text}"
+    payload = {"message": message, "first_time": first_time}
+    if admin_note_ids:
+        try:
+            store.mark_admin_messages_read(user.user_id, admin_note_ids)
+        except Exception:
+            logger.exception("Failed to mark admin messages read for user %s", user.user_id)
+    return payload
 
 
 @app.get("/api/dev-user")
@@ -2184,9 +2235,11 @@ async def set_dev_user(
 async def _shabbos_chat(payload: ChatRequest, user: UserContext, settings: Settings) -> ChatResponse:
     """The deterministic turn. No agent, no prompt, no model client -- ever.
 
-    Note what is NOT here: long-term memory injection, admin-notice prompt
+    Note what is NOT here: long-term memory injection, admin-notice PROMPT
     assembly, the welcome tour, the NILBOG easter egg. All of those exist only to
-    build a prompt, and there is no prompt on this path.
+    build a prompt, and there is no prompt on this path. Pending admin messages
+    ARE still delivered here: that's a deterministic text append, not a prompt,
+    so there's no reason to skip it on an LLM-free path.
     """
     router, store, audit = build_shabbos_router(settings, user)
     state = store.get_or_create(user.user_id, payload.conversation_id)
@@ -2203,18 +2256,28 @@ async def _shabbos_chat(payload: ChatRequest, user: UserContext, settings: Setti
     store.save(state)
     store.prune_user_conversations(user.user_id, keep=2)
 
+    admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
+    if admin_block_text:
+        reply = f"{reply}\n\n{admin_block_text}"
+
     response_state = state.model_copy(deep=True)
     response_state.candidate_media = []
     response_state.support_context = {}
     response_state.last_tool_actions = []
     response_state.escalation_history = []
-    return ChatResponse(
+    chat_response = ChatResponse(
         conversation_id=state.conversation_id,
         reply=reply,
         continue_to_ombi_url=settings.ombi_continue_url,
         state=response_state,
         tool_calls=[],
     )
+    if admin_note_ids:
+        try:
+            store.mark_admin_messages_read(user.user_id, admin_note_ids)
+        except Exception:
+            logger.exception("Failed to mark admin messages read for user %s", user.user_id)
+    return chat_response
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -2236,22 +2299,14 @@ async def chat(
             user.user_id,
             recent_notes_limit=settings.memory_recent_notes_limit,
         )
-        unread_admin_messages = store.get_unread_admin_messages(user.user_id)
-        admin_message_ids = [int(item["id"]) for item in unread_admin_messages if item.get("id") is not None]
-        admin_notices = {
-            "admin_messages": [
-                {
-                    "id": item.get("id"),
-                    "message": item.get("content"),
-                    "from_admin_name": (item.get("metadata") or {}).get("from_admin_name") or "Ben",
-                    "created_at": item.get("created_at"),
-                }
-                for item in unread_admin_messages
-            ],
-            "motd": _load_admin_motd(store),
-        }
-        if admin_notices["admin_messages"] or admin_notices["motd"]:
-            state.support_context["admin_notices"] = admin_notices
+        # Admin -> user messages are delivered deterministically after the agent
+        # responds (see render_pending_admin_messages below), never via the
+        # prompt -- a model asked to relay text can skip it in favor of a
+        # tool-call flow, or paraphrase it. Only the system-wide MOTD still
+        # goes through the prompt; it isn't per-message store-and-forward.
+        motd = _load_admin_motd(store)
+        if motd:
+            state.support_context["admin_notices"] = {"motd": motd}
         else:
             state.support_context.pop("admin_notices", None)
         extra_instructions: str | None = None
@@ -2297,12 +2352,16 @@ async def chat(
                 state.support_context["nilbog_memory_mode"] = "rune_leak"
                 state.support_context["nilbog_pushback_count"] = pushback_count
         store.save(state)
-        if admin_message_ids:
-            try:
-                store.mark_admin_messages_read(user.user_id, admin_message_ids)
-            except Exception:
-                logger.exception("Failed to mark admin messages read for user %s", user.user_id)
         store.prune_user_conversations(user.user_id, keep=2)
+
+        # Deterministic admin-message delivery. Fetched fresh here (not reused
+        # from earlier in the turn) so the note_ids we mark read always match
+        # exactly what got appended to this response. If anything above this
+        # point raised, we never reach here and nothing is marked read.
+        admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
+        if admin_block_text:
+            reply = f"{reply}\n\n{admin_block_text}"
+
         audit.log(
             "chat_turn",
             {
@@ -2319,13 +2378,22 @@ async def chat(
         response_state.support_context = {}
         response_state.last_tool_actions = []
         response_state.escalation_history = []
-        return ChatResponse(
+        chat_response = ChatResponse(
             conversation_id=state.conversation_id,
             reply=reply,
             continue_to_ombi_url=settings.ombi_continue_url,
             state=response_state,
             tool_calls=tool_calls,
         )
+        # Mark read LAST, only for the note_ids whose text is now in the
+        # payload above. A failure here just means we retry delivery next
+        # turn -- it never loses a message.
+        if admin_note_ids:
+            try:
+                store.mark_admin_messages_read(user.user_id, admin_note_ids)
+            except Exception:
+                logger.exception("Failed to mark admin messages read for user %s", user.user_id)
+        return chat_response
     except Exception as exc:
         audit.log(
             "chat_error",
