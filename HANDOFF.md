@@ -142,3 +142,70 @@ PROWL_API_KEY= OPENAI_API_KEY=sk-GARBAGE-ON-PURPOSE \
 `PROWL_API_KEY=` empty and the garbage OpenAI key are deliberate: no phantom
 pushes, and any model call would 401 loudly. If the scratchpad is gone, recreate
 the stub from this recipe rather than pointing at real Ombi.
+
+## Session checkpoint (auto: session (5-hour) usage at 94.0%) — 2026-08-03 13:43 MST
+The session (5-hour) usage cap is at 94.0% and resets in ~3h 56m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+ADMIN -> USER MESSAGING: FIXED, DONE, VERIFIED. Committed locally, NOT pushed,
+NOT deployed. Nothing is in flight — the only remaining action is Ben's deploy.
+
+Origin: Ben sent an admin message to rmk1900 who never saw it. Two prod bugs
+(diagnosed against the live DB/log, see memory plexorcist-admin-message-delivery):
+delivery only ever fired on a chat turn, and mark-read was unconditional while
+"delivery" was just a soft prompt asking the model to relay. Four commits on
+top of e0a1189:
+
+- c562b69  deterministic verbatim delivery in code; killed the LLM soft-prompt
+           relay in agent.py:_build_admin_notices_text and the unconditional
+           mark-read. Worker Johnny (sonnet).
+- 26ced07  two more tests. Johnny.
+- e1cdb6f  fixes round 1's blind spot. Johnny.
+- 3e97693  the two residual side effects of e1cdb6f. Me (opus), at Ben's
+           "just fix it with your big brain".
+
+THE DURABLE LESSON (round 1 was green-tested and still broken): the web UI is an
+inline JS string inside backend/main.py. /api/welcome (~1802) renders
+`data.message`, but /api/chat (~1919-1923) renders `data.state.messages` and
+NEVER reads `data.reply`. Round 1 appended the block to `reply` after
+store.save(state), so both chat paths showed the user nothing while still
+marking the note read — the original burn one layer down — and all 7 tests were
+green because every assertion was on response.reply. Before believing any
+delivery fix here, check which field the CLIENT actually renders.
+
+THE INVARIANT everything now holds to: a note is only marked read once its text
+is inside a SAVED state.messages. The block is appended as its own ChatMessage,
+never written into the agent's trailing message — NILBOG's
+nilbog_redacted_message_index (main.py:2360 + agent.py:883) would swap that
+content out on later turns.
+
+What 3e97693 changed: /api/welcome now attaches the block to the user's newest
+conversation via _persist_admin_block_at_welcome() instead of creating a
+standalone one (prune_user_conversations(keep=2) deleted the standalone first,
+since it was never written to again); and has_conversation_history() now
+requires a USER-role turn, so an admin message pushed at a brand-new user can't
+cost them the "Show me around" tour.
+
+VERIFICATION: full suite 141 passed. Both new tests proven to bite — stashed
+backend/main.py + backend/state.py back to e1cdb6f with the tests in place and
+both failed. Earlier, at 26ced07, reverting main.py+agent.py to e0a1189 gave 5
+of 7 failed. Tree clean at 3e97693.
+
+NEXT STEP — Ben's, not an agent's: deploy manually (deploy.local.sh +
+supervisorctl restart plexorcist as root, via NALA jexec 5 — memory
+plexorcist-deploy). Prod notes 484 (Jeff) and 517 (rmk1900) are deliberately
+still unread and deliver on their next login after that. The other 6 were
+dismissed at Ben's instruction and marked read with dismissed_by_admin metadata;
+prod DB backed up first at prod-backup-20260803-130824.db (gitignored),
+integrity_check ok. Do NOT touch the prod DB again — that authorization was for
+that one write only.
+
+UNRELATED, STILL OPEN, DO NOT ACT ALONE: overlord-bridge.service has been
+inactive AND disabled since 2026-07-30 19:29 with 14 stale AutoResume dispatch
+files queued (4 Overlord_v2 Jul 30, 10 migraine-log-agent Jul 31). Restarting it
+fires all 14 at once. Ben has not answered whether the stop was a deliberate
+kill switch or an unnoticed failure, or whether to clear the queue. Ask first.
+
+AUTO-RESUME ARMED: overlord-resume-autoresume-dd06be3a.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-dd06be3a.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
