@@ -23,6 +23,7 @@ import backend.main as main
 from backend.config import Settings
 from backend.logging import AuditLogger
 from backend.models import ChatRequest, ChatResponse, UserContext
+from backend.shabbos.flags import set_shabbos_mode
 from backend.state import ConversationStore
 
 USER = UserContext(user_id="u-rmk", username="rmk1900", display_name="RMK", is_admin=False, auth_source="test")
@@ -94,27 +95,43 @@ async def test_welcome_delivers_pending_admin_message_verbatim_and_marks_it_read
 
 
 @pytest.mark.asyncio
-async def test_welcome_with_no_pending_messages_has_no_stray_block(tmp_path):
+async def test_welcome_with_no_pending_messages_has_no_stray_block(tmp_path, monkeypatch):
     settings = _settings(tmp_path, "welcome_empty")
     store = ConversationStore(settings.database_url)
+    mark_read_calls = []
+    # welcome() builds its own ConversationStore internally, so the patch has
+    # to be on the class, not on this test's instance.
+    monkeypatch.setattr(
+        ConversationStore,
+        "mark_admin_messages_read",
+        lambda self, uid, ids: mark_read_calls.append((uid, ids)),
+    )
 
     result = await main.welcome(user=USER, settings=settings)
 
     assert "Message from" not in result["message"]
     assert "---" not in result["message"]
     assert store.get_unread_admin_messages(USER.user_id) == []
+    # No pending messages means no delivery, which means no write at all --
+    # not just an empty read-list, which would be true either way.
+    assert mark_read_calls == []
 
 
 @pytest.mark.asyncio
 async def test_chat_with_no_pending_messages_has_no_stray_block(tmp_path, monkeypatch):
     settings = _settings(tmp_path, "chat_empty")
     store = ConversationStore(settings.database_url)
+    mark_read_calls = []
+    monkeypatch.setattr(
+        store, "mark_admin_messages_read", lambda uid, ids: mark_read_calls.append((uid, ids))
+    )
     monkeypatch.setattr(main, "build_agent", lambda s, u: (_FakeAgent(), store, AuditLogger()))
 
     response = await main.chat(ChatRequest(message="anything new?"), user=USER, settings=settings)
 
     assert "Message from" not in response.reply
     assert "---" not in response.reply
+    assert mark_read_calls == []
 
 
 def test_multiple_pending_messages_render_oldest_first_and_verbatim(tmp_path):
@@ -132,6 +149,25 @@ def test_multiple_pending_messages_render_oldest_first_and_verbatim(tmp_path):
     assert len(note_ids) == 2
 
     store.mark_admin_messages_read(USER.user_id, note_ids)
+    assert store.get_unread_admin_messages(USER.user_id) == []
+
+
+@pytest.mark.asyncio
+async def test_shabbos_chat_delivers_pending_admin_message_verbatim_and_marks_it_read(tmp_path):
+    """The one wired path (_shabbos_chat) with no other coverage: a Shabbos-mode
+    user is fully LLM-free, but pending admin messages must still be delivered
+    deterministically -- that's a text append, not a prompt."""
+    settings = _settings(tmp_path, "shabbos_deliver")
+    store = ConversationStore(settings.database_url)
+    set_shabbos_mode(store, USER.user_id, True)
+    message_text = "shul starts at 9, don't be late"
+    _seed_admin_message(store, USER.user_id, message_text)
+
+    response = await main.chat(ChatRequest(message="hey what's up"), user=USER, settings=settings)
+
+    assert isinstance(response, ChatResponse)
+    assert message_text in response.reply
+    assert "Message from Ben" in response.reply
     assert store.get_unread_admin_messages(USER.user_id) == []
 
 
