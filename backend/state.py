@@ -181,14 +181,34 @@ class ConversationStore:
         )
 
     def has_conversation_history(self, user_id: str) -> bool:
-        """True if this user has ever exchanged a message -- any conversation with
-        a non-empty transcript. Freshly-created empty conversations don't count."""
+        """True if this user has ever SAID anything -- any conversation holding a
+        user-role turn. Freshly-created empty conversations don't count, and
+        neither does a transcript that only holds an admin message we pushed at
+        them: being sent something is not the same as having been here before,
+        and this gate decides whether they still get the first-time tour."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM conversations WHERE user_id = ? AND messages_json != '[]' LIMIT 1",
+                """
+                SELECT 1
+                FROM conversations, json_each(conversations.messages_json)
+                WHERE conversations.user_id = ?
+                  AND json_extract(json_each.value, '$.role') = 'user'
+                LIMIT 1
+                """,
                 (user_id,),
             ).fetchone()
         return row is not None
+
+    def get_latest_conversation(self, user_id: str) -> ConversationState | None:
+        """The user's most-recently-updated conversation, or None if they have none."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT conversation_id FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+        if row is None or not row[0]:
+            return None
+        return self.get(str(row[0]))
 
     def list_stale_conversations(
         self,

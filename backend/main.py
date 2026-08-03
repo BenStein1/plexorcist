@@ -230,6 +230,21 @@ def render_pending_admin_messages(store: ConversationStore, user_id: str) -> tup
     return "---\n" + "\n\n".join(entries), note_ids
 
 
+def _persist_admin_block_at_welcome(store: ConversationStore, user_id: str, block_text: str) -> None:
+    """Attach an admin block delivered at login to the user's newest conversation.
+
+    Deliberately NOT a fresh standalone conversation: prune_user_conversations()
+    keeps only the two most-recently-updated rows per user, and a conversation
+    created here is never written to again, so the durable record of Ben's
+    message would be among the first things pruned. Riding along with the
+    newest live conversation -- and bumping its updated_at by saving -- keeps
+    it where the user will actually find it later.
+    """
+    state = store.get_latest_conversation(user_id) or store.get_or_create(user_id)
+    state.messages.append(ChatMessage(role="assistant", content=block_text))
+    store.save(state)
+
+
 def _load_admin_motd(store: ConversationStore) -> dict[str, object] | None:
     raw = store.get_user_flag("__global__", "admin_motd")
     if not raw:
@@ -2135,19 +2150,17 @@ async def welcome(
         admin_block_text, admin_note_ids = render_pending_admin_messages(store, user.user_id)
         if admin_block_text:
             message = f"{message}\n\n{admin_block_text}"
-            state = store.get_or_create(user.user_id)
-            state.messages.append(ChatMessage(role="assistant", content=admin_block_text))
-            store.save(state)
+            _persist_admin_block_at_welcome(store, user.user_id, admin_block_text)
             try:
                 store.mark_admin_messages_read(user.user_id, admin_note_ids)
             except Exception:
                 logger.exception("Failed to mark admin messages read for user %s", user.user_id)
         return {"message": message, "first_time": False, "shabbos": True}
 
-    # Computed BEFORE any persistence below: get_or_create()/save() write a
-    # conversation row, and has_conversation_history() looks at exactly that
-    # table, so persisting first would make a brand-new user look like a
-    # returning one on this very request.
+    # Computed BEFORE any persistence below, belt-and-braces. The real guard is
+    # in has_conversation_history(), which only counts conversations holding a
+    # USER turn -- so an admin block we push at someone can never cost them the
+    # first-time tour, on this request or any later one.
     first_time = (
         store.get_user_flag(user.user_id, _ONBOARDING_SEEN_FLAG) != "true"
         and not store.has_conversation_history(user.user_id)
@@ -2168,9 +2181,7 @@ async def welcome(
         # Only persist (and only now, after first_time was already decided)
         # when there is actually something to deliver -- a no-op /api/welcome
         # call must not write anything.
-        state = store.get_or_create(user.user_id)
-        state.messages.append(ChatMessage(role="assistant", content=admin_block_text))
-        store.save(state)
+        _persist_admin_block_at_welcome(store, user.user_id, admin_block_text)
         try:
             store.mark_admin_messages_read(user.user_id, admin_note_ids)
         except Exception:

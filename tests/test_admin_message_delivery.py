@@ -223,6 +223,57 @@ async def test_shabbos_chat_delivers_pending_admin_message_verbatim_and_marks_it
     persisted = _persisted_assistant_texts(store, USER.user_id)
     assert any(message_text in text for text in persisted)
 
+
+def _conversation_ids(store: ConversationStore, user_id: str) -> list[str]:
+    with store._connect() as conn:  # noqa: SLF001
+        rows = conn.execute(
+            "SELECT conversation_id FROM conversations WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_admin_message_at_welcome_does_not_cost_a_new_user_the_first_time_tour(tmp_path):
+    """Persisting the block writes a conversation row. That must not make a
+    brand-new user look like a returning one -- being sent a message is not the
+    same as having been here before, and first_time gates the "Show me around"
+    tour they haven't taken yet."""
+    settings = _settings(tmp_path, "welcome_first_time")
+    store = ConversationStore(settings.database_url)
+    _seed_admin_message(store, USER.user_id, "welcome aboard, holler if something's missing")
+
+    first = await main.welcome(user=USER, settings=settings)
+    assert first["first_time"] is True
+
+    # Second login, after the block was persisted: still owed the tour.
+    second = await main.welcome(user=USER, settings=settings)
+    assert second["first_time"] is True
+    assert "Show me around" in second["message"]
+
+
+@pytest.mark.asyncio
+async def test_welcome_attaches_admin_block_to_existing_conversation(tmp_path, monkeypatch):
+    """A standalone conversation created just to hold the block is never written
+    to again, so prune_user_conversations(keep=2) deletes it first. Attach to
+    the user's newest conversation instead, so the record ages with their real
+    history rather than ahead of it."""
+    settings = _settings(tmp_path, "welcome_attach")
+    store = ConversationStore(settings.database_url)
+    monkeypatch.setattr(main, "build_agent", lambda s, u: (_FakeAgent(), store, AuditLogger()))
+
+    await main.chat(ChatRequest(message="got that new season?"), user=USER, settings=settings)
+    existing = _conversation_ids(store, USER.user_id)
+    assert len(existing) == 1
+
+    message_text = "it's in there now, go watch it"
+    _seed_admin_message(store, USER.user_id, message_text)
+    await main.welcome(user=USER, settings=settings)
+
+    assert _conversation_ids(store, USER.user_id) == existing
+    state = store.get(existing[0])
+    assert state is not None
+    assert any(message_text in msg.content for msg in state.messages if msg.role == "assistant")
+
     assert store.get_unread_admin_messages(USER.user_id) == []
 
 
