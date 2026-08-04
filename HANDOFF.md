@@ -640,3 +640,46 @@ real Ombi responses — including the verbatim production payload above assertin
 service-free prose, alert shape, alert content/keys, "notified" meaning notified,
 and the Shabbos path end to end. There were previously zero tests over this path.
 Full suite: 187 pass.
+
+## Session checkpoint (auto: weekly (7-day) usage at 88.0%) — 2026-08-04 10:03 MST
+The weekly (7-day) usage cap is at 88.0% and resets in ~23h 56m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+
+**In flight: nothing. The work is finished and committed.** Branch
+`ombi-false-failure-fix`, commits `75087af` (landed request no longer reported as a
+failure) and `c747c11` (Fault 6 above: no backend names in user prose, request
+failures page Ben, Shabbos alerts too, self-fix prompt rules). Clean tree apart
+from this file. **Not pushed. Not deployed. Not merged to `main`.** 187 tests pass
+via `.venv/bin/python -m pytest -q` (system python has no pytest).
+
+Just decided, from Ben's own words — "the user doesnt KNOW about ombi… If it
+fails. I need to be notified that there was a real issue":
+
+- End-user prose never names a backend service or sends the user to one. The
+  "report the exact `service`/`http_status`" prompt rule is now admin-only.
+- A request that does not land now alerts Ben (Prowl), in the LLM path and in
+  Shabbos Mode. `admin_alert_sent` is only stamped when the notice really sent.
+- The model is told to self-resolve a bad/missing show id (search, retry once)
+  instead of reporting a failure or asking the user for an id.
+
+**Concrete next steps, in order:**
+
+1. **Deploy is Ben's call and needs him.** `./deploy.local.sh` rsyncs the working
+   tree to `/mnt/NALA/…/apps/plexorcist` — but `/mnt/NALA` was **not mounted** as
+   of this session, and the restart needs root on NALA (`jexec 5`,
+   `supervisorctl restart plexorcist`; 10.0.0.93 has no direct sshd). Ask before
+   any SSH — clearance is never standing.
+2. **One unanswered question, same trip:** `curl /api/v2/Search/tv/53243` on the
+   box settles whether the unprefixed route is TVDB-keyed or a second TMDB alias.
+   If it is an alias it will answer with "Cinta 7 Susun" *unflagged*, and that
+   hole is still open (see Fault 3).
+3. **Deliberately left alone — tell Ben rather than silently fixing:** other Ombi
+   mentions outside the request path (`render.py`'s search output "In Ombi
+   (requestable)" / "Nothing found in Ombi for X", the request-status renderers)
+   and `_plain_tv_repair_reply()` naming SickChill to non-admin users. Same class
+   of leak as Fault 6, but not what he reacted to.
+
+AUTO-RESUME ARMED: overlord-resume-autoresume-6b26f9ed.timer (fires ~5 min after the weekly (7-day) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-6b26f9ed.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
