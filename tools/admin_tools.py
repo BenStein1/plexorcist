@@ -764,6 +764,21 @@ class AdminTools:
         label = str(item.get("label") or item.get("user_id") or item.get("username") or "unknown")
         return label if item.get("has_account") else f"{label} [no account yet]"
 
+    @staticmethod
+    def _pick_or_dead_end(shown: list[dict[str, Any]], require_account: bool) -> str:
+        """Closing sentence for a candidate list: a real question, or the truth.
+
+        Ben's "Mike Young" landed on two people who only exist in the
+        friendly-names ledger. Ending that with "Which one?" invites him to pick
+        a recipient that refuses him on the very next turn, and he has to ask
+        twice to learn the actual state. When nobody in the list can receive
+        anything, say so instead of asking a question with no good answer.
+        """
+        if not require_account or any(item.get("has_account") for item in shown):
+            return "Which one?"
+        subject = {1: "They have", 2: "Neither has"}.get(len(shown), "None of them have")
+        return f"{subject} ever logged into Plexorcist, so there's no account to send this to."
+
     def _resolve_user_query(self, user_query: str, *, require_account: bool = True) -> dict[str, Any]:
         """Resolve a loose human reference to one person.
 
@@ -812,14 +827,16 @@ class AdminTools:
         if not matches:
             suggestions = list({self._match_key(item): item for item in any_token}.values())
             if suggestions:
+                shown = suggestions[:5]
+                lead = f"No match for {user_query}. Closest I have: " + ", ".join(
+                    self._candidate_summary(item) for item in shown
+                )
                 return {
                     "ok": False,
                     "reason": "user_not_found",
                     "user_query": user_query,
                     "candidates": suggestions[:10],
-                    "user_summary": f"No match for {user_query}. Closest I have: "
-                    + ", ".join(self._candidate_summary(item) for item in suggestions[:5])
-                    + ". Which one?",
+                    "user_summary": f"{lead}. {self._pick_or_dead_end(shown, require_account)}",
                 }
             return {
                 "ok": False,
@@ -837,13 +854,16 @@ class AdminTools:
             if with_account:
                 matches = with_account
         if len(matches) > 1:
+            shown = matches[:5]
+            lead = "That user match is ambiguous: " + ", ".join(
+                self._candidate_summary(item) for item in shown
+            )
             return {
                 "ok": False,
                 "reason": "user_ambiguous",
                 "user_query": user_query,
                 "candidates": matches[:10],
-                "user_summary": "That user match is ambiguous. Pick one: "
-                + ", ".join(self._candidate_summary(item) for item in matches[:5]),
+                "user_summary": f"{lead}. {self._pick_or_dead_end(shown, require_account)}",
             }
         match = matches[0]
         if require_account and not match.get("has_account"):

@@ -87,6 +87,38 @@ async def test_multi_word_query_offers_the_closest_names_instead_of_no_such_user
     # Ledger-only people are flagged as such in what Ben reads, so "pick one"
     # isn't offering him two recipients that will both refuse him next turn.
     assert result["user_summary"].count("[no account yet]") == 2
+    # Neither can receive anything, so don't ask him to pick one -- he'd have to
+    # ask twice to find out the real state. Say it on the first answer.
+    assert "Neither has ever logged into Plexorcist" in result["user_summary"]
+    assert "Which one?" not in result["user_summary"]
+
+
+@pytest.mark.asyncio
+async def test_a_real_account_among_the_near_matches_still_gets_a_pick_one(tmp_path):
+    """The dead-end wording is only honest when it's actually a dead end."""
+    store = _store(tmp_path)
+    _seed_login(tmp_path, user_id="u-1", username="youngberg", display_name="Youngberg Reed")
+    tools = _tools(tmp_path, store)
+
+    result = tools._resolve_user_query("Mikeston Youngberg")  # noqa: SLF001
+
+    assert result["ok"] is False
+    assert "Which one?" in result["user_summary"]
+    assert "never logged into Plexorcist" not in result["user_summary"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_ledger_only_match_says_so_instead_of_pick_one(tmp_path):
+    """Same rule on the ambiguity path: two solid matches that can both only be
+    refused is not a choice, it's an answer."""
+    store = _store(tmp_path)
+    tools = _tools(tmp_path, store, names={"qq_a": "Mikeston Reed", "qq_b": "Mikeston Vance"})
+
+    result = tools._resolve_user_query("Mikeston")  # noqa: SLF001
+
+    assert result["reason"] == "user_ambiguous"
+    assert "Neither has ever logged into Plexorcist" in result["user_summary"]
+    assert "Pick one" not in result["user_summary"]
 
 
 @pytest.mark.asyncio
