@@ -53,6 +53,22 @@ class FriendlyNameDirectory:
 
         return display_name.strip() if display_name and display_name.strip() else normalized_username
 
+    def all_names(self) -> dict[str, str]:
+        """Every username -> friendly name in the ledger, minus EXCLUDED_USERS.
+
+        This is Ben's own address book and it is much larger than the set of
+        people who have actually signed in (in prod: 63 vs 15). Admin lookups
+        need to see all of it, otherwise most of the people he'd ask about come
+        back as "no such user".
+        """
+        mapping = self._load_mapping()
+        excluded = {item.lower() for item in (self._excluded or set())}
+        return {
+            username: name
+            for username, name in mapping.items()
+            if username and username.lower() not in excluded
+        }
+
     def set_friendly_name(self, username: str, friendly_name: str) -> None:
         """Persist a new friendly-name mapping for `username`, preserving every
         other entry and the EXCLUDED_USERS list. Refreshes the in-memory cache

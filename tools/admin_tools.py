@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 import httpx
@@ -323,7 +324,10 @@ class AdminTools:
                 "reason": "friendly_names_unavailable",
                 "user_summary": "Friendly-name storage is not configured.",
             }
-        resolved = self._resolve_user_query(user_query)
+        # Friendly names are keyed by username, not user_id, so renaming someone
+        # who has never logged in is perfectly serviceable -- and is exactly how
+        # a ledger-only entry gets a better name in the first place.
+        resolved = self._resolve_user_query(user_query, require_account=False)
         if not resolved.get("ok"):
             return {**resolved, "action": "set_user_friendly_name"}
         username = str(resolved["user"].get("username") or "").strip()
@@ -607,8 +611,8 @@ class AdminTools:
         columns = ["note_id", "user_id", "note_type", "content", "task_id", "status", "tier", "metadata_json", "created_at", "updated_at"]
         return [dict(zip(columns, row)) for row in rows]
 
-    def _load_user_labels(self) -> dict[str, dict[str, str]]:
-        labels: dict[str, dict[str, str]] = {}
+    def _load_user_labels(self) -> dict[str, dict[str, Any]]:
+        labels: dict[str, dict[str, Any]] = {}
         with self.store._connect() as conn:  # type: ignore[union-attr, protected-access]
             rows = conn.execute(
                 """
@@ -634,15 +638,81 @@ class AdminTools:
                 "username": username,
                 "display_name": display_name,
                 "friendly_name": friendly_name,
+                "has_account": True,
                 "label": self._format_user_label(user_id, {
                     "username": username,
                     "display_name": display_name,
                     "friendly_name": friendly_name,
                 }),
             }
+
+        # plex_auth_sessions is the LOGIN table, not the roster. It only holds
+        # people who have actually signed in; the friendly-names ledger holds
+        # everyone Ben knows (in prod: 15 rows vs 64 names). Resolving a name
+        # against the login table alone answers "I could not find a user
+        # matching Mike" for most of the people he'd ever ask about, which reads
+        # as "I don't know them" when the truth is "they've never logged in".
+        # Ledger-only people carry has_account=False and no user_id; callers
+        # that key durable state decide what to do with that.
+        if self.friendly_names is not None:
+            known = {
+                str(entry.get("username") or "").lower()
+                for entry in labels.values()
+                if entry.get("username")
+            }
+            for raw_username, raw_friendly in self.friendly_names.all_names().items():
+                username = str(raw_username or "").strip()
+                if not username or username.lower() in known:
+                    continue
+                known.add(username.lower())
+                friendly_name = str(raw_friendly or "").strip()
+                labels[self._LEDGER_KEY_PREFIX + username.lower()] = {
+                    "user_id": "",
+                    "username": username,
+                    "display_name": "",
+                    "friendly_name": friendly_name,
+                    "has_account": False,
+                    "label": self._format_user_label("", {
+                        "username": username,
+                        "display_name": "",
+                        "friendly_name": friendly_name,
+                    }),
+                }
         return labels
 
-    def _resolve_user_query(self, user_query: str) -> dict[str, Any]:
+    _LEDGER_KEY_PREFIX = "ledger:"
+
+    @staticmethod
+    def _match_key(item: dict[str, Any]) -> str:
+        """Dedupe key. Every ledger-only person has user_id "", so keying on
+        user_id alone would silently collapse all of them into one match."""
+        user_id = str(item.get("user_id") or "")
+        if user_id:
+            return user_id
+        return AdminTools._LEDGER_KEY_PREFIX + str(item.get("username") or "").lower()
+
+    @staticmethod
+    def _searchable_values(label: dict[str, Any]) -> list[str]:
+        """Deliberately built from label["user_id"], never from the dict key --
+        the key for a ledger-only row is a synthetic "ledger:<username>" string
+        and must never be matchable text or leak into a result."""
+        return [
+            str(label.get(field) or "")
+            for field in ("user_id", "username", "display_name", "friendly_name", "label")
+        ]
+
+    def _candidate_summary(self, item: dict[str, Any]) -> str:
+        label = str(item.get("label") or item.get("user_id") or item.get("username") or "unknown")
+        return label if item.get("has_account") else f"{label} [no account yet]"
+
+    def _resolve_user_query(self, user_query: str, *, require_account: bool = True) -> dict[str, Any]:
+        """Resolve a loose human reference to one person.
+
+        require_account defaults to True (fail closed): most callers write
+        durable state keyed by user_id, and a ledger-only person has none --
+        writing one anyway would key a row to "" that matches nobody, forever.
+        set_user_friendly_name keys off username instead, so it passes False.
+        """
         query = str(user_query or "").strip().lower()
         if not query:
             return {
@@ -651,37 +721,62 @@ class AdminTools:
                 "user_summary": "I need a friendly name, username, display name, or user ID.",
             }
         users = self._load_user_labels()
-        matches = []
-        for user_id, label in users.items():
-            values = {
-                user_id,
-                str(label.get("username") or ""),
-                str(label.get("display_name") or ""),
-                str(label.get("friendly_name") or ""),
-                str(label.get("label") or ""),
-            }
-            if any(query == value.lower() for value in values if value):
-                matches.append({**label, "user_id": user_id})
+        tokens = [token for token in re.split(r"\W+", query) if token]
+
+        # Four passes, strongest first. The old code had only exact + substring,
+        # which is why "Mike Young" could never reach a person on file as "Mike":
+        # the whole query had to appear inside one value. Tokens fix that, but an
+        # any-token hit is a guess ("Young" alone would match a Young Nicole), so
+        # those are offered as suggestions and never auto-selected.
+        exact: list[dict[str, Any]] = []
+        substring: list[dict[str, Any]] = []
+        all_tokens: list[dict[str, Any]] = []
+        any_token: list[dict[str, Any]] = []
+        for label in users.values():
+            lowered = [value.lower() for value in self._searchable_values(label) if value]
+            if any(query == value for value in lowered):
+                exact.append(dict(label))
+                continue
+            if any(query in value for value in lowered):
+                substring.append(dict(label))
+                continue
+            if not tokens:
+                continue
+            haystack = " ".join(lowered)
+            hits = sum(1 for token in tokens if token in haystack)
+            if hits == len(tokens):
+                all_tokens.append(dict(label))
+            elif hits:
+                any_token.append(dict(label))
+
+        matches = exact or substring or all_tokens
         if not matches:
-            for user_id, label in users.items():
-                values = [
-                    user_id,
-                    str(label.get("username") or ""),
-                    str(label.get("display_name") or ""),
-                    str(label.get("friendly_name") or ""),
-                    str(label.get("label") or ""),
-                ]
-                if any(query in value.lower() for value in values if value):
-                    matches.append({**label, "user_id": user_id})
-        if not matches:
+            suggestions = list({self._match_key(item): item for item in any_token}.values())
+            if suggestions:
+                return {
+                    "ok": False,
+                    "reason": "user_not_found",
+                    "user_query": user_query,
+                    "candidates": suggestions[:10],
+                    "user_summary": f"No match for {user_query}. Closest I have: "
+                    + ", ".join(self._candidate_summary(item) for item in suggestions[:5])
+                    + ". Which one?",
+                }
             return {
                 "ok": False,
                 "reason": "user_not_found",
                 "user_query": user_query,
                 "user_summary": f"I could not find a user matching {user_query}.",
             }
-        unique: dict[str, dict[str, str]] = {str(item["user_id"]): item for item in matches}
-        matches = list(unique.values())
+
+        matches = list({self._match_key(item): item for item in matches}.values())
+        if require_account:
+            # Don't offer a ledger-only candidate to a caller that would only
+            # refuse it on the next turn -- but keep them if they're all we have,
+            # so the "never logged in" answer below can still be given.
+            with_account = [item for item in matches if item.get("has_account")]
+            if with_account:
+                matches = with_account
         if len(matches) > 1:
             return {
                 "ok": False,
@@ -689,9 +784,21 @@ class AdminTools:
                 "user_query": user_query,
                 "candidates": matches[:10],
                 "user_summary": "That user match is ambiguous. Pick one: "
-                + ", ".join(str(item.get("label") or item.get("user_id")) for item in matches[:5]),
+                + ", ".join(self._candidate_summary(item) for item in matches[:5]),
             }
-        return {"ok": True, "user": matches[0]}
+        match = matches[0]
+        if require_account and not match.get("has_account"):
+            return {
+                "ok": False,
+                "reason": "user_not_registered",
+                "user_query": user_query,
+                "user": match,
+                "user_summary": (
+                    f"{match.get('label')} is in your friendly-names list but has never "
+                    "logged into Plexorcist, so there's no account to attach this to."
+                ),
+            }
+        return {"ok": True, "user": match}
 
     def _resolve_message_recipient(
         self,
@@ -803,17 +910,24 @@ class AdminTools:
                 snapshots[user_id] = str(summary or "")
         return snapshots
 
-    def _format_user_label(self, user_id: str, label: dict[str, str] | None) -> str:
+    def _format_user_label(self, user_id: str, label: dict[str, Any] | None) -> str:
         if not label:
             return user_id
         friendly = (label.get("friendly_name") or "").strip()
         username = (label.get("username") or "").strip()
         display_name = (label.get("display_name") or "").strip()
+        # Ledger-only people have no user_id at all; the old format rendered
+        # that as "Mike (mwco8, )", and this string is what lands in every
+        # user_summary and candidate list Ben reads.
+        suffix = f", {user_id}" if user_id else ""
         if friendly and username and friendly.lower() != username.lower():
-            return f"{friendly} ({username}, {user_id})"
+            return f"{friendly} ({username}{suffix})"
         if display_name and username and display_name.lower() != username.lower():
-            return f"{display_name} ({username}, {user_id})"
-        return f"{username or display_name or user_id} ({user_id})"
+            return f"{display_name} ({username}{suffix})"
+        base = username or display_name or user_id
+        if not user_id:
+            return base or "unknown"
+        return f"{base} ({user_id})"
 
     def _parse_json(self, raw: Any, *, default: Any) -> Any:
         try:
