@@ -832,8 +832,38 @@ If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/pat
 ## Session checkpoint (auto: weekly (7-day) usage at 93.0%) — 2026-08-04 10:37 MST
 The weekly (7-day) usage cap is at 93.0% and resets in ~23h 22m. When it hits
 100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
-<!-- TODO: model should replace this line with what's actually in flight, -->
-<!-- what was just decided, and the concrete next step, before continuing. -->
+
+**ALERT GAP CLOSED, DEPLOYED AND LIVE — 2026-08-04 10:41 MST. Nothing in flight.**
+`77b3b8d` on branch `ombi-false-failure-fix`; tree clean; **220 tests pass**
+(216 + 4 new). Rsynced and restarted (gunicorn pid 69372, both workers reached
+"Application startup complete", deployed `router.py` confirmed to contain
+`build_command_failure_alert`).
+
+What it does: `/fix`, `/status`, `/search`, `/seasons`, `/episode` failing
+against a backend now page Ben with a **Command Failed** alert carrying the
+service, the HTTP status and the *tool* — everything the de-named user reply no
+longer says. The bare `except` around the handler alerts too (that reply says
+nothing actionable, so the alert carries all of it). New pieces:
+`build_command_failure_alert()` + module-level `should_send_admin_alert` /
+`clear_admin_alert_cooldown` / `reset_admin_alert_cooldowns` / `service_label`
+in `tools/admin_alerts.py` (the `AdminAlertReporter` methods now delegate, one
+implementation); `ShabbosRouter._send_admin_alert()` is the single send path.
+15-min cooldown keyed on **tool + target + problem**, so hammering `/fix` on one
+title cannot spam him or bury a different failure; a send that did not land
+clears its own cooldown and never appends "The admin has been notified."
+`tool` is carried separately from `command` because the repair lane arrives as
+`/confirm`, and `target` prefers `invocation.note_text` over `invocation.target`
+(on that path `target` is the whole UI preview sentence). An autouse fixture in
+`tests/conftest.py` resets the process-wide cooldown dict per test — without it,
+"the admin was paged" assertions silently depend on test order.
+
+Still open, both Ben's call:
+- **Not pushed to `origin`, not merged to `main`.** Prod runs the branch code;
+  GitHub does not have it. Every deploy so far has been rsync + restart only.
+- Items 2/3/4 from the section above stand unchanged (the `/api/v2/Search/tv/{id}`
+  route question; `_fallback_reply_from_tool_calls()` / `_format_tool_error()`
+  still naming backends on repair paths, which are also the admin's diagnostics;
+  and the priority `-2` trade on `missing_show_identifier`).
 AUTO-RESUME ARMED: overlord-resume-autoresume-d3b955de.timer (fires ~5 min after the weekly (7-day) cap resets,
 continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-d3b955de.timer
