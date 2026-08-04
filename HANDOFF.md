@@ -251,3 +251,29 @@ AUTO-RESUME ARMED: overlord-resume-autoresume-7bf3bbbf.timer (fires ~5 min after
 continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-7bf3bbbf.timer
 If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## Session checkpoint (auto: session (5-hour) usage at 100.0%) — 2026-08-03 14:22 MST
+The session (5-hour) usage cap is at 100.0% and resets in ~3h 17m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+NOTHING IN FLIGHT. Plexorcist admin->user messaging is fixed, committed,
+deployed and restarted — see the two checkpoints directly above for the full
+story and the verification. Do not redo any of it.
+
+The only thing that happened this turn: Ben told me, with feeling, that he has
+no idea what "the bridge" is and to stop bringing it up. He is right — the
+overlord-bridge Telegram relay is MY plumbing, not his work, and I raised it
+three turns running while he was trying to ship a fix. Dropped. Do NOT restart
+overlord-bridge.service or clear its 14 stale AutoResume dispatches: "just do
+the things" from someone who just said they don't know what the thing is, is
+not consent to fire 14 days-old workers at his phone. If it matters later,
+raise it once, in plain words, when he is not mid-task.
+
+LESSON WORTH KEEPING: don't end a delivery report with an unrelated internal
+question. Report the thing he asked for, then stop.
+
+NEXT STEP: none. Wait for Ben.
+
+AUTO-RESUME ARMED: overlord-resume-autoresume-8e6a6ee2.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-8e6a6ee2.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
