@@ -171,14 +171,18 @@ class OmbiClient(BaseHttpClient):
                     }
                 )
                 return reconciled
-            return {
-                "ok": False,
+            failed_context: dict[str, object] = {
                 "username": username,
                 "tmdb_id": tmdb_id,
+                "title": detail.get("title"),
+            }
+            return {
+                "ok": False,
                 "status": "error",
                 "error": self._describe_http_error(exc),
-                "title": detail.get("title"),
                 "ombi_detail": detail,
+                **failed_context,
+                "user_summary": self._request_failure_summary(failed_context),
             }
         context: dict[str, object] = {
             "username": username,
@@ -304,6 +308,7 @@ class OmbiClient(BaseHttpClient):
                 "status": "error",
                 "error": self._describe_http_error(exc),
                 **context,
+                "user_summary": self._request_failure_summary(context),
             }
         normalized = self._normalize_request_engine_result(
             result=result,
@@ -365,17 +370,21 @@ class OmbiClient(BaseHttpClient):
                 headers=self._user_headers(username),
             )
         except httpx.HTTPError as exc:
-            return {
-                "ok": False,
+            failed_context: dict[str, object] = {
                 "username": username,
                 "tvdb_id": tvdb_id,
                 "season": season,
                 "episode": episode,
+                "title": detail.get("title"),
+            }
+            return {
+                "ok": False,
                 "status": "error",
                 "error": self._describe_http_error(exc),
-                "title": detail.get("title"),
                 "ombi_detail": detail,
                 "request_payload": payload,
+                **failed_context,
+                "user_summary": self._request_failure_summary(failed_context),
             }
         return {
             "ok": True,
@@ -735,6 +744,9 @@ class OmbiClient(BaseHttpClient):
             "action": "show_identifier_required",
             "reason": "show_requests_require_positive_tvdb_id",
             "next_step": "resolve_show_candidate",
+            # No service name and no id talk: the caller is supposed to resolve the show
+            # and retry rather than hand the user an internal identifier to debug.
+            "user_summary": "I do not have a solid match for that show yet, so nothing was requested.",
         }
         if season is not None:
             payload["season"] = season
@@ -965,6 +977,16 @@ class OmbiClient(BaseHttpClient):
             return f" for TMDB {tmdb_id}"
         return ""
 
+    def _request_failure_summary(self, context: dict[str, object]) -> str:
+        """User-facing prose for a request that did not go through.
+
+        It never names Ombi. Users reach this app precisely because they have no Ombi
+        access -- they do not know it exists and cannot go look at it -- so naming it,
+        or telling them to check it, hands them a dead end. The real detail goes to the
+        admin through the alert path instead.
+        """
+        return f"I could not put in the request{self._request_subject(context)} — nothing was added."
+
     def _normalize_request_engine_result(
         self,
         result: dict | object,
@@ -978,7 +1000,7 @@ class OmbiClient(BaseHttpClient):
         # so a genuine failure always carries one of these three.
         if payload.get("isError") or error_message.strip() or error_code:
             status = self._map_request_error_status(error_code=error_code, error_message=error_message)
-            return {
+            normalized: dict[str, object] = {
                 "ok": status in {"already_requested", "already_available"},
                 "status": status,
                 "error": {
@@ -988,21 +1010,26 @@ class OmbiClient(BaseHttpClient):
                 "ombi": payload,
                 **error_context,
             }
+            if not normalized["ok"]:
+                normalized["user_summary"] = self._request_failure_summary(error_context)
+            return normalized
         if payload.get("result") is False:
             # Observed in production: {"result": false, "isError": false,
             # "errorMessage": null, "requestId": 332331} for a request that DID land --
             # SickChill built the show seconds later. `result` on its own is not a
             # verdict, and this used to be reported to the user as "nothing was added".
-            # Say so honestly and let the caller confirm against Ombi's request list.
+            # Say so honestly; the caller reconciles against Ombi's request list, and an
+            # unconfirmed request alerts the admin (backend/agent.py::_build_admin_alert),
+            # because the user cannot chase it themselves.
             return {
                 "ok": False,
                 "status": "unconfirmed",
                 "ombi": payload,
                 **error_context,
                 "user_summary": (
-                    f"Ombi did not confirm the request{self._request_subject(error_context)}, and I "
-                    "could not find it in Ombi's request list. It may still have gone through, so "
-                    "check Ombi before requesting it again."
+                    f"I sent the request{self._request_subject(error_context)}, but it did not come "
+                    "back confirmed and it is not showing in the queue yet. It may still land — give "
+                    "it a bit before asking for it again."
                 ),
             }
         return {"ok": True, "status": success_status, "ombi": payload, **error_context}

@@ -124,16 +124,19 @@ async def test_unconfirmed_request_absent_from_ombi_stays_unconfirmed():
     assert f"TVDB {ALTERED_CARBON_TVDB}" in summary
     assert "for that," not in summary
     assert "Unknown title" not in summary
+    # The user has no Ombi access, so the prose must not name it or send them there.
+    assert "ombi" not in summary.lower()
     # Same sentence has to survive the model-free Shabbos path.
     rendered = render_request_show_scope_for_user(result)
     assert "Unknown title" not in rendered
     assert f"TVDB {ALTERED_CARBON_TVDB}" in rendered
+    assert "ombi" not in rendered.lower()
 
 
 def test_unconfirmed_render_without_a_user_summary_omits_the_title():
     """Defence in depth: no summary, no id, no "Unknown title" placeholder either."""
     rendered = render_request_show_scope_for_user({"ok": False, "status": "unconfirmed"})
-    assert rendered == "Ombi did not confirm the request. Check Ombi before requesting it again."
+    assert rendered == "The request was not confirmed. It may still land — give it a bit before retrying."
 
 
 @pytest.mark.asyncio

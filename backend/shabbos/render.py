@@ -133,21 +133,23 @@ def _render_request(result: dict[str, Any], what: str) -> str:
     if status == "account_not_ready":
         return str(result.get("user_summary") or "Your account is still being set up. Try again in a moment.")
     if status == "unconfirmed":
-        # Ombi answered without an error but without confirming either, and the request
-        # was not in its list. It may still have landed -- do not claim it did not.
-        # `title` is usually absent on this branch (Ombi's v2 search 204s on a TVDB id),
-        # so prefer the client's user_summary, which degrades to the id, and never let
-        # _title_year()'s "Unknown title" placeholder reach the user.
+        # The upstream answered without an error but without confirming either, and the
+        # request was not in its list. It may still have landed -- do not claim it did
+        # not. `title` is usually absent on this branch (the v2 search 204s on a TVDB
+        # id), so prefer the client's user_summary, which degrades to the id, and never
+        # let _title_year()'s "Unknown title" placeholder reach the user.
         summary = str(result.get("user_summary") or "").strip()
         if summary:
             return summary
         subject = f" for {title}" if result.get("title") else ""
-        return f"Ombi did not confirm the request{subject}. Check Ombi before requesting it again."
+        return f"The request{subject} was not confirmed. It may still land — give it a bit before retrying."
 
     failure = _failure(result, f"The request for {title} was not submitted.")
     if failure:
         return failure
-    return f"Requested {what}: {title}. Ombi has it."
+    # Never name the request backend to a user: they have no access to it and do not
+    # know it exists. "In the queue" is the whole truth they can act on.
+    return f"Requested {what}: {title}. It's in the request queue."
 
 
 def render_request_movie_for_user(result: dict[str, Any]) -> str:

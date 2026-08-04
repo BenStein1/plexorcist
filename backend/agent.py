@@ -20,6 +20,7 @@ from clients.llm_providers import (
     ToolResultsTurn,
 )
 from clients.prowl_client import ProwlClient
+from tools.admin_alerts import REQUEST_TOOL_NAMES, alert_media_id, build_request_alert
 from tools.bridge import ToolBridge
 
 
@@ -141,10 +142,13 @@ class ConciergeAgent:
                     if alert:
                         alert_key, event, summary, priority = alert
                         if alert_key not in alerted_keys and self._should_send_admin_alert(alert_key):
-                            await self._send_admin_alert(event=event, summary=summary, priority=priority)
+                            failure = await self._send_admin_alert(event=event, summary=summary, priority=priority)
                             alerted_keys.add(alert_key)
-                            tool_record.result["admin_alert_sent"] = True
                             tool_record.result["admin_alert_event"] = event
+                            if failure is None:
+                                tool_record.result["admin_alert_sent"] = True
+                            else:
+                                tool_record.result["admin_alert_error"] = failure
                 conversation.append(ToolResultsTurn(results))
                 continue
 
@@ -213,6 +217,7 @@ class ConciergeAgent:
             "clear_sickchill_ignored_episodes",
             "repair_requested_missing_episode",
             "repair_requested_missing_season",
+            *REQUEST_TOOL_NAMES,
         }
         support_calls = [
             call
@@ -232,6 +237,19 @@ class ConciergeAgent:
         title = self._plain_subject_title(result)
         subject = self._plain_episode_subject(result, title)
         notify_text = f" I let {self.admin_label} know so he can check it." if admin_was_notified else ""
+
+        if name in REQUEST_TOOL_NAMES:
+            # The model produced no text. The user still asked for something, so tell
+            # them what happened to it -- in the client's own service-free words.
+            summary = str(result.get("user_summary") or "").strip()
+            # `title` is often absent on a failed request, and _plain_subject_title()'s
+            # "that episode" fallback would be a lie for a whole-show request.
+            requested = str(result.get("title") or "").strip() or "that"
+            if result.get("ok"):
+                return summary or f"Done — I put in the request for {requested}."
+            if summary:
+                return f"{summary}{notify_text}"
+            return f"I could not get the request for {requested} in.{notify_text}"
 
         if name in {"check_episode_status", "check_episode_file"}:
             return self._plain_episode_status_reply(result, subject, notify_text)
@@ -420,13 +438,22 @@ class ConciergeAgent:
         }
         return labels.get(service.lower(), service)
 
-    async def _send_admin_alert(self, event: str, summary: str, priority: int = 0) -> None:
+    async def _send_admin_alert(self, event: str, summary: str, priority: int = 0) -> str | None:
+        """Returns None when the notice went out, else why it did not.
+
+        The caller stamps `admin_alert_sent` off this, and the reply tells the user the
+        admin was notified -- so a swallowed failure would leave everybody believing an
+        alert exists when none does.
+        """
         if self.prowl is None:
-            return
+            return "prowl_unavailable"
         try:
-            await self.prowl.send_notice(summary=summary, priority=priority, event=event)
-        except Exception:
-            return
+            notice = await self.prowl.send_notice(summary=summary, priority=priority, event=event)
+        except Exception as exc:  # noqa: BLE001
+            return str(exc) or "prowl_send_failed"
+        if isinstance(notice, dict) and notice.get("ok") is False:
+            return str(notice.get("error") or notice.get("response_text") or "prowl_send_failed")
+        return None
 
     def _maybe_answer_admin_identity(self, user: UserContext, message: str) -> str | None:
         normalized = " ".join(message.strip().lower().split())
@@ -470,6 +497,23 @@ class ConciergeAgent:
         _ADMIN_ALERT_LAST_SENT[key] = now
         return True
 
+    def _alert_media_id(self, result: dict[str, Any]) -> str:
+        return alert_media_id(result)
+
+    def _build_request_alert(
+        self,
+        user: UserContext,
+        name: str,
+        result: dict[str, Any],
+        subject: str,
+    ) -> tuple[str, str, str, int] | None:
+        return build_request_alert(
+            user_label=self._user_label(user),
+            name=name,
+            result=result,
+            subject=subject,
+        )
+
     def _build_admin_alert(self, user: UserContext, tool_record: Any) -> tuple[str, str, str, int] | None:
         name = tool_record.name
         result = tool_record.result if isinstance(tool_record.result, dict) else {}
@@ -488,16 +532,22 @@ class ConciergeAgent:
             "repair_requested_missing_episode",
             "repair_requested_missing_season",
             "add_transmission_candidate",
+            # A request that does not land is invisible to everyone unless it alerts:
+            # the user has no Ombi access and is never told to go look at it.
+            *REQUEST_TOOL_NAMES,
         }:
             return None
 
-        show = str(result.get("show") or result.get("title") or "Unknown show")
+        show = str(result.get("show") or result.get("title") or self._alert_media_id(result) or "Unknown show")
         season = result.get("season")
         episode = result.get("episode")
         if season is not None and episode is not None:
             subject = f"{show} S{int(season):02d}E{int(episode):02d}"
         else:
             subject = show
+
+        if name in REQUEST_TOOL_NAMES:
+            return self._build_request_alert(user, name, result, subject)
 
         if result.get("backend_connected") is False:
             reason = result.get("reason") or "unreachable"
@@ -1269,6 +1319,23 @@ Source handling:
             f"- The fallback Ombi URL is {self.ombi_continue_url}." if user.is_admin else ""
         )
 
+        # Naming the failing service is diagnostic gold for the admin and useless noise
+        # for everyone else: users have no Ombi/SickChill/Radarr access, cannot check
+        # them, and did not know they existed until the error mentioned them.
+        if user.is_admin:
+            service_error_line = (
+                '- If a tool error names a `service`, `operation`, `failure_type`, `http_status`, or `http_reason`, report that exact source and error. '
+                'Example: "TV repair failed while talking to Ombi during multi search: HTTP 500 Internal Server Error. Nothing was changed." '
+                "Do not call a SickChill error an Ombi error, or a Radarr error a SickChill error."
+            )
+        else:
+            service_error_line = (
+                "- Never name a backend service (Ombi, SickChill, Radarr, Tautulli, Prowl, Jackett, Transmission) to this user, and never quote an HTTP status, error code, or raw `reason`. "
+                "Say what happened to their request in plain words: it went in, it did not go in, it is not confirmed yet, or it is already there. "
+                'Never tell them to go look at, check, or retry in another system -- they have no access to any of it. Say what you did and, when `admin_alert_sent` is true, that you told '
+                f"{self.admin_label}."
+            )
+
         instructions = f"""
 You are Plexorcist Concierge, a friendly, slightly cheeky media concierge for a private Plex server.
 
@@ -1310,7 +1377,7 @@ Voice and style:
 - Multi-tool chaining is allowed when it helps, but every chain must end with a short user-facing status reply. Never leave a turn on tool output alone.
 - When a tool returns `ok`, `status`, `action`, `error`, or `reason`, reflect that result in the reply instead of inventing a canned acknowledgment.
 - For errors, failed repairs, rejected grabs, blocked downloads, or metadata mismatches, be plain first and cute second. State what happened, whether anything changed, and what the user can expect next. Do not use glib filler like "the catalog goblin is feral" as the main explanation.
-- If a tool error names a `service`, `operation`, `failure_type`, `http_status`, or `http_reason`, report that exact source and error. Example: "TV repair failed while talking to Ombi during multi search: HTTP 500 Internal Server Error. Nothing was changed." Do not call a SickChill error an Ombi error, or a Radarr error a SickChill error.
+{service_error_line}
 - If a TV repair result includes `request_gate_soft_failed`, explain that Ombi lookup failed but the tool continued through SickChill anyway. Do not describe that as a full repair failure if SickChill changed state or queued searches.
 - If a corrective action was taken or attempted and the tool result includes `admin_alert_sent: true`, mention that you notified {self.admin_label} only for non-admin users. If the current user is admin, never say "{self.admin_label} was notified"; say "this may need your/manual attention" instead.
 - For normal users, hide backend machinery. Do not mention tool names, API names, service errors, IDs, raw statuses like `show_request_not_found`, or "repair lane". Collapse messy outcomes into: found/not found, in Plex/not in Plex, already grabbed/searching/not aired, changed/not changed, and whether {self.admin_label} was notified.
@@ -1322,7 +1389,7 @@ Personality calibration:
   - "(tin can rattle) I checked. It's requested, not available yet."
   - "Right, I poked the queue and it hissed back 'processing.'"
   - "Sniffed the catalog: three matches, one likely culprit."
-  - "Ombi search can be picky. Give me the half-remembered version and I'll wrestle it into shape."
+  - "Title search can be picky. Give me the half-remembered version and I'll wrestle it into shape."
   - "I found a few suspects. Give me one more clue."
   - "That's a big show. Want the whole thing, or should we start with Season 1 and avoid angering the storage gods?"
   - "I found it. It was in a weird little limbo, so I fixed that."
@@ -1437,7 +1504,7 @@ Example phrasing:
 - That sounds like The Soup Nazi, Season 7 Episode 6. Want just that episode, or Season 7?
 - User: "Has someone already requested Marshals?" Assistant: "Yep, it's already in the library."
 - User: "Are there any missing episodes?" Assistant: "Here are the episodes Ombi still shows as not fully available: ..."
-- Ombi search can be picky. Give me the half-remembered version and I'll wrestle the database goblin.
+- Title search can be picky. Give me the half-remembered version and I'll wrestle the database goblin.
 
 Support behavior:
 - Plex is the definitive truth of whats available to watch currently. Ombi is what has been requested to download. Plex existed long before Ombi so not everyting in Plex is accounted for in Ombi.
@@ -1517,7 +1584,13 @@ Tool and system rules:
 - Do not claim a request, search, fix, or download happened unless a tool result confirmed it.
 - If a tool result includes `user_summary`, use that as the primary user-facing outcome. Do not contradict it by reinterpreting lower-level fields or rejection text.
 - If a tool result includes `admin_alert_sent: true`, mention that {self.admin_label} was notified unless the authenticated user is admin. If the authenticated user is admin, never say "{self.admin_label} was notified"; say this may need your/manual attention.
-- If an Ombi request tool returns `ok: false`, say the request failed, keep it brief, and include the reason when helpful. Do not imply it was requested successfully.
+- If a request tool returns `ok: false`, do not imply it was requested successfully. Keep it brief, and match the `status`:
+  - `unconfirmed` means the backend neither errored nor confirmed and the request was not in the request list. Do not say it failed and do not say it worked. Say it did not come back confirmed, that it may still land, and that they should give it a bit before asking again.
+  - `missing_show_identifier` means you did not have a usable show id. Fix it yourself: search for the title, pick the match, and call the request tool again with the real id in the same turn. Only report a problem if the search cannot resolve it. Never ask the user for an id.
+  - `error` and `permission_denied` mean nothing was added. Say that plainly.
+- If a request result carries `unresolved_tvdb_id: true`, the id did not resolve and `unverified_title` belongs to some unrelated show. Never name that title to the user. Search the user's own words for the show, and retry the request with the id from that search.
+- Do not retry the exact same request call with the exact same arguments after a failure -- resolve the id or the title first, or report it. One corrective retry per turn.
+- Users cannot see, reach, or fix the request backend. Never send them to it, and never make them the escalation path: if a request did not land, {self.admin_label} is who gets told.
 - If `send_admin_prowl_notice` already succeeded for the current issue, do not ask whether to send another admin ping. Say the admin has already been notified if that is relevant.
 - Do not invent nearby titles or substitute a different show or movie unless the user explicitly confirms it.
 - If you need more detail, ask one concise question.

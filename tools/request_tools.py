@@ -3,7 +3,51 @@ from __future__ import annotations
 import httpx
 
 from clients.ombi_client import OmbiClient
-from tools.error_helpers import classify_http_error, service_action, user_error_summary
+from tools.error_helpers import classify_http_error, classify_service_result, service_action, user_error_summary
+
+
+# Request statuses that mean "the user asked for something and did not get it".
+# Everything else a request can return (requested, already_available,
+# already_requested, account_not_ready, movie_not_found, ambiguous_movie) is a normal
+# outcome the user can act on, and must not be reported as a fault.
+_REQUEST_FAILURE_STATUSES = {"error", "unconfirmed", "missing_show_identifier"}
+
+
+def _stamp_request_failure(result: dict, *, operation: str) -> dict:
+    """Give a failed request the {service, operation, failure_type} shape the admin
+    alerting path keys on.
+
+    Without it, a request that never landed is visible only to the user -- who has no
+    Ombi access and can do nothing about it -- while the admin hears nothing at all.
+    """
+    if not isinstance(result, dict) or result.get("ok") or result.get("service"):
+        return result
+    status = str(result.get("status") or "")
+    if status not in _REQUEST_FAILURE_STATUSES:
+        return result
+
+    if status == "error":
+        detail = result.get("error") if isinstance(result.get("error"), dict) else {}
+        error = classify_service_result(
+            service="ombi",
+            operation=operation,
+            reason=detail.get("message") or result.get("reason"),
+        )
+    elif status == "unconfirmed":
+        error = {
+            "service": "ombi",
+            "operation": operation,
+            "failure_type": "unconfirmed_request",
+            "error_message": "request was neither confirmed nor listed afterwards",
+        }
+    else:
+        error = {
+            "service": "ombi",
+            "operation": operation,
+            "failure_type": "missing_identifier",
+            "error_message": "no usable show id, nothing was sent",
+        }
+    return {**result, **error, "action": result.get("action") or service_action(error)}
 
 
 class RequestTools:
@@ -43,29 +87,32 @@ class RequestTools:
         not_ready = await self._account_not_ready(username)
         if not_ready is not None:
             return not_ready
-        return await self.ombi.request_movie_for_user(
+        result = await self.ombi.request_movie_for_user(
             username=username,
             tmdb_id=tmdb_id,
             title=title,
             year=year,
         )
+        return _stamp_request_failure(result, operation="movie_request")
 
     async def request_show_scope_for_user(self, username: str, tvdb_id: int, scope: str) -> dict:
         not_ready = await self._account_not_ready(username)
         if not_ready is not None:
             return not_ready
-        return await self.ombi.request_show_scope_for_user(username=username, tvdb_id=tvdb_id, scope=scope)
+        result = await self.ombi.request_show_scope_for_user(username=username, tvdb_id=tvdb_id, scope=scope)
+        return _stamp_request_failure(result, operation="tv_request")
 
     async def request_episode_for_user(self, username: str, tvdb_id: int, season: int, episode: int) -> dict:
         not_ready = await self._account_not_ready(username)
         if not_ready is not None:
             return not_ready
-        return await self.ombi.request_episode_for_user(
+        result = await self.ombi.request_episode_for_user(
             username=username,
             tvdb_id=tvdb_id,
             season=season,
             episode=episode,
         )
+        return _stamp_request_failure(result, operation="episode_request")
 
     async def check_movie_request_status(self, query: str, username: str | None = None) -> dict:
         return await self.ombi.check_movie_request_status(query=query, username=username)

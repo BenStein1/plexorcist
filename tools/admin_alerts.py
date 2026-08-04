@@ -10,6 +10,101 @@ from clients.prowl_client import ProwlClient
 _ALERT_COOLDOWN_SECONDS = 15 * 60
 _ADMIN_ALERT_LAST_SENT: dict[str, datetime] = {}
 
+# The request tools alert too. A user who asks for a show has no Ombi access and is
+# never told to go look at it, so an alert is the only thing standing between a
+# request that silently did not land and nobody ever knowing.
+REQUEST_TOOL_NAMES = frozenset(
+    {
+        "request_movie_for_user",
+        "request_show_scope_for_user",
+        "request_episode_for_user",
+    }
+)
+
+
+def alert_media_id(result: dict[str, Any]) -> str:
+    """`TVDB 53243` / `TMDB 1234`, so a title-less alert is still specific.
+
+    Request failures usually have no title -- Ombi's v2 search 204s on a TVDB id, so
+    get_tv_detail() returns {} -- and "Unknown show" would both read as noise and
+    collide in the cooldown key, silently swallowing the next show's alert for the
+    length of the cooldown.
+    """
+    for field, label in (("tvdb_id", "TVDB"), ("tmdb_id", "TMDB")):
+        try:
+            value = int(result.get(field))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return f"{label} {value}"
+    return ""
+
+
+def build_request_alert(
+    *,
+    user_label: str,
+    name: str,
+    result: dict[str, Any],
+    subject: str,
+) -> tuple[str, str, str, int] | None:
+    """Alert on a request that did not land. Shared by both alert paths.
+
+    Successful and merely-informative outcomes (already requested, already available,
+    account still provisioning) are not faults and stay quiet. Admin-facing text names
+    the service on purpose -- the admin is the one person who can act on it.
+    """
+    if result.get("ok"):
+        return None
+    status = str(result.get("status") or "").strip()
+    key_id = alert_media_id(result) or subject
+    scope = str(result.get("scope") or "").strip().replace("_", " ")
+    scope_text = f" ({scope})" if scope and scope != "episode" else ""
+
+    if status == "unconfirmed":
+        return (
+            f"request-unconfirmed:{name}:{key_id}:{scope}",
+            "Request Unconfirmed",
+            (
+                f"User {user_label} requested {subject}{scope_text}; Ombi reported no error but did "
+                "not confirm the request, and it was not in the request list afterwards. It may not exist."
+            ),
+            1,
+        )
+
+    if status == "missing_show_identifier":
+        raw_id = result.get("tvdb_id")
+        return (
+            f"request-missing-id:{name}:{user_label}:{raw_id}",
+            "Request Blocked",
+            (
+                f"User {user_label} asked for a show request, but no usable TVDB id was resolved "
+                f"(tvdb_id={raw_id!r}); nothing was sent to Ombi."
+            ),
+            0,
+        )
+
+    failure_type = str(result.get("failure_type") or "").strip()
+    if status == "error" or failure_type:
+        if failure_type == "http_error":
+            problem = f"HTTP {result.get('http_status')} {result.get('http_reason') or ''}".strip()
+        else:
+            problem = str(result.get("error_message") or result.get("reason") or failure_type or status)
+        return (
+            f"request-failed:{name}:{key_id}:{scope}:{problem}",
+            "Request Failed",
+            f"User {user_label} requested {subject}{scope_text}; the request failed against Ombi: {problem}.",
+            1,
+        )
+
+    if status == "permission_denied":
+        return (
+            f"request-denied:{name}:{key_id}",
+            "Request Denied",
+            f"User {user_label} requested {subject}{scope_text}; Ombi refused it on permissions.",
+            1,
+        )
+    return None
+
 
 class AdminAlertReporter:
     def __init__(self, prowl: ProwlClient | None) -> None:
@@ -57,10 +152,11 @@ class AdminAlertReporter:
             "repair_requested_missing_episode",
             "repair_requested_missing_season",
             "add_transmission_candidate",
+            *REQUEST_TOOL_NAMES,
         }:
             return None
 
-        show = str(result.get("show") or result.get("title") or "Unknown show")
+        show = str(result.get("show") or result.get("title") or alert_media_id(result) or "Unknown show")
         issue = str(result.get("issue") or "").strip()
         issue_text = f" Issue: {issue}." if issue else ""
         season = result.get("season")
@@ -69,6 +165,14 @@ class AdminAlertReporter:
             subject = f"{show} S{int(season):02d}E{int(episode):02d}"
         else:
             subject = show
+
+        if name in REQUEST_TOOL_NAMES:
+            return build_request_alert(
+                user_label=self._user_label(user),
+                name=name,
+                result=result,
+                subject=subject,
+            )
 
         if result.get("backend_connected") is False:
             reason = result.get("reason") or "unreachable"

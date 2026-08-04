@@ -33,6 +33,7 @@ from backend.shabbos.commands import COMMANDS, COMMANDS_BY_NAME, LAST_SEARCH_KEY
 from backend.shabbos.confirm import consume, mint
 from backend.shabbos.parser import UsageError, is_command, parse
 from backend.state import ConversationStore
+from tools.admin_alerts import REQUEST_TOOL_NAMES, alert_media_id, build_request_alert
 from tools.catalog import build_toolkit, get_spec, visible_specs
 from tools.error_helpers import classify_http_error, user_error_summary
 
@@ -197,12 +198,23 @@ class ShabbosRouter:
         except httpx.HTTPError as exc:
             # An upstream service is down. Report it plainly; never retry via AI.
             error = classify_http_error(service=self._service_of(tool), operation=tool, exc=exc)
-            text = user_error_summary(
-                tool_family=command.capitalize(),
-                error=error,
-                title=invocation.target or "that",
-                change_status="Nothing was changed.",
-            )
+            if tool in REQUEST_TOOL_NAMES:
+                # Requesters have no access to the request backend, so they get the
+                # outcome without the plumbing -- and the admin gets paged instead.
+                text = f"The request for {invocation.target or 'that'} did not go through. Nothing was added."
+                if await self._alert_admin_request_failure(
+                    tool,
+                    {"ok": False, "status": "error", **error},
+                    invocation.target,
+                ):
+                    text = f"{text}\nThe admin has been notified."
+            else:
+                text = user_error_summary(
+                    tool_family=command.capitalize(),
+                    error=error,
+                    title=invocation.target or "that",
+                    change_status="Nothing was changed.",
+                )
             self._audit(command, ok=False, target=invocation.target, note="service_unavailable")
             self._write_note(invocation, ok=False, summary=text)
             return text
@@ -223,6 +235,13 @@ class ShabbosRouter:
 
         ok = result.get("ok") is not False and result.get("status") != "account_not_ready"
         text = render.render(tool, result)
+
+        if not ok and tool in REQUEST_TOOL_NAMES:
+            # There is no model here to decide to escalate, and the user is never told to
+            # go check the request backend, so a request that did not land has to page the
+            # admin from the router itself.
+            if await self._alert_admin_request_failure(tool, result, invocation.target):
+                text = f"{text}\nThe admin has been notified."
 
         self._audit(command, ok=ok, target=invocation.target)
         self._write_note(invocation, ok=ok, summary=invocation.note_text or text)
@@ -251,6 +270,40 @@ class ShabbosRouter:
         ]
 
     # -- audit + admin tasks ---------------------------------------------------
+
+    async def _alert_admin_request_failure(
+        self,
+        tool: str,
+        result: dict[str, Any],
+        target: str,
+    ) -> bool:
+        """Page the admin about a request that did not land. Returns True if it went out.
+
+        This calls the escalation tool directly rather than through the command gate:
+        it is a server-side consequence of the failure, not something the user asked
+        for, and it must work for users who cannot invoke /issue themselves. No model
+        is involved -- the alert text is built from the result, same as the LLM path.
+        """
+        subject = str(result.get("title") or alert_media_id(result) or target or "that title")
+        alert = build_request_alert(
+            user_label=str(self.user.display_name or self.user.username or self.user.user_id),
+            name=tool,
+            result=result,
+            subject=subject,
+        )
+        if alert is None:
+            return False
+        _key, event, summary, priority = alert
+        try:
+            notice = await self.toolkit.escalation.send_admin_prowl_notice(
+                summary=f"[Shabbos Mode] {summary}",
+                priority=priority,
+                event=event,
+            )
+        except Exception:  # noqa: BLE001 - alerting must never break the user's turn
+            logger.exception("Failed to send Shabbos request-failure alert")
+            return False
+        return bool(isinstance(notice, dict) and notice.get("ok"))
 
     def _audit(self, command: str, *, ok: bool, target: str, note: str | None = None) -> None:
         payload: dict[str, Any] = {

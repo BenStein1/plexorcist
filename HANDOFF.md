@@ -592,6 +592,51 @@ emitted. That line is untouched — do not re-chase it. The 500 on the full-seri
 retry remains an Ombi-side fault; the fix here is that Plexorcist now reconciles
 before declaring failure rather than guessing at the payload.
 
-**Tests:** `tests/test_ombi_request_results.py`, 16 cases, all fixtures shaped like
+**Fault 6 — the failure story was written for someone with Ombi access, and
+nobody was told when a request really failed.** Ben, on reading the fixed prose:
+
+> "in plexorcist the user doesnt KNOW about ombi. They just ask the machine to get
+> it. They cant/wont go to ombi. The AI needs to pass along any api error, self fix
+> or resolve the error, or just work. If it fails. I need to be notified that there
+> was a real issue."
+
+Three changes:
+
+1. **No backend names in user-facing prose.** `user_summary` on every failed /
+   unconfirmed / unidentified request is now service-free, as is
+   `backend/shabbos/render.py::_render_request` (including the success line, which
+   used to end "Ombi has it"). The system prompt's "report the exact `service` and
+   `http_status`" rule is now **admin-only**; non-admin users get an explicit ban on
+   naming Ombi/SickChill/Radarr/Tautulli/Prowl/Jackett/Transmission, quoting HTTP
+   codes, or being sent to another system to check. The "Ombi search can be picky"
+   phrasing examples were teaching the model to name it — now "Title search".
+2. **Request failures alert Ben.** All three request tools were in *neither* alert
+   whitelist, so a request that never landed reached nobody. `tools/request_tools.py`
+   now stamps failures with the `{service, operation, failure_type}` shape the alert
+   path keys on, and `build_request_alert()` (shared by `backend/agent.py` and
+   `tools/admin_alerts.py`, so they cannot drift) emits **Request Unconfirmed** /
+   **Request Failed** / **Request Denied** at priority 1 and **Request Blocked**
+   (no usable id) at 0. Benign outcomes — requested, already requested, already
+   available, account still provisioning — stay quiet. Titles are usually absent on
+   these paths, so the subject and the cooldown key fall back to `TVDB <id>`:
+   "Unknown show" would have made every title-less failure share one key and
+   silently swallow the next show's alert for the cooldown window.
+   `_send_admin_alert()` now reports whether the notice actually went out, so
+   `admin_alert_sent` (which the reply quotes to the user) can no longer be stamped
+   on a Prowl that is missing, erroring, or unconfigured.
+3. **Shabbos Mode pages the admin too.** It has no model to decide to escalate, so
+   `ShabbosRouter._execute()` sends the same alert itself on a request failure and
+   appends "The admin has been notified." only when the notice succeeded.
+
+Self-fix, per Ben's "self fix or resolve the error": the prompt now tells the model
+to resolve `missing_show_identifier` itself (search the title, retry with the real
+id, never ask the user for an id) and to treat `unresolved_tvdb_id: true` as "the id
+is wrong" rather than naming `unverified_title` — the "Cinta 7 Susun" failure mode.
+One corrective retry per turn, never a repeat of the identical call.
+
+**Tests:** `tests/test_ombi_request_results.py`, 17 cases, all fixtures shaped like
 real Ombi responses — including the verbatim production payload above asserting
-`ok is True`. There were previously zero tests over this path. Full suite: 173 pass.
+`ok is True`. `tests/test_request_failure_notification.py`, 13 cases over Fault 6:
+service-free prose, alert shape, alert content/keys, "notified" meaning notified,
+and the Shabbos path end to end. There were previously zero tests over this path.
+Full suite: 187 pass.
