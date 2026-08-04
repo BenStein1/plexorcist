@@ -88,18 +88,25 @@ def user_error_summary(
     title: str,
     change_status: str = "Nothing was changed.",
 ) -> str:
-    service = _service_label(str(error.get("service") or "service"))
-    operation = str(error.get("operation") or "operation").replace("_", " ")
+    """Prose an end user can read. NO service name, NO HTTP status.
+
+    This string is what a Shabbos Mode user literally sees -- the renderers prefer
+    `user_summary` over their own text (backend/shabbos/render.py), and there is no
+    model in that loop to filter it. Ben's rule: "the user doesnt KNOW about ombi.
+    They just ask the machine to get it. They cant/wont go to ombi."
+
+    Nothing is lost for the admin: every caller spreads the classified error dict
+    (`service`, `operation`, `http_status`, `http_reason`, `error_message`) into the
+    same result, and the admin prompt is told to report those exact fields.
+    """
     failure_type = str(error.get("failure_type") or "error")
-    if failure_type == "http_error":
-        status = error.get("http_status")
-        reason = error.get("http_reason") or _http_reason(status)
-        problem = f"HTTP {status} {reason}".strip()
-    elif failure_type == "timeout":
-        problem = "timeout"
+    if failure_type == "timeout":
+        problem = "took too long to answer"
+    elif failure_type == "connection_error":
+        problem = "could not be reached"
     else:
-        problem = str(error.get("error_message") or "connection error")
-    return f"{tool_family} for {title} failed while talking to {service} during {operation}: {problem}. {change_status}"
+        problem = "returned an error"
+    return f"{tool_family} for {title} did not go through — the system that handles it {problem}. {change_status}"
 
 
 def _http_reason(status: object) -> str:

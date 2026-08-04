@@ -12,6 +12,8 @@ which has no model to decide to escalate.
 
 from __future__ import annotations
 
+import pathlib
+
 import httpx
 import pytest
 
@@ -113,6 +115,88 @@ def test_successful_request_prose_never_names_the_backend():
         {"ok": True, "status": "requested", "title": "Altered Carbon", "scope": "full_series"}
     )
     assert_user_safe(rendered)
+
+
+def _user_summary_literals(path: str) -> list[tuple[str, str]]:
+    """Every `user_summary`/`change_status` string written anywhere in a module.
+
+    Whole-module, not just the tool entry points: the worst offender lived in a
+    private helper (`_sickchill_error_metadata`-style), and a leak is a leak
+    whichever function assembled it.
+
+    Source-level on purpose: reaching these strings at runtime means faking a
+    specific upstream failure per branch, and the branches that leak are exactly
+    the rare ones nobody drives in a test.
+    """
+    import ast
+
+    found: list[tuple[str, str]] = []
+
+    def literals(node) -> list[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        if isinstance(node, ast.JoinedStr):  # f-string: keep the fixed parts
+            return ["".join(p.value for p in node.values if isinstance(p, ast.Constant) and isinstance(p.value, str))]
+        if isinstance(node, ast.IfExp):
+            return literals(node.body) + literals(node.orelse)
+        if isinstance(node, ast.BinOp):
+            return literals(node.left) + literals(node.right)
+        return []
+
+    tree = ast.parse(pathlib.Path(path).read_text())
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(func):
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if isinstance(key, ast.Constant) and key.value == "user_summary":
+                        found += [(func.name, text) for text in literals(value)]
+            elif isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg in {"change_status", "user_summary"}:
+                        found += [(func.name, text) for text in literals(keyword.value)]
+    return found
+
+
+@pytest.mark.parametrize(
+    "module", ["tools/request_tools.py", "tools/repair_tools.py", "tools/movie_repair_tools.py"]
+)
+def test_no_tool_writes_a_backend_name_into_user_summary(module):
+    """`user_summary` IS the text a Shabbos user reads -- render.py prefers it over
+    its own prose (`_failure`, `_render_repair`, `_render_request`), and there is no
+    model in that loop to filter it. The admin loses nothing: the classified error
+    fields (`service`, `http_status`, `error_message`) sit in the same dict.
+
+    Scoped to modules that hold no admin-only tool -- asserted below, so adding one
+    here fails loudly instead of silently over-asserting. admin_tools.py is out for
+    exactly that reason: its Transmission maintenance prose names Transmission to
+    the only person who can act on it.
+    """
+    import ast
+
+    from backend.config import Settings
+    from tools.catalog import visible_specs
+
+    settings = Settings(movie_direct_source_enabled=True)
+    admin_context = UserContext(user_id="1", username="ben", display_name="Ben", is_admin=True)
+    admin_only = {spec.name for spec in visible_specs(admin_context, settings)} - {
+        spec.name for spec in visible_specs(USER, settings)
+    }
+    functions = {
+        node.name
+        for node in ast.walk(ast.parse(pathlib.Path(module).read_text()))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert not functions & admin_only, f"{module} now holds an admin-only tool -- re-scope this test"
+
+    summaries = _user_summary_literals(module)
+    assert summaries, f"no user_summary literals found in {module} -- did the shape change?"
+    for tool_name, text in summaries:
+        try:
+            assert_user_safe(text)
+        except AssertionError as exc:  # name the tool, not just the string
+            raise AssertionError(f"{tool_name}: {exc}") from None
 
 
 # -- 2. failures carry the shape the alert path keys on -------------------------

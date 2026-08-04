@@ -277,7 +277,7 @@ async def test_confirm_executes_the_stored_action_not_new_user_input(settings, s
 
     async def fake_repair(self, **kwargs):
         seen.update(kwargs)
-        return {"ok": True, "user_summary": "Radarr is re-fetching The Thing (1982)."}
+        return {"ok": True, "user_summary": "Re-fetching The Thing (1982)."}
 
     monkeypatch.setattr(MovieRepairTools, "repair_requested_movie", fake_repair)
 
@@ -287,7 +287,7 @@ async def test_confirm_executes_the_stored_action_not_new_user_input(settings, s
     assert PENDING_KEY in state.support_context
 
     reply = await router.handle(state, "/confirm")
-    assert "re-fetching" in reply
+    assert "Re-fetching" in reply
     assert seen["title"] == "The Thing"
     assert seen["year"] == 1982
 
@@ -589,3 +589,25 @@ def test_no_renderer_names_a_backend_service_to_a_user(tool):
         # shape proved nothing and the real output was never checked.
         assert "could not be displayed" not in text, f"{tool} raised on {shape!r}"
         assert_user_safe(text)
+
+
+# The confirmation preview is user-facing too, and render.py never sees it -- the
+# command builder writes it. Two of these used to read "This will ask Radarr to
+# re-fetch X" and "This will run the SickChill repair loop on X".
+CONFIRMABLE_COMMANDS = [
+    "/fix movie The Thing --year 1982",
+    "/fix show Altered Carbon",
+    "/fix show Altered Carbon --season 2",
+    "/fix show Altered Carbon --episode s01e02",
+]
+
+
+@pytest.mark.parametrize("line", CONFIRMABLE_COMMANDS)
+def test_confirmation_preview_never_names_a_backend_service(line):
+    from tests.test_request_failure_notification import assert_user_safe
+
+    parsed = parse(line)
+    spec = next(command for command in COMMANDS if command.name == parsed.name)
+    invocation = spec.build(BuildContext(user_id=USER.user_id, support_context={}), parsed)
+    assert invocation.confirm, f"{line} should still ask before it acts"
+    assert_user_safe(invocation.confirm)

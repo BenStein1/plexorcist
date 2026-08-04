@@ -247,7 +247,7 @@ def build_fix(ctx: BuildContext, parsed: ParsedCommand) -> Invocation:
             tool="repair_requested_movie",
             kwargs=kwargs,
             target=title,
-            confirm=f'This will ask Radarr to re-fetch "{label}".',
+            confirm=f'This will try to re-fetch "{label}".',
             writes_note=True,
             note_text=f"Repair requested for movie {label}",
         )
@@ -267,7 +267,7 @@ def build_fix(ctx: BuildContext, parsed: ParsedCommand) -> Invocation:
         tool="repair_requested_show",
         kwargs=kwargs,
         target=title,
-        confirm=f'This will run the SickChill repair loop on "{label}".',
+        confirm=f'This will run the repair loop on "{label}".',
         writes_note=True,
         note_text=f"Repair requested for show {label}",
     )

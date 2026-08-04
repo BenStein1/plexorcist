@@ -263,8 +263,11 @@ async def test_unknown_command_falls_back_to_help_not_ai(no_ai, settings, store)
 
 @pytest.mark.asyncio
 async def test_service_failure_reports_plainly_and_does_not_fall_back_to_ai(no_ai, settings, store, monkeypatch):
-    """Ombi is down. The user is told so. No AI retry, no AI summary."""
+    """The request backend is down. The user is told the search failed -- without
+    being told *what* failed, which is a name they have no use for -- and no AI
+    retry, no AI summary."""
     from clients.ombi_client import OmbiClient
+    from tests.test_request_failure_notification import assert_user_safe
 
     def explode(self, *args, **kwargs):
         raise httpx.ConnectError("connection refused")
@@ -274,8 +277,9 @@ async def test_service_failure_reports_plainly_and_does_not_fall_back_to_ai(no_a
     router = make_router(settings, store)
     state = make_state(store)
     reply = await router.handle(state, "/search The Thing")
-    assert "Ombi" in reply
+    assert "did not go through" in reply
     assert "Nothing was changed." in reply
+    assert_user_safe(reply)
     # The critical half: a service failure must NOT trigger an AI fallback.
     assert no_ai == [], f"a service failure fell back to a model: {no_ai}"
 

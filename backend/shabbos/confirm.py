@@ -31,7 +31,7 @@ class PendingAction:
     note: str = ""
     """The admin-facing task text, carried through so a confirmed action leaves a
     readable note ("Repair requested for movie X") rather than the UI preview
-    string ("This will ask Radarr to...")."""
+    string ("This will try to re-fetch...")."""
 
     def to_dict(self) -> dict[str, Any]:
         return {

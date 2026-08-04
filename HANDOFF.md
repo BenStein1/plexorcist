@@ -705,7 +705,34 @@ runs the output through `assert_user_safe`. It also fails if `render()` swallowe
 a renderer exception, so a crashing shape cannot pass silently. A new renderer is
 covered the moment it is added to the dict.
 
-Full suite: 209 pass.
+Two more surfaces in the same pass, neither of which render.py touches:
+
+- **The confirmation preview.** `/fix` used to ask "This will ask Radarr to
+  re-fetch X" / "This will run the SickChill repair loop on X" — written by the
+  command builder, shown before the user says yes. Now "This will try to re-fetch
+  X" / "This will run the repair loop on X", covered by
+  `test_confirmation_preview_never_names_a_backend_service`.
+- **`user_summary`, which is the real one.** The renderers *prefer* the tool's
+  `user_summary` over their own prose (`_failure`, `_render_repair`,
+  `_render_request`), so most real failures never reach the strings above —
+  they print whatever the tool wrote. `user_error_summary()` was writing
+  "Movie repair for X failed while talking to **Ombi** during multi search: **HTTP
+  500** Internal Server Error", and the repair tools were writing "X is requested
+  in Ombi, but SickChill did not have the show", "Radarr already has a download
+  working for X", "SickChill repair did not start". All reworded. **The admin
+  loses nothing**: every one of those results still spreads the classified error
+  dict (`service`, `operation`, `http_status`, `http_reason`, `error_message`)
+  alongside, and the admin prompt is told to report those exact fields.
+
+`test_no_tool_writes_a_backend_name_into_user_summary` (in
+`tests/test_request_failure_notification.py`) walks the AST of `request_tools.py`,
+`repair_tools.py` and `movie_repair_tools.py` — whole module, not just the tool
+entry points, because the worst offender lived in a private helper — and fails on
+any `user_summary`/`change_status` literal naming a backend. 17 literals guarded.
+It first asserts those modules hold **no admin-only tool**, so if one is ever added
+the test fails and demands re-scoping rather than quietly over-asserting.
+
+Full suite: 216 pass.
 
 ## Session checkpoint (auto: weekly (7-day) usage at 88.0%) — 2026-08-04 10:03 MST
 The weekly (7-day) usage cap is at 88.0% and resets in ~23h 56m. When it hits
@@ -716,10 +743,11 @@ The weekly (7-day) usage cap is at 88.0% and resets in ~23h 56m. When it hits
 failure), `c747c11` (Fault 6: no backend names in user prose, request failures page
 Ben, Shabbos alerts too, self-fix prompt rules) and `6d25feb` (Fault 6b: the five
 prompt lines that were still ordering the leak, plus the failed-send cooldown and
-the priority-2 downgrade), `e32c4fc` (Fault 6c: the Shabbos renderers, where no
-prompt rule can reach). Clean tree apart from this file. **Not pushed. Not
-deployed. Not merged to `main`.** 209 tests pass via `.venv/bin/python -m pytest -q`
-(system python has no pytest).
+the priority-2 downgrade), `e7e6b91` + this one (Fault 6c: the Shabbos renderers,
+the confirmation preview and every `user_summary` — the surfaces no prompt rule can
+reach). Clean tree apart from this file. **Not pushed. Not deployed. Not merged to
+`main`.** 216 tests pass via `.venv/bin/python -m pytest -q` (system python has no
+pytest).
 
 Just decided, from Ben's own words — "the user doesnt KNOW about ombi… If it
 fails. I need to be notified that there was a real issue":

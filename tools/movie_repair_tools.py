@@ -33,7 +33,7 @@ class MovieRepairTools:
                 "issue": issue,
                 "action": "movie_identity_required",
                 "reason": "movie_repair_requires_title_or_query",
-                "user_summary": "I need the movie title before I can run a Radarr repair.",
+                "user_summary": "I need the movie title before I can run a repair.",
             }
         try:
             existing = await self.ombi.check_existing_media_status(query=lookup_query)
@@ -54,7 +54,7 @@ class MovieRepairTools:
                     tool_family="Movie repair",
                     error=error,
                     title=query,
-                    change_status="Radarr repair did not start; nothing was changed.",
+                    change_status="The repair did not start; nothing was changed.",
                 ),
             }
 
@@ -219,7 +219,7 @@ class MovieRepairTools:
                     "corrective_action_taken": True,
                     "download_in_progress": True,
                     "user_summary": (
-                        f"Radarr already has a download working for {display_title}: "
+                        f"A download is already working for {display_title}: "
                         f"'{release_title}'. It should arrive after that download/import completes."
                     ),
                     "radarr_movie_id": movie_id,
@@ -327,7 +327,7 @@ class MovieRepairTools:
             "corrective_action_taken": True,
             "download_in_progress": True,
             "user_summary": (
-                f"Submitted a Radarr download for {display_title}: '{selected['title']}'. "
+                f"Started a download for {display_title}: '{selected['title']}'. "
                 "It should arrive after that download/import completes."
             ),
             "radarr_movie_id": movie_id,

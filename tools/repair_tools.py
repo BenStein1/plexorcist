@@ -40,7 +40,7 @@ class RepairTools:
                     tool_family="TV show handoff repair",
                     error=error,
                     title=query,
-                    change_status="SickChill add did not start; nothing was changed.",
+                    change_status="The show add did not start; nothing was changed.",
                 ),
             }
 
@@ -224,7 +224,7 @@ class RepairTools:
                     tool_family="TV repair",
                     error=error,
                     title=query,
-                    change_status="SickChill repair did not start; nothing was changed.",
+                    change_status="The repair did not start; nothing was changed.",
                 ),
             }
 
@@ -291,7 +291,7 @@ class RepairTools:
                     tool_family="TV repair",
                     error=error,
                     title=title,
-                    change_status="SickChill repair did not start; nothing was changed.",
+                    change_status="The repair did not start; nothing was changed.",
                 ),
             }
 
@@ -448,7 +448,7 @@ class RepairTools:
                         tool_family="TV repair",
                         error=soft_error,
                         title=title,
-                        change_status="SickChill season repair could not infer episode targets; nothing was changed.",
+                        change_status="The season repair could not work out which episodes to target; nothing was changed.",
                     ),
                 }
             title = str(episode_list.get("show") or title)
@@ -679,11 +679,14 @@ class RepairTools:
             "corrective_action_taken": add_ok,
             "activation_pending": activation_pending,
             "post_add_verification_failed": activation_pending,
+            # Read verbatim by a Shabbos user (render.py prefers user_summary) and
+            # echoed by the model, so it says what changed without naming a system
+            # the user cannot reach. The admin's detail is in the structured fields
+            # above (`sickchill_action`, `sickchill`, `clear_ignored_result`).
             "user_summary": (
-                f"{title} is requested in Ombi, but SickChill did not have the show. "
-                "I submitted the show add to SickChill."
+                f"{title} was requested, but it was never set up to download. I fixed that, so it can start looking."
                 if ok
-                else f"{title} is requested in Ombi, but SickChill did not have the show. The SickChill add failed."
+                else f"{title} was requested, but it was never set up to download, and setting that up failed."
             ),
         }
         if not ok:
