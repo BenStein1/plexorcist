@@ -92,12 +92,12 @@ def render_search_media(result: dict[str, Any]) -> str:
 
 
 def render_check_existing_media_status(result: dict[str, Any]) -> str:
-    failure = _failure(result, f'Nothing found in Ombi for "{result.get("query")}".')
+    failure = _failure(result, f'Nothing found for "{result.get("query")}".')
     if failure:
         return failure
     best = result.get("best_match") if isinstance(result.get("best_match"), dict) else result
     if not best.get("title"):
-        return f'Nothing found in Ombi for "{result.get("query")}".'
+        return f'Nothing found for "{result.get("query")}".'
 
     if result.get("fully_available") or best.get("fully_available"):
         state = "available in Plex"
@@ -117,7 +117,9 @@ def render_check_library_inventory(result: dict[str, Any]) -> str:
 
     lines = [f'Inventory for "{query}":', "", "In Plex (watchable now):"]
     lines += [f"  - {_title_year(m)}" for m in plex_matches] or ["  (nothing)"]
-    lines += ["", "In Ombi (requestable):"]
+    # Users have Plex accounts, so "Plex" is a name they own. The request backend is
+    # not -- they cannot reach it and do not know it exists. Say what they can do.
+    lines += ["", "Not in Plex yet (can be requested):"]
     lines += [f"  - {_title_year(m)} — {_id_token(m)}" for m in ombi_candidates] or ["  (nothing)"]
     return "\n".join(lines)
 
@@ -172,7 +174,7 @@ def _render_request_status(result: dict[str, Any], kind: str) -> str:
     if failure:
         return failure
     if not result.get("exists_in_ombi"):
-        return f'No {kind} request exists in Ombi for "{result.get("query")}".'
+        return f'No {kind} request exists for "{result.get("query")}".'
     status = str(result.get("status") or "unknown")
     return f"{_title_year(result)} — request status: {status}."
 
@@ -213,7 +215,7 @@ def render_check_episode_status(result: dict[str, Any]) -> str:
     if result.get("aired") is False:
         lines.append("  Not aired yet — this is not a missing episode.")
     if result.get("backend_connected") is False:
-        lines.append("  SickChill was unreachable, so its state is unknown.")
+        lines.append("  Its download status could not be checked right now, so this may be out of date.")
     return "\n".join(lines)
 
 

@@ -558,3 +558,34 @@ def test_search_renders_stable_ids_for_both_media_types():
     assert "tmdb:1091" in text
     assert "tvdb:73244" in text
     assert "/request 1" in text
+
+
+# Shabbos Mode is the strictest case of Ben's rule -- there is no model in the loop,
+# so the renderer's string IS the final text the user reads. A prompt rule cannot
+# filter it. These dicts cover the shapes that used to print "In Ombi (requestable)",
+# "Nothing found in Ombi for X" and "SickChill was unreachable".
+RENDER_SHAPES = [
+    {},
+    {"ok": False, "query": "Altered Carbon"},
+    {"found": False, "query": "Altered Carbon"},
+    {"resolved": False, "query": "Altered Carbon"},
+    {"query": "Altered Carbon", "exists_in_ombi": False},
+    {"query": "Altered Carbon", "candidates": [], "plex_matches": [], "ombi_candidates": [], "episodes": []},
+    {"show": "Altered Carbon", "season": 1, "episode": 1, "status": "missing",
+     "present_in_plex": False, "backend_connected": False},
+    {"title": "Altered Carbon", "year": 2018, "type": "show", "tvdb_id": 332331,
+     "status": "unconfirmed", "scope": "first_season"},
+    {"ok": True, "title": "Altered Carbon", "year": 2018, "tvdb_id": 332331, "status": "submitted"},
+]
+
+
+@pytest.mark.parametrize("tool", sorted(render.RENDERERS))
+def test_no_renderer_names_a_backend_service_to_a_user(tool):
+    from tests.test_request_failure_notification import assert_user_safe
+
+    for shape in RENDER_SHAPES:
+        text = render.render(tool, shape)
+        # render() swallows renderer bugs into a safe string; if that fired, this
+        # shape proved nothing and the real output was never checked.
+        assert "could not be displayed" not in text, f"{tool} raised on {shape!r}"
+        assert_user_safe(text)

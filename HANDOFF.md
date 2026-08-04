@@ -683,7 +683,29 @@ Two smaller fixes in the same commit:
 - `_plain_tv_repair_reply()` no longer says "SickChill did not have the show" —
   that reply only ever goes to a non-admin.
 
-Full suite: 194 pass.
+### Fault 6c — Shabbos Mode, where no prompt rule can reach
+
+Shabbos Mode has **no model in the loop**, so a renderer's string *is* the final
+text the user reads. The prompt fix above cannot filter it. Four renderers in
+`backend/shabbos/render.py` printed backend names straight to a non-admin:
+
+- `"In Ombi (requestable):"` → `"Not in Plex yet (can be requested):"`
+- `'Nothing found in Ombi for "X".'` (twice) → `'Nothing found for "X".'`
+- `'No {kind} request exists in Ombi for "X".'` → `'No {kind} request exists for "X".'`
+- `"SickChill was unreachable, so its state is unknown."` →
+  `"Its download status could not be checked right now, so this may be out of date."`
+
+"Plex" stays everywhere — users have Plex accounts and that name is theirs.
+
+`test_no_renderer_names_a_backend_service_to_a_user` in
+`tests/test_shabbos_commands.py` parametrizes over **every** entry in
+`render.RENDERERS` × nine result shapes (empty, each failure flag,
+`backend_connected: false`, `exists_in_ombi: false`, unconfirmed, success) and
+runs the output through `assert_user_safe`. It also fails if `render()` swallowed
+a renderer exception, so a crashing shape cannot pass silently. A new renderer is
+covered the moment it is added to the dict.
+
+Full suite: 209 pass.
 
 ## Session checkpoint (auto: weekly (7-day) usage at 88.0%) — 2026-08-04 10:03 MST
 The weekly (7-day) usage cap is at 88.0% and resets in ~23h 56m. When it hits
@@ -694,8 +716,9 @@ The weekly (7-day) usage cap is at 88.0% and resets in ~23h 56m. When it hits
 failure), `c747c11` (Fault 6: no backend names in user prose, request failures page
 Ben, Shabbos alerts too, self-fix prompt rules) and `6d25feb` (Fault 6b: the five
 prompt lines that were still ordering the leak, plus the failed-send cooldown and
-the priority-2 downgrade). Clean tree apart from this file. **Not pushed. Not
-deployed. Not merged to `main`.** 194 tests pass via `.venv/bin/python -m pytest -q`
+the priority-2 downgrade), `e32c4fc` (Fault 6c: the Shabbos renderers, where no
+prompt rule can reach). Clean tree apart from this file. **Not pushed. Not
+deployed. Not merged to `main`.** 209 tests pass via `.venv/bin/python -m pytest -q`
 (system python has no pytest).
 
 Just decided, from Ben's own words — "the user doesnt KNOW about ombi… If it
@@ -723,14 +746,18 @@ fails. I need to be notified that there was a real issue":
    box settles whether the unprefixed route is TVDB-keyed or a second TMDB alias.
    If it is an alias it will answer with "Cinta 7 Susun" *unflagged*, and that
    hole is still open (see Fault 3).
-3. **Deliberately left alone — tell Ben rather than silently fixing:** Ombi
-   mentions outside the request path. `backend/shabbos/render.py`'s search output
-   ("In Ombi (requestable)", "Nothing found in Ombi for X") and the request-status
-   renderers still name it, and `_fallback_reply_from_tool_calls()` /
-   `_format_tool_error()` name Ombi, Radarr and SickChill on *repair* paths to any
-   user. Same class of leak as Fault 6; not what he reacted to, and the repair
-   fallbacks are also the admin's diagnostics, so splitting them is a real change.
-   (`_plain_tv_repair_reply()` is done — it was non-admin-only, so it was free.)
+3. **Deliberately left alone — tell Ben rather than silently fixing:**
+   `_fallback_reply_from_tool_calls()` / `_format_tool_error()` still name Ombi,
+   Radarr and SickChill on *repair* paths, to any user. Same class of leak as
+   Fault 6, but those two are also the admin's diagnostics, so role-splitting them
+   is a real change rather than a rewording. (`_plain_tv_repair_reply()` and the
+   Shabbos renderers are done — see Faults 6b/6c.)
+4. **Ben's call, one line of judgement:** priority -2 on `missing_show_identifier`
+   collapses two cases — the model resolving the id and retrying successfully
+   (noise, correctly silenced) and the model *failing* to resolve it (a real
+   failure he asked to hear about, now a quiet log entry). They are not
+   distinguishable at tool-result level, so this was a deliberate trade, not an
+   oversight. Raise it back to 0 if he would rather have the false buzzes.
 
 AUTO-RESUME ARMED: overlord-resume-autoresume-6b26f9ed.timer (fires ~5 min after the weekly (7-day) cap resets,
 continues the work in /home/ben/Projects/plexorcist from this handoff).
