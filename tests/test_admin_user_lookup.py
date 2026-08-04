@@ -122,6 +122,21 @@ async def test_ambiguous_ledger_only_match_says_so_instead_of_pick_one(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_a_lone_ledger_only_near_match_reads_as_a_sentence(tmp_path):
+    """One candidate is the case the plural wordings don't cover. "They have
+    ever logged in" is not English and inverts the meaning, so pin the actual
+    sentence rather than a fragment that both spellings would satisfy."""
+    store = _store(tmp_path)
+    tools = _tools(tmp_path, store, names={"qq_a": "Mikeston Reed"})
+
+    result = tools._resolve_user_query("Mikeston Vance")  # noqa: SLF001
+
+    assert result["reason"] == "user_not_found"
+    assert "They have never logged into Plexorcist" in result["user_summary"]
+    assert "Which one?" not in result["user_summary"]
+
+
+@pytest.mark.asyncio
 async def test_multi_word_query_does_not_queue_a_message(tmp_path):
     """The failure that actually costs something: a resolve that guesses wrong
     (or stamps a synthetic key as the user_id) writes a note against an id that

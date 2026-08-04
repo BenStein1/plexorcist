@@ -776,8 +776,9 @@ class AdminTools:
         """
         if not require_account or any(item.get("has_account") for item in shown):
             return "Which one?"
-        subject = {1: "They have", 2: "Neither has"}.get(len(shown), "None of them have")
-        return f"{subject} ever logged into Plexorcist, so there's no account to send this to."
+        # "Neither" and "none" carry the negation themselves; the singular does not.
+        subject = {1: "They have never", 2: "Neither has ever", }.get(len(shown), "None of them have ever")
+        return f"{subject} logged into Plexorcist, so there's no account to send this to."
 
     def _resolve_user_query(self, user_query: str, *, require_account: bool = True) -> dict[str, Any]:
         """Resolve a loose human reference to one person.
