@@ -27,7 +27,9 @@ import pytest
 
 from backend.auth_context import FriendlyNameDirectory
 from backend.auth_store import PlexAuthSessionStore
-from backend.models import PlexAuthSession
+from backend.config import Settings
+from backend.main import build_agent
+from backend.models import PlexAuthSession, UserContext
 from backend.state import ConversationStore
 from tools.admin_tools import AdminTools
 
@@ -254,3 +256,25 @@ async def test_find_users_says_so_when_nothing_matches(tmp_path):
     assert result["ok"] is True
     assert result["users"] == []
     assert result["user_summary"] == "Nobody on file matches Bartholomew."
+
+
+def test_admin_prompt_tells_the_model_to_browse_after_a_failed_lookup(tmp_path):
+    """A working backend the model never calls is the same bug from Ben's side.
+    Both halves of his transcript were tool-SELECTION failures: nothing told the
+    model to widen a not-found lookup, and nothing told it that "look at the
+    friendly names for Mike" is a tool call rather than something to answer from
+    memory -- which is exactly what it did ("I poked the name ledger")."""
+    settings = Settings(database_url=f"sqlite:///{tmp_path}/prompt.db", admin_display_name="Ben")
+    admin = UserContext(user_id="admin-id", username="ben", display_name="Ben", is_admin=True)
+
+    agent, *_ = build_agent(settings, admin)
+    prompt = agent._build_instructions(admin)  # noqa: SLF001
+
+    assert "find_users" in prompt
+    assert "not-found or ambiguous" in prompt
+    # The second half of the transcript: a "who do I have on file" question is a
+    # tool call, never an answer from prior chat prose.
+    assert "names or friendly names you have on file" in prompt
+    # And the model is told what a ledger-only person means, so it reports
+    # "no account yet" instead of "no such user".
+    assert "[no account yet]" in prompt
