@@ -5,6 +5,15 @@ from clients.base import BaseHttpClient
 
 
 class OmbiClient(BaseHttpClient):
+    # Marks a get_tv_detail payload that came back from the TheMovieDb-keyed endpoint
+    # while we were holding a TheTVDB id, i.e. a different show entirely.
+    DETAIL_NAMESPACE_MISMATCH = "_id_namespace_mismatch"
+
+    # Ombi states that mean "the request exists and has not been refused".
+    REQUEST_LANDED_STATES = frozenset(
+        {"requested", "approved", "available", "fully_available", "partly_available"}
+    )
+
     async def find_user_by_identity(self, username: str, user_id: str | None = None) -> dict:
         normalized_username = self._normalize_text(username or "")
         normalized_user_id = str(user_id or "").strip().lower()
@@ -171,16 +180,24 @@ class OmbiClient(BaseHttpClient):
                 "title": detail.get("title"),
                 "ombi_detail": detail,
             }
-        return self._normalize_request_engine_result(
+        context: dict[str, object] = {
+            "username": username,
+            "tmdb_id": tmdb_id,
+            "title": detail.get("title"),
+            "ombi_detail": detail,
+        }
+        normalized = self._normalize_request_engine_result(
             result=result,
             success_status="requested",
-            error_context={
-                "username": username,
-                "tmdb_id": tmdb_id,
-                "title": detail.get("title"),
-                "ombi_detail": detail,
-            },
+            error_context=context,
         )
+        if normalized.get("status") == "unconfirmed":
+            reconciled = await self._reconcile_movie_request_failure(
+                query=detail.get("title") or str(tmdb_id),
+            )
+            if reconciled is not None:
+                return self._merge_request_context(reconciled, context)
+        return normalized
 
     async def _resolve_movie_tmdb_id_by_title_year(self, title: str, year: int) -> dict:
         query = f"{title} ({year})"
@@ -241,7 +258,7 @@ class OmbiClient(BaseHttpClient):
         if not safe_tvdb_id or safe_tvdb_id <= 0:
             return self._missing_show_identifier(username=username, tvdb_id=tvdb_id, scope=scope)
         tvdb_id = safe_tvdb_id
-        detail = await self.get_tv_detail(tvdb_id)
+        detail, unverified_title = self._split_detail_namespace(await self.get_tv_detail(tvdb_id))
         if scope == "full_series":
             gate = self._gate_request(detail, tv_scope=scope)
             if gate is not None:
@@ -255,6 +272,20 @@ class OmbiClient(BaseHttpClient):
                     "ombi": detail,
                 }
         payload = self._build_tv_request_payload(detail, tvdb_id=tvdb_id, scope=scope)
+        context: dict[str, object] = {
+            "username": username,
+            "tvdb_id": tvdb_id,
+            "scope": scope,
+            "title": detail.get("title"),
+            "ombi_detail": detail,
+            "request_payload": payload,
+        }
+        if unverified_title:
+            # Ombi could not resolve this TVDB id and only answered from the TMDB id
+            # space. Surfaced so the agent can say the id looks wrong instead of
+            # confidently naming an unrelated show.
+            context["unresolved_tvdb_id"] = True
+            context["unverified_title"] = unverified_title
         try:
             result = await self.post_json(
                 "/api/v1/Request/tv",
@@ -262,55 +293,30 @@ class OmbiClient(BaseHttpClient):
                 headers=self._user_headers(username),
             )
         except httpx.HTTPError as exc:
-            reconciled = await self._reconcile_show_request_failure(query=detail.get("title") or str(tvdb_id))
+            reconciled = await self._reconcile_show_request_failure(
+                query=detail.get("title") or str(tvdb_id),
+                tvdb_id=tvdb_id,
+            )
             if reconciled is not None:
-                reconciled.update(
-                    {
-                        "username": username,
-                        "tvdb_id": tvdb_id,
-                        "scope": scope,
-                        "title": detail.get("title"),
-                        "ombi_detail": detail,
-                        "request_payload": payload,
-                    }
-                )
-                return reconciled
+                return self._merge_request_context(reconciled, context)
             return {
                 "ok": False,
-                "username": username,
-                "tvdb_id": tvdb_id,
-                "scope": scope,
                 "status": "error",
                 "error": self._describe_http_error(exc),
-                "title": detail.get("title"),
-                "ombi_detail": detail,
-                "request_payload": payload,
+                **context,
             }
         normalized = self._normalize_request_engine_result(
             result=result,
             success_status="requested",
-            error_context={
-                "username": username,
-                "tvdb_id": tvdb_id,
-                "scope": scope,
-                "title": detail.get("title"),
-                "ombi_detail": detail,
-                "request_payload": payload,
-            },
+            error_context=context,
         )
         if not normalized.get("ok"):
-            reconciled = await self._reconcile_show_request_failure(query=detail.get("title") or str(tvdb_id))
+            reconciled = await self._reconcile_show_request_failure(
+                query=detail.get("title") or str(tvdb_id),
+                tvdb_id=tvdb_id,
+            )
             if reconciled is not None:
-                reconciled.update(
-                    {
-                        "username": username,
-                        "tvdb_id": tvdb_id,
-                        "scope": scope,
-                        "title": detail.get("title"),
-                        "ombi_detail": detail,
-                        "request_payload": payload,
-                    }
-                )
+                reconciled = self._merge_request_context(reconciled, context)
                 return reconciled
         return normalized
 
@@ -325,7 +331,7 @@ class OmbiClient(BaseHttpClient):
                 episode=episode,
             )
         tvdb_id = safe_tvdb_id
-        detail = await self.get_tv_detail(tvdb_id)
+        detail, _unverified_title = self._split_detail_namespace(await self.get_tv_detail(tvdb_id))
         episode_state = self._find_episode(detail, season, episode)
         if episode_state is not None:
             gate = self._gate_episode_request(episode_state)
@@ -404,7 +410,12 @@ class OmbiClient(BaseHttpClient):
             "raw": match,
         }
 
-    async def check_show_request_status(self, query: str, username: str | None = None) -> dict:
+    async def check_show_request_status(
+        self,
+        query: str,
+        username: str | None = None,
+        tvdb_id: int | None = None,
+    ) -> dict:
         try:
             search = await self.search_media(query)
         except httpx.HTTPError as exc:
@@ -416,7 +427,17 @@ class OmbiClient(BaseHttpClient):
                 "error": str(exc),
             }
         shows = [item for item in search.get("results", []) if item.get("type") == "show"]
-        match = shows[0] if shows else {}
+        match = {}
+        matched_by = None
+        if tvdb_id:
+            match = next(
+                (show for show in shows if self._safe_int(show.get("tvdb_id")) == tvdb_id),
+                {},
+            )
+            matched_by = "tvdb_id" if match else None
+        if not match and shows:
+            match = shows[0]
+            matched_by = "title_rank"
         detail = {}
         if match.get("tvdb_id"):
             try:
@@ -436,6 +457,8 @@ class OmbiClient(BaseHttpClient):
             "attempted_queries": search.get("attempted_queries") or [query],
             "username": username,
             "exists_in_ombi": bool(match),
+            "matched_by": matched_by,
+            "requested_tvdb_id": tvdb_id,
             "status": self._extract_request_status(detail or match.get("raw") or {}),
             "tvdb_id": match.get("tvdb_id"),
             "title": detail.get("title") or match.get("title") or query.title(),
@@ -518,11 +541,38 @@ class OmbiClient(BaseHttpClient):
         return payload if isinstance(payload, dict) else {}
 
     async def get_tv_detail(self, tvdb_id: int) -> dict:
-        payload = await self.get_json(f"/api/v2/Search/tv/moviedb/{tvdb_id}")
+        # Every caller here holds a TVDB id (it is what POST /api/v1/Request/tv wants).
+        # /api/v2/Search/tv/moviedb/{id} is explicitly TheMovieDb-keyed, so handing it a
+        # TVDB id resolves to whatever unrelated show owns that number on TMDB -- 53243
+        # came back as "Cinta 7 Susun". Ask the unprefixed route first and treat a
+        # moviedb answer as untrustworthy.
+        #
+        # Measured on prod 2026-08-04: BOTH routes answered 204 for 332331 (a TVDB id
+        # that POST /api/v1/Request/tv accepts and resolves to Altered Carbon), so this
+        # usually returns {} and the pre-flight gate simply does not fire. Ombi enforces
+        # already-requested / already-available itself on the POST, which is what the
+        # errorCode handling below is for. Unverified: whether the unprefixed route is
+        # TVDB-keyed at all, or a second TMDB-keyed alias -- settle it by curling
+        # /api/v2/Search/tv/53243 on the box and seeing whether it also says
+        # "Cinta 7 Susun".
+        payload = await self.get_json(f"/api/v2/Search/tv/{tvdb_id}")
         if isinstance(payload, dict) and payload:
             return payload
-        fallback = await self.get_json(f"/api/v2/Search/tv/{tvdb_id}")
-        return fallback if isinstance(fallback, dict) else {}
+        fallback = await self.get_json(f"/api/v2/Search/tv/moviedb/{tvdb_id}")
+        if isinstance(fallback, dict) and fallback:
+            # Answered from the wrong id namespace, so its title, flags and episode
+            # list describe some other show. Flagged so callers drop it instead of
+            # gating on it or naming it to the user.
+            return {**fallback, self.DETAIL_NAMESPACE_MISMATCH: True}
+        return {}
+
+    def _split_detail_namespace(self, detail: dict) -> tuple[dict, str | None]:
+        """Return (usable detail, title we could not trust) for a get_tv_detail result."""
+        if not isinstance(detail, dict):
+            return {}, None
+        if not detail.pop(self.DETAIL_NAMESPACE_MISMATCH, False):
+            return detail, None
+        return {}, detail.get("title") or None
 
     async def get_tv_request_detail(self, tvdb_id: int | None = None, title: str | None = None) -> dict:
         payload = await self.get_json("/api/v1/Request/tv")
@@ -797,12 +847,53 @@ class OmbiClient(BaseHttpClient):
             }
         return None
 
-    async def _reconcile_show_request_failure(self, query: str) -> dict[str, object] | None:
-        status = await self.check_show_request_status(query=query)
+    async def _reconcile_show_request_failure(
+        self,
+        query: str,
+        tvdb_id: int | None = None,
+    ) -> dict[str, object] | None:
+        # Ombi's own request list is the authoritative "did a request get created for
+        # this id". The search index is not: it is title-ranked, so it used to hand
+        # back whatever show sorted first and answer a question about Altered Carbon
+        # with Cinta 7 Susun.
+        if tvdb_id:
+            try:
+                record = await self.get_tv_request_detail(tvdb_id=tvdb_id)
+            except httpx.HTTPError:
+                record = {}
+            if record:
+                title = record.get("title") or query
+                request_state = self._extract_tv_request_record_status(record)
+                if request_state == "denied":
+                    return {
+                        "ok": False,
+                        "status": "denied",
+                        "title": title,
+                        "tvdb_id": tvdb_id,
+                        "ombi": record,
+                        "request_reconciled": True,
+                        "reconciled_by": "tvdb_id",
+                        "user_summary": f"{title} is in Ombi, but the request was denied.",
+                    }
+                return {
+                    "ok": True,
+                    "status": request_state,
+                    "title": title,
+                    "tvdb_id": tvdb_id,
+                    "ombi": record,
+                    "request_reconciled": True,
+                    "reconciled_by": "tvdb_id",
+                    "user_summary": f"{title} is requested in Ombi.",
+                }
+
+        status = await self.check_show_request_status(query=query, tvdb_id=tvdb_id)
         request_state = status.get("status")
         if not status.get("exists_in_ombi"):
             return None
-        if request_state in {"requested", "approved", "available", "fully_available", "partly_available"}:
+        # Never let a title-ranked hit vouch for an id we did not ask about.
+        if tvdb_id and self._safe_int(status.get("tvdb_id")) != tvdb_id:
+            return None
+        if request_state in self.REQUEST_LANDED_STATES:
             title = status.get("title") or query
             return {
                 "ok": True,
@@ -811,9 +902,68 @@ class OmbiClient(BaseHttpClient):
                 "tvdb_id": status.get("tvdb_id"),
                 "ombi": status.get("raw") or {},
                 "request_reconciled": True,
+                "reconciled_by": "title_search",
                 "user_summary": f"{title} is now requested in Ombi.",
             }
         return None
+
+    def _merge_request_context(
+        self,
+        reconciled: dict[str, object],
+        context: dict[str, object],
+    ) -> dict[str, object]:
+        """Attach request context to a reconciled result without clobbering its findings.
+
+        A reconciled record came from Ombi's own request list, so its title is the real
+        one; context["title"] is whatever the (often empty) search detail knew, and
+        blindly assigning it used to blank out a title we had just confirmed.
+        """
+        merged = dict(reconciled)
+        for key, value in context.items():
+            if key in {"title", "tvdb_id"} and merged.get(key):
+                continue
+            merged[key] = value
+        return merged
+
+    def _extract_tv_request_record_status(self, record: dict) -> str:
+        """Status of a /api/v1/Request/tv record.
+
+        Unlike a search hit, presence in that list already means the request exists,
+        so the floor here is "requested" rather than "missing". Availability and
+        approval live on the child requests, not the parent.
+        """
+        children = [child for child in (record.get("childRequests") or []) if isinstance(child, dict)]
+        scopes = children or [record]
+        if any(scope.get("denied") for scope in scopes):
+            return "denied"
+        if record.get("fullyAvailable"):
+            return "fully_available"
+        if record.get("partlyAvailable"):
+            return "partly_available"
+        if record.get("available") or any(scope.get("available") for scope in scopes):
+            return "available"
+        if any(scope.get("approved") for scope in scopes):
+            return "approved"
+        return "requested"
+
+    def _request_subject(self, context: dict[str, object]) -> str:
+        """`" for <thing>"` when we can name the request honestly, else `""`.
+
+        `title` comes from get_tv_detail(), which returns {} for most TVDB ids (both
+        v2 search routes answer 204), so it is commonly absent here. Falling back to
+        the raw id keeps the sentence specific; "Unknown title" or "that" reads like
+        a second bug on top of the one being reported.
+        """
+        title = str(context.get("title") or "").strip()
+        if title:
+            return f" for {title}"
+        tvdb_id = self._safe_int(context.get("tvdb_id"))
+        if tvdb_id and tvdb_id > 0:
+            return f" for TVDB {tvdb_id}"
+        tmdb_id = self._safe_int(context.get("tmdb_id"))
+        if tmdb_id and tmdb_id > 0:
+            return f" for TMDB {tmdb_id}"
+        return ""
 
     def _normalize_request_engine_result(
         self,
@@ -822,9 +972,11 @@ class OmbiClient(BaseHttpClient):
         error_context: dict[str, object],
     ) -> dict[str, object]:
         payload = result if isinstance(result, dict) else {}
-        if payload.get("isError") or payload.get("result") is False:
-            error_code = payload.get("errorCode")
-            error_message = payload.get("errorMessage") or payload.get("message") or ""
+        error_code = payload.get("errorCode")
+        error_message = str(payload.get("errorMessage") or payload.get("message") or "")
+        # Ombi's RequestEngineResult derives isError from ErrorMessage being non-empty,
+        # so a genuine failure always carries one of these three.
+        if payload.get("isError") or error_message.strip() or error_code:
             status = self._map_request_error_status(error_code=error_code, error_message=error_message)
             return {
                 "ok": status in {"already_requested", "already_available"},
@@ -835,6 +987,23 @@ class OmbiClient(BaseHttpClient):
                 },
                 "ombi": payload,
                 **error_context,
+            }
+        if payload.get("result") is False:
+            # Observed in production: {"result": false, "isError": false,
+            # "errorMessage": null, "requestId": 332331} for a request that DID land --
+            # SickChill built the show seconds later. `result` on its own is not a
+            # verdict, and this used to be reported to the user as "nothing was added".
+            # Say so honestly and let the caller confirm against Ombi's request list.
+            return {
+                "ok": False,
+                "status": "unconfirmed",
+                "ombi": payload,
+                **error_context,
+                "user_summary": (
+                    f"Ombi did not confirm the request{self._request_subject(error_context)}, and I "
+                    "could not find it in Ombi's request list. It may still have gone through, so "
+                    "check Ombi before requesting it again."
+                ),
             }
         return {"ok": True, "status": success_status, "ombi": payload, **error_context}
 
@@ -855,7 +1024,18 @@ class OmbiClient(BaseHttpClient):
             return []
 
         if scope == "first_season":
-            target = min((self._safe_int(season.get("seasonNumber")) for season in seasons if self._safe_int(season.get("seasonNumber")) is not None), default=None)
+            numbers = [
+                number
+                for number in (self._safe_int(season.get("seasonNumber")) for season in seasons)
+                if number is not None
+            ]
+            # Season 0 is specials, and "just the first season" means season 1, so the
+            # bare numeric minimum is the wrong pick. Latent guard only: in production
+            # `seasons` has always been empty here (Ombi's v2 search returns
+            # `seasonRequests: []`), so the payload carries `firstSeason: true` with
+            # `seasons: []` and Ombi picks the season itself.
+            regular = [number for number in numbers if number > 0]
+            target = min(regular) if regular else min(numbers, default=None)
             seasons = [season for season in seasons if self._safe_int(season.get("seasonNumber")) == target]
         elif scope == "latest_season":
             target = max((self._safe_int(season.get("seasonNumber")) for season in seasons if self._safe_int(season.get("seasonNumber")) is not None), default=None)

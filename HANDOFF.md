@@ -411,3 +411,187 @@ ALSO LOGGED THIS TURN (not started, Ben said "as a todo"): SickChill never
 finishes adding a show — Neuromancer added days ago is still a "Loading..."
 placeholder row, as is "Stuart Fails to Save the Universe". Written up in
 ~/Projects/overlord-bridge/OVERLORD_BACKLOG.md.
+
+## Session checkpoint (auto: session (5-hour) usage at 87.0%) — 2026-08-03 19:44 MST
+The session (5-hour) usage cap is at 87.0% and resets in ~3h 45m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+RESOLVED — SickChill work is COMPLETE as of 2026-08-04. Nothing is in flight.
+Plexorcist admin-message work was already done/committed (2238b44, 0b07bd2).
+
+All SickChill fixes are live on **sickchill-ub / 10.0.0.94**, daemon restarted
+and verified, net_ssh session closed (that clearance is spent — ask Ben before
+reconnecting). Five faults fixed, fully written up ON THAT BOX at
+`/opt/sickchill/lib/python3.10/site-packages/sickchill/show/indexers/PATCHES-20260803.md`
+— read that file first if this comes back:
+  1. TheTVDB retired `/search/series?name=` (404 for everything) -> slug lookup.
+  2. `tvdbsimple` sent every request with no timeout; one dead socket wedged the
+     whole show queue since 2026-07-28 -> `_TimeoutRequests` shim.
+  3. `sb.searchindexers` returned HTTP 500 on zero matches -> dedented return.
+  4. Fuzzy title search restored via TVmaze (name->tvdb id only; all data still
+     from TheTVDB), and null-`seriesName` rows filtered out.
+  5. SickChill's `[. -_]` separator class is a RANGE (0x20-0x5F) that ate every
+     capital and digit, so "Bear" searched as "ear" -> fixed to `[.\- _]`, and
+     `set()` swapped for `dict.fromkeys()` so variant order is deterministic.
+
+Verified live: "Bear" -> The Bear (403294) top of 8 real rows, no null row;
+junk title -> 0 rows / HTTP 200; exact checkbox still strict. Both originally
+stuck shows exist with 10 episodes each (435047, 465664), 840 shows total.
+
+ONLY OPEN RISK: `auto_update = 1` on that box will silently revert every patch
+on a SickChill upgrade. Symptoms: adds stop finding titles, partial titles stop
+matching, `null` rows return, or the show queue goes quiet. Re-apply from the
+PATCHES file. Known-not-fixed: `^t?t?\d{7,8}$` is tested before `^\d{6}$`, so a
+7-digit *TVDB* id is misrouted to the imdbId branch.
+
+AUTO-RESUME ARMED: overlord-resume-autoresume-d9f484f5.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-d9f484f5.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## Session checkpoint (auto: session (5-hour) usage at 91.0%) — 2026-08-03 19:46 MST
+The session (5-hour) usage cap is at 91.0% and resets in ~3h 43m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+<!-- TODO: model should replace this line with what's actually in flight, -->
+<!-- what was just decided, and the concrete next step, before continuing. -->
+AUTO-RESUME ARMED: overlord-resume-autoresume-6c0eac99.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-6c0eac99.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+---
+
+## 2026-08-04 — SickChill: DONE & VERIFIED. Ombi->Plexorcist: two new bugs found.
+
+### SickChill (10.0.0.94) — COMPLETE, verified in Ben's real workflow
+
+Seven faults found and fixed across two rounds; full technical write-up lives on
+that box at
+`/opt/sickchill/lib/python3.10/site-packages/sickchill/show/indexers/PATCHES-20260803.md`
+(251 lines). Summary of round 2:
+
+- Fuzzy/partial title search restored via TVmaze name->id bridge (TheTVDB
+  retired `?name=`; slugs are exact-only). "altered carb" -> Altered Carbon works.
+- `search()` no longer breaks on a slug hit — slug + fuzzy results are merged and
+  deduped, so "Altered" returns both *Altered* (425966) and *Altered Carbon*
+  (332331).
+- Dropped TVDB records with a null `seriesName` (the unpickable `null` row).
+- Fixed `[. -_]` — that is a character RANGE 0x2E-0x5F, so searching "Bear" was
+  literally searching "ear".
+
+**The Ombi question is answered: it was never a separate bug.** Ombi adds by TVDB
+id, which goes `show.addnew?tvdbid=N -> CMDSickChillSearchIndexers (id branch) ->
+get_series_by_id -> /series/{id}` and never touches the broken title search.
+`add_show()` is fire-and-forget, so `addnew` returned SUCCESS the instant the item
+was queued — Ombi reported "added" and moved on, then the serialized show queue,
+wedged on a timeout-less TVDB socket, never built the record. Ben confirmed
+Neuromancer and Stuart were both added through Ombi. Same root cause as the manual
+"Loading..." symptom, one fix.
+
+Verified live 2026-08-04: `SHOWQUEUE-ADD` started 01:11:07, episodes set 01:11:11,
+backlog auto-started 01:11:17. Final record matches TheTVDB exactly — S0:2, S1:10,
+S2:8, total 20. First attempt, no intervention.
+
+**Standing trap:** `auto_update = 1` silently reverts every SickChill patch on
+upgrade. If adds hang again or titles stop matching, check that first.
+
+### FIXED — Plexorcist reported a working Ombi request as a failure
+
+Branch `ombi-false-failure-fix`. Committed locally, **not deployed** (see the
+deploy note above — commits are not live until the deploy script runs on jail 5).
+
+Ben's Concierge transcript, adding Altered Carbon:
+
+> "the request came back grumpy and didn't go through. Nothing was added."
+> then, on full series: "Ombi threw a 500 and nothing was added. Also: the backend
+> came back with a weird mismatch and seems to have looked at **Cinta 7 Susun**
+> instead of Altered Carbon."
+
+Both claims were false. The request **worked**. Evidence from Ombi's own log on
+the prod box: `POST /api/v1/Request/tv` answered
+
+```json
+{"result": false, "isError": false, "errorMessage": null, "requestId": 332331}
+```
+
+and SickChill built the show seconds later (`SHOWQUEUE-ADD` 01:11:07, 20/20
+episodes by 01:11:17). So `result: false` with no error attached is **not** a
+failure signal — Ombi's `RequestEngineResult` derives `isError` from
+`ErrorMessage` being non-empty, and there was no error message.
+
+**Fault 1 — `result: false` treated as failure unconditionally.** THE user-visible
+bug. `_normalize_request_engine_result()` had
+`if payload.get("isError") or payload.get("result") is False:` and mapped the
+result through `_map_request_error_status()`, landing on `"error"`. Now an error
+requires one of `isError` / a non-empty `errorMessage` / an `errorCode`. A bare
+`result: false` becomes status `"unconfirmed"`, which triggers reconciliation
+instead of an assertion that nothing happened.
+
+**Fault 2 — reconcile matched by title search, not by the id requested.**
+`_reconcile_show_request_failure()` called `check_show_request_status(query=title)`
+which took `shows[0]` — the first ranked title hit — and never compared it to the
+requested `tvdb_id`. That is the "Cinta 7 Susun" goblin, and it could equally have
+produced a false *success*. Now it reads Ombi's authoritative request list
+(`get_tv_request_detail(tvdb_id=...)` -> `/api/v1/Request/tv`, matched on
+`tvDbId`), and a title-search hit is only accepted when its id matches.
+
+Note the earlier plan of "reconcile via `get_tv_detail(tvdb_id)`" would NOT have
+worked: that endpoint returns HTTP 204 for Altered Carbon, i.e. `{}` -> status
+`missing` -> still reported as a failure. The request *list* is the right source.
+
+State on a `/api/v1/Request/tv` record lives on `childRequests[]`, not the parent,
+so `_extract_tv_request_record_status()` reads it there; presence in that list
+already means "requested", so the floor is `requested`, not `missing`.
+
+**Fault 3 — `get_tv_detail()` resolved TVDB ids through a TMDB-keyed endpoint.**
+It tried `/api/v2/Search/tv/moviedb/{id}` first — explicitly TheMovieDb-keyed —
+before falling back to `/api/v2/Search/tv/{id}`. Feeding a TVDB id to the moviedb
+route resolves to whatever unrelated show owns that number on TMDB; 53243 came
+back as "Cinta 7 Susun", complete with `available`/`requested` flags for a show
+nobody asked about. Order is now unprefixed-first; a moviedb answer is tagged
+`_id_namespace_mismatch`, dropped by `_split_detail_namespace()`, and surfaced as
+`unresolved_tvdb_id` + `unverified_title`, so it can no longer gate a request or
+be named to the user as though it were the show requested.
+
+Scope of that claim, measured on prod: **both** routes answered `204` for 332331,
+a TVDB id `POST /api/v1/Request/tv` happily resolves to Altered Carbon. So
+`get_tv_detail()` mostly returns `{}` on this path (the production `ombi_detail`
+was `{}` and `title` was `null`), the pre-flight gate does not fire, and Ombi
+enforces already-requested / already-available itself on the POST. **Unverified:**
+whether `/api/v2/Search/tv/{id}` is TVDB-keyed at all or just a second TMDB-keyed
+alias. If it is an alias, it will answer `53243` with "Cinta 7 Susun" *unflagged*
+and that hole is still open. One curl on the box settles it:
+`/api/v2/Search/tv/53243`.
+
+Also worth recording, because it changes what this fault explains: in the
+"Cinta 7 Susun" turn the agent called
+`request_show_scope_for_user(tvdb_id=53243, scope="full_series")` with **no search
+call in that turn at all** — it supplied the wrong id itself. (Same shape as
+JBrahs' `tvdb_id: 0` → 500 `Value cannot be null. (Parameter 'source')`; that one
+is now blocked by the `safe_tvdb_id <= 0` guard.) The client-side fixes stop
+Plexorcist from *vouching* for a bogus id; they don't stop the agent producing one.
+
+**Fault 4 — `first_season` could pick the specials.** `min(seasonNumber)` is
+season 0 whenever specials exist, so it now skips season 0 unless that is
+genuinely all there is. **Latent only — this never fired in production.**
+`_build_request_seasons()` returns `[]` before reaching that branch whenever
+`seasonRequests` is empty, which is every observed case; the real payload was
+`firstSeason: true, seasons: []` and Ombi chose the season server-side. The two
+tests for it hand-feed `seasonRequests`, a shape this path has not been seen to
+produce. Keep the guard, don't credit it with a fix.
+
+**Fault 5 — reconciled results had their title overwritten.** The old
+`reconciled.update({... "title": detail.get("title") ...})` clobbered a title we
+had just confirmed from Ombi with the (usually empty) search detail's `None`.
+`_merge_request_context()` keeps the confirmed value.
+
+**DISPROVED — the `episodes or None` NRE theory.** Earlier notes blamed
+`{"episodes": episodes or None}` serializing as JSON `null` and NRE-ing Ombi's C#.
+It does not hold: `/api/v2/Search/tv/moviedb/{id}` returns `seasonRequests: []`
+even for known shows, so `seasons` is always `[]` and no season object is ever
+emitted. That line is untouched — do not re-chase it. The 500 on the full-series
+retry remains an Ombi-side fault; the fix here is that Plexorcist now reconciles
+before declaring failure rather than guessing at the payload.
+
+**Tests:** `tests/test_ombi_request_results.py`, 16 cases, all fixtures shaped like
+real Ombi responses — including the verbatim production payload above asserting
+`ok is True`. There were previously zero tests over this path. Full suite: 173 pass.
