@@ -277,3 +277,40 @@ AUTO-RESUME ARMED: overlord-resume-autoresume-8e6a6ee2.timer (fires ~5 min after
 continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-8e6a6ee2.timer
 If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## 2026-08-03 — Admin user lookup can only see people who have LOGGED IN (root cause found, fix in progress)
+
+Ben: "send an admin message to Mike Young" -> "I couldn't find a user matching
+Mike Young." Then "take a look at the friendly names for Mike" -> also empty.
+
+ROOT CAUSE (measured against the prod DB, read-only copy):
+`AdminTools._load_user_labels()` (tools/admin_tools.py:610) builds the ENTIRE
+user universe from `plex_auth_sessions` alone — i.e. only people who have
+actually logged into Plexorcist. Prod has **15 distinct users** there. But
+`friendlynames.json` has **63 people**, including `mwco8` -> "Mike" and
+`Baldguy` -> "Mike and Nicole". Zero mike/young rows exist in
+plex_auth_sessions. So Mike is invisible to every admin lookup even though Ben
+has a friendly name on file for him. This is not a matching bug — 48 of Ben's
+63 known people cannot be found at all.
+
+SECOND, SMALLER BUG: `_resolve_user_query()` (line 645) matches exact-equal,
+then plain substring `query in value`. "Mike Young" as one substring can never
+match a value of "Mike". Needs token matching.
+
+THE FIX:
+1. `_load_user_labels()` — union of plex_auth_sessions AND the friendly-names
+   ledger (keyed by username, case-insensitive). Ledger-only people get no
+   user_id and a `has_account: False` marker.
+2. `_resolve_user_query()` — add a token pass (all query tokens found across the
+   candidate's values), and when the single match has `has_account: False`,
+   return reason `user_not_registered` with a summary that SAYS SO
+   ("Mike (mwco8) is in your friendly-names list but has never logged into
+   Plexorcist, so there's no account to attach a message to") instead of the
+   misleading "I could not find a user matching Mike Young."
+3. Tests for both.
+
+NOTE: send_admin_message writes user_memory_notes keyed by user_id, so a
+ledger-only person genuinely cannot receive a stored message yet — the win is
+an honest, actionable answer instead of a false "no such user."
+
+Prod DB was READ ONLY (copied to a scratch file). Do not write to it.
