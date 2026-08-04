@@ -33,7 +33,14 @@ from backend.shabbos.commands import COMMANDS, COMMANDS_BY_NAME, LAST_SEARCH_KEY
 from backend.shabbos.confirm import consume, mint
 from backend.shabbos.parser import UsageError, is_command, parse
 from backend.state import ConversationStore
-from tools.admin_alerts import REQUEST_TOOL_NAMES, alert_media_id, build_request_alert
+from tools.admin_alerts import (
+    REQUEST_TOOL_NAMES,
+    alert_media_id,
+    build_command_failure_alert,
+    build_request_alert,
+    clear_admin_alert_cooldown,
+    should_send_admin_alert,
+)
 from tools.catalog import build_toolkit, get_spec, visible_specs
 from tools.error_helpers import classify_http_error, user_error_summary
 
@@ -209,19 +216,51 @@ class ShabbosRouter:
                 ):
                     text = f"{text}\nThe admin has been notified."
             else:
+                # /fix, /status, /search, /seasons, /episode. The user is no longer told
+                # which service broke -- they cannot reach it -- so this alert is the only
+                # remaining signal that it broke at all.
                 text = user_error_summary(
                     tool_family=command.capitalize(),
                     error=error,
                     title=invocation.target or "that",
                     change_status="Nothing was changed.",
                 )
+                if await self._send_admin_alert(
+                    build_command_failure_alert(
+                        user_label=self._user_label(),
+                        command=command,
+                        tool=tool,
+                        # note_text first: on the /confirm path `target` is the whole
+                        # preview sentence, while the note is the admin-facing task text.
+                        target=invocation.note_text or invocation.target,
+                        error=error,
+                    )
+                ):
+                    text = f"{text}\nThe admin has been notified."
             self._audit(command, ok=False, target=invocation.target, note="service_unavailable")
             self._write_note(invocation, ok=False, summary=text)
             return text
-        except Exception:  # noqa: BLE001 - never leak a traceback to the user
+        except Exception as exc:  # noqa: BLE001 - never leak a traceback to the user
             logger.exception("Shabbos handler failed for tool %s", tool)
             self._audit(command, ok=False, target=invocation.target, note="handler_error")
-            return "That didn't work, and nothing was changed. No language model was used."
+            text = "That didn't work, and nothing was changed. No language model was used."
+            # A crash in our own code, not an upstream outage: the user's reply says
+            # nothing an admin could act on, so it has to be carried by the alert.
+            if await self._send_admin_alert(
+                build_command_failure_alert(
+                    user_label=self._user_label(),
+                    command=command,
+                    tool=tool,
+                    target=invocation.note_text or invocation.target,
+                    error={
+                        "service": "plexorcist",
+                        "failure_type": "handler_error",
+                        "error_message": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            ):
+                text = f"{text}\nThe admin has been notified."
+            return text
 
         if not isinstance(result, dict):
             self._audit(command, ok=False, target=invocation.target, note="bad_result")
@@ -286,14 +325,28 @@ class ShabbosRouter:
         """
         subject = str(result.get("title") or alert_media_id(result) or target or "that title")
         alert = build_request_alert(
-            user_label=str(self.user.display_name or self.user.username or self.user.user_id),
+            user_label=self._user_label(),
             name=tool,
             result=result,
             subject=subject,
         )
+        return await self._send_admin_alert(alert)
+
+    def _user_label(self) -> str:
+        return str(self.user.display_name or self.user.username or self.user.user_id)
+
+    async def _send_admin_alert(self, alert: tuple[str, str, str, int] | None) -> bool:
+        """Send one built alert. Returns True only if it actually went out.
+
+        The caller appends "The admin has been notified." on True, so a Prowl failure
+        must never come back True -- telling a user help is coming when it is not is
+        worse than the original error.
+        """
         if alert is None:
             return False
-        _key, event, summary, priority = alert
+        key, event, summary, priority = alert
+        if not should_send_admin_alert(key):
+            return False  # same failure, same target, within the cooldown window
         try:
             notice = await self.toolkit.escalation.send_admin_prowl_notice(
                 summary=f"[Shabbos Mode] {summary}",
@@ -301,9 +354,14 @@ class ShabbosRouter:
                 event=event,
             )
         except Exception:  # noqa: BLE001 - alerting must never break the user's turn
-            logger.exception("Failed to send Shabbos request-failure alert")
+            logger.exception("Failed to send Shabbos admin alert")
+            clear_admin_alert_cooldown(key)
             return False
-        return bool(isinstance(notice, dict) and notice.get("ok"))
+        if isinstance(notice, dict) and notice.get("ok"):
+            return True
+        # Nothing was delivered, so do not let a phantom send hold the cooldown.
+        clear_admin_alert_cooldown(key)
+        return False
 
     def _audit(self, command: str, *, ok: bool, target: str, note: str | None = None) -> None:
         payload: dict[str, Any] = {

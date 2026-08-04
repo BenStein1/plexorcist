@@ -110,6 +110,82 @@ def build_request_alert(
     return None
 
 
+def build_command_failure_alert(
+    *,
+    user_label: str,
+    command: str,
+    tool: str,
+    target: str,
+    error: dict[str, Any],
+) -> tuple[str, str, str, int]:
+    """Page the admin about a NON-request command that died against a backend.
+
+    Requests have `build_request_alert` above; this covers the rest of the Shabbos
+    surface -- /fix, /status, /search, /seasons, /episode. Those used to tell the
+    user which service broke and with what HTTP status, so a human could relay it.
+    They no longer do (the user has no access to those services and cannot act on
+    them), which means an alert is now the only signal that anything went wrong.
+
+    Admin-facing text names the service on purpose -- the admin is the one person
+    who can act on it. The key carries tool + target + problem so a user hammering
+    one command cannot bury a different failure behind a cooldown.
+
+    `tool` is carried separately from `command` because the repair lane arrives as
+    `/confirm`, which on its own says nothing about what was actually attempted.
+    """
+    failure_type = str(error.get("failure_type") or "").strip()
+    if failure_type == "http_error":
+        problem = f"HTTP {error.get('http_status')} {error.get('http_reason') or ''}".strip()
+    else:
+        problem = str(error.get("error_message") or failure_type or "an unknown error")
+    service = service_label(str(error.get("service") or "")) or "an upstream service"
+    subject = target or "no named title"
+    return (
+        f"command-failed:{tool}:{subject}:{problem}",
+        "Command Failed",
+        (
+            f"User {user_label} ran /{command} ({tool}) in Shabbos Mode — {subject} — and it "
+            f"failed against {service}: {problem}. The user was told it did not go through, "
+            "without naming the service."
+        ),
+        1,
+    )
+
+
+def should_send_admin_alert(key: str) -> bool:
+    """True at most once per cooldown window per key; records the send as it answers."""
+    now = datetime.now(timezone.utc)
+    last_sent = _ADMIN_ALERT_LAST_SENT.get(key)
+    if last_sent and (now - last_sent).total_seconds() < _ALERT_COOLDOWN_SECONDS:
+        return False
+    _ADMIN_ALERT_LAST_SENT[key] = now
+    return True
+
+
+def clear_admin_alert_cooldown(key: str) -> None:
+    """Undo the recording above, so a send that never landed does not sit on a cooldown."""
+    _ADMIN_ALERT_LAST_SENT.pop(key, None)
+
+
+def reset_admin_alert_cooldowns() -> None:
+    """Drop every cooldown. Module state is process-wide; tests must not inherit it."""
+    _ADMIN_ALERT_LAST_SENT.clear()
+
+
+def service_label(service: str) -> str:
+    labels = {
+        "ombi": "Ombi",
+        "sickchill": "SickChill",
+        "radarr": "Radarr",
+        "jackett": "Jackett",
+        "transmission": "Transmission",
+        "plex": "Plex",
+        "tautulli": "Tautulli",
+        "prowl": "Prowl",
+    }
+    return labels.get(service.lower(), service)
+
+
 class AdminAlertReporter:
     def __init__(self, prowl: ProwlClient | None) -> None:
         self.prowl = prowl
@@ -437,12 +513,7 @@ class AdminAlertReporter:
         return None
 
     def _should_send_admin_alert(self, key: str) -> bool:
-        now = datetime.now(timezone.utc)
-        last_sent = _ADMIN_ALERT_LAST_SENT.get(key)
-        if last_sent and (now - last_sent).total_seconds() < _ALERT_COOLDOWN_SECONDS:
-            return False
-        _ADMIN_ALERT_LAST_SENT[key] = now
-        return True
+        return should_send_admin_alert(key)
 
     def _tool_family_label(self, tool_name: str) -> str:
         if tool_name in {"repair_requested_show", "add_requested_show_to_sickchill"}:
@@ -452,17 +523,7 @@ class AdminAlertReporter:
         return tool_name.replace("_", " ")
 
     def _service_label(self, service: str) -> str:
-        labels = {
-            "ombi": "Ombi",
-            "sickchill": "SickChill",
-            "radarr": "Radarr",
-            "jackett": "Jackett",
-            "transmission": "Transmission",
-            "plex": "Plex",
-            "tautulli": "Tautulli",
-            "prowl": "Prowl",
-        }
-        return labels.get(service.lower(), service)
+        return service_label(service)
 
     def _user_label(self, user: UserContext) -> str:
         display_name = (user.display_name or "").strip()

@@ -38,6 +38,21 @@ def never_notify_for_real(monkeypatch):
     monkeypatch.setattr(ProwlClient, "send_notice", blocked)
 
 
+@pytest.fixture(autouse=True)
+def no_inherited_alert_cooldowns():
+    """Admin-alert cooldowns are module-level, so they outlive a test.
+
+    Without this, a test asserting "the admin was paged" quietly depends on which
+    tests ran before it: an earlier test that produced the same alert key leaves a
+    15-minute cooldown behind and the send never happens.
+    """
+    from tools.admin_alerts import reset_admin_alert_cooldowns
+
+    reset_admin_alert_cooldowns()
+    yield
+    reset_admin_alert_cooldowns()
+
+
 def pytest_sessionfinish(session, exitstatus):
     for leftover in ("test_plexorcist.db", "test_friendlynames.json"):
         try:

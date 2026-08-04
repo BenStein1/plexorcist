@@ -434,3 +434,111 @@ async def test_shabbos_request_failure_pages_the_admin(shabbos_router):
     assert f"TVDB {ALTERED_CARBON_TVDB}" in sent[0]["summary"]
     assert "The admin has been notified." in reply
     assert_user_safe(reply.replace("The admin has been notified.", ""))
+
+
+# -- 6. ...and neither does the rest of the Shabbos surface ---------------------
+#
+# /fix, /status, /search, /seasons and /episode used to tell the user which service
+# broke and with what HTTP status, so a human could relay it. Fault 6c stopped that
+# (correctly -- they cannot reach it), which left those commands with no path to Ben
+# at all. These pin the replacement.
+
+
+def _collect_notices(router) -> list[dict]:
+    sent: list[dict] = []
+
+    async def fake_notice(summary: str, priority: int = 0, event: str = "Concierge Alert") -> dict:
+        sent.append({"summary": summary, "priority": priority, "event": event})
+        return {"ok": True}
+
+    router.toolkit.escalation.send_admin_prowl_notice = fake_notice
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_shabbos_non_request_backend_failure_pages_the_admin(shabbos_router):
+    sent = _collect_notices(shabbos_router)
+
+    async def boom(**kwargs) -> dict:
+        raise httpx.HTTPStatusError(
+            "Server error '500 Internal Server Error' for url 'http://ombi/api/v1/x'",
+            request=httpx.Request("GET", "http://ombi/api/v1/x"),
+            response=httpx.Response(500, request=httpx.Request("GET", "http://ombi/api/v1/x")),
+        )
+
+    shabbos_router.toolkit.movie_repairs.repair_requested_movie = boom
+
+    state = ConversationState(user_id=USER.user_id)
+    await shabbos_router.handle(state, "/fix movie The Thing --year 1982")
+    reply = await shabbos_router.handle(state, "/confirm")
+
+    assert sent, "a /fix that died against a backend must reach the admin"
+    assert sent[0]["event"] == "Command Failed"
+    assert "500" in sent[0]["summary"], "the admin gets the status the user no longer sees"
+    assert "Radarr" in sent[0]["summary"], "the admin gets the service name the user no longer sees"
+    assert "The Thing" in sent[0]["summary"]
+    # The repair lane arrives as /confirm, so the alert has to say what was attempted.
+    assert "repair_requested_movie" in sent[0]["summary"]
+    assert "This will try to re-fetch" not in sent[0]["summary"], "not the UI preview string"
+    assert "The admin has been notified." in reply
+    assert_user_safe(reply.replace("The admin has been notified.", ""))
+
+
+@pytest.mark.asyncio
+async def test_shabbos_crash_in_our_own_code_pages_the_admin(shabbos_router):
+    """The user's reply here says nothing actionable, so the alert carries all of it."""
+    sent = _collect_notices(shabbos_router)
+
+    async def boom(**kwargs) -> dict:
+        raise RuntimeError("the renderer exploded")
+
+    shabbos_router.toolkit.media.search_media = boom
+
+    reply = await shabbos_router.handle(ConversationState(user_id=USER.user_id), "/search Altered Carbon")
+
+    assert sent, "a handler crash must reach the admin"
+    assert sent[0]["event"] == "Command Failed"
+    assert "RuntimeError: the renderer exploded" in sent[0]["summary"]
+    assert "The admin has been notified." in reply
+    assert_user_safe(reply.replace("The admin has been notified.", ""))
+
+
+@pytest.mark.asyncio
+async def test_shabbos_alert_does_not_claim_delivery_it_did_not_achieve(shabbos_router):
+    """Telling a user help is coming when Prowl refused is worse than the error itself."""
+    attempts: list[str] = []
+
+    async def refused(summary: str, priority: int = 0, event: str = "Concierge Alert") -> dict:
+        attempts.append(summary)
+        return {"ok": False, "error": "missing_api_key"}
+
+    async def boom(**kwargs) -> dict:
+        raise RuntimeError("nope")
+
+    shabbos_router.toolkit.media.search_media = boom
+    shabbos_router.toolkit.escalation.send_admin_prowl_notice = refused
+
+    reply = await shabbos_router.handle(ConversationState(user_id=USER.user_id), "/search Altered Carbon")
+    assert "The admin has been notified." not in reply
+
+    # ...and the failed attempt must not sit on a cooldown, or the retry never fires.
+    await shabbos_router.handle(ConversationState(user_id=USER.user_id), "/search Altered Carbon")
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_identical_failures_do_not_spam_the_admin(shabbos_router):
+    sent = _collect_notices(shabbos_router)
+
+    async def boom(**kwargs) -> dict:
+        raise RuntimeError("nope")
+
+    shabbos_router.toolkit.media.search_media = boom
+
+    for _ in range(3):
+        await shabbos_router.handle(ConversationState(user_id=USER.user_id), "/search Altered Carbon")
+    assert len(sent) == 1, "same command, same target, same fault -- one buzz"
+
+    # A different title is a different fault and must still get through.
+    await shabbos_router.handle(ConversationState(user_id=USER.user_id), "/search Neuromancer")
+    assert len(sent) == 2

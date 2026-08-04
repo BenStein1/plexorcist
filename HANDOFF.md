@@ -828,3 +828,13 @@ AUTO-RESUME ARMED: overlord-resume-autoresume-25c83ebb.timer (fires ~5 min after
 continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-25c83ebb.timer
 If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## Session checkpoint (auto: weekly (7-day) usage at 93.0%) — 2026-08-04 10:37 MST
+The weekly (7-day) usage cap is at 93.0% and resets in ~23h 22m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+<!-- TODO: model should replace this line with what's actually in flight, -->
+<!-- what was just decided, and the concrete next step, before continuing. -->
+AUTO-RESUME ARMED: overlord-resume-autoresume-d3b955de.timer (fires ~5 min after the weekly (7-day) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-d3b955de.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
