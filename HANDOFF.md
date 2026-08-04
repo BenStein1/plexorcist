@@ -315,7 +315,7 @@ an honest, actionable answer instead of a false "no such user."
 
 Prod DB was READ ONLY (copied to a scratch file). Do not write to it.
 
-## 2026-08-03 — Admin user lookup FIXED (f45d008, 4f66b6f). NOT DEPLOYED.
+## 2026-08-03 — Admin user lookup FIXED (f45d008, 4f66b6f, b1ecd7e). NOT DEPLOYED.
 
 Both halves of Ben's transcript now work. Full suite 153 green (was 141).
 
@@ -352,8 +352,24 @@ Measured against the real ledger:
   into Plexorcist, so there's no account to attach this to."
 - `find_users("Mike")` -> both Mikes.
 
-12 new tests in tests/test_admin_user_lookup.py; 5 of them proven to fail
-against the pre-fix code (stash-and-run, restored).
+**b1ecd7e — the prompt, or none of the above ever runs.** Both halves of the
+transcript were tool-SELECTION failures, not only resolution failures: nothing
+told the model to widen a not-found lookup, and nothing told it that "take a
+look at the friendly names for Mike" is a tool call — so it answered from
+memory ("I poked the name ledger and came up empty"), which reads authoritative
+and is not. Three lines added to the `Admin messaging:` block in
+backend/agent.py (~line 1384): call `find_users` before reporting nobody, treat
+"who do I have on file" as a tool call, and report a ledger-only person as
+"[no account yet]" rather than unknown. Its test renders the real admin system
+prompt via `build_agent`, so it fails if the block is edited away.
+
+13 new tests in tests/test_admin_user_lookup.py; 6 of them proven to fail
+against the pre-fix code (revert-and-run, restored). Full suite 154 passed.
+
+Also checked, no change needed: the other three `_load_user_labels()` callers
+(get_admin_task_summary, resolve_admin_task, the task_query recipient lookup)
+index it by a real `user_id` from task rows, so the new synthetic
+`ledger:<username>` keys can never be hit there.
 
 NOT DEPLOYED — Ben asked whether the lookup could be improved, not to ship it.
 Prod still runs the previous commit. The net_ssh clearance from the earlier
