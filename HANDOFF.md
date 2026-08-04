@@ -791,3 +791,40 @@ AUTO-RESUME ARMED: overlord-resume-autoresume-6b26f9ed.timer (fires ~5 min after
 continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-6b26f9ed.timer
 If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## Session checkpoint (auto: weekly (7-day) usage at 92.0%) — 2026-08-04 10:34 MST
+The weekly (7-day) usage cap is at 92.0% and resets in ~23h 25m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+
+**DEPLOYED AND LIVE — 2026-08-04 10:35 MST.** Nothing is in flight. Branch
+`ombi-false-failure-fix` (7 commits, tree clean, 216 tests pass) was rsynced to
+prod via `bash deploy.local.sh` and the service restarted:
+`ssh root@10.0.0.12` → `jexec 5 supervisorctl restart plexorcist`. Verified, not
+assumed: gunicorn pid 68964 booted clean, both workers reached "Application
+startup complete", no ImportError, and the deployed `tools/error_helpers.py` on
+the box contains the new "did not go through" wording. `pyproject.toml` was
+unchanged, so no `pip install -e .` was needed. SSH was one-shot per command;
+nothing left held open.
+
+Not done, and each is a separate decision for Ben:
+- **Not pushed to `origin`, not merged to `main`.** Prod runs the branch code;
+  GitHub does not have it. Ben's "push" meant deploy, so this is still open.
+- **Shabbos alert gap (found, deliberately not fixed).** In
+  `backend/shabbos/router.py` (~line 200) only `REQUEST_TOOL_NAMES` failures call
+  `_alert_admin_request_failure`. The `else` branch — `/fix`, `/status`,
+  `/search`, `/seasons`, `/episode` — and the bare `except Exception` below it
+  never page Ben. Before this work that branch at least *printed* "failed while
+  talking to Ombi: HTTP 500", so a human could relay it; de-naming it (correctly)
+  closed the only channel it had. `build_request_alert()` in `tools/admin_alerts.py`
+  is request-shaped (keys on `status`/`tvdb_id`), so this needs a sibling builder
+  taking a classified-error dict, reusing `_should_send_admin_alert` /
+  `_clear_admin_alert_cooldown`, with the alert key including tool + target so a
+  user hammering `/fix` cannot spam him. Only append "The admin has been
+  notified." to the user text when the send actually returns true. ~20 min, one
+  commit.
+- Items 2/3/4 in the section above still stand unchanged.
+
+AUTO-RESUME ARMED: overlord-resume-autoresume-25c83ebb.timer (fires ~5 min after the weekly (7-day) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-25c83ebb.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
