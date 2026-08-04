@@ -315,7 +315,7 @@ an honest, actionable answer instead of a false "no such user."
 
 Prod DB was READ ONLY (copied to a scratch file). Do not write to it.
 
-## 2026-08-03 — Admin user lookup FIXED (f45d008, 4f66b6f, b1ecd7e). NOT DEPLOYED.
+## 2026-08-03 — Admin user lookup FIXED and DEPLOYED (f45d008 … 2238b44).
 
 Both halves of Ben's transcript now work. Full suite 153 green (was 141).
 
@@ -363,22 +363,49 @@ backend/agent.py (~line 1384): call `find_users` before reporting nobody, treat
 "[no account yet]" rather than unknown. Its test renders the real admin system
 prompt via `build_agent`, so it fails if the block is edited away.
 
-13 new tests in tests/test_admin_user_lookup.py; 6 of them proven to fail
-against the pre-fix code (revert-and-run, restored). Full suite 154 passed.
+16 new tests in tests/test_admin_user_lookup.py; 9 of them proven to fail
+against the pre-fix code (revert-and-run, restored). Full suite 157 passed.
 
 Also checked, no change needed: the other three `_load_user_labels()` callers
 (get_admin_task_summary, resolve_admin_task, the task_query recipient lookup)
 index it by a real `user_id` from task rows, so the new synthetic
 `ledger:<username>` keys can never be hit there.
 
-NOT DEPLOYED — Ben asked whether the lookup could be improved, not to ship it.
-Prod still runs the previous commit. The net_ssh clearance from the earlier
-deploy is spent; ask again before connecting.
+**855a6f8 + 2238b44 — say "never logged in", don't ask an unanswerable
+question.** Ben's real recipient was "Mike and Nicole" (`Baldguy`), ledger-only.
+Ending a candidate list with "Which one?" invites him to pick someone who gets
+refused on the very next turn, so he has to ask twice to learn the actual state.
+New `_pick_or_dead_end()` in tools/admin_tools.py: when NOTHING in the shown list
+has an account and the caller requires one, the closing sentence is the truth
+instead of a question. Applied on both the suggestion and the ambiguity paths.
+2238b44 fixes the singular arm, which read "They have ever logged into
+Plexorcist" — not English, and it asserts the opposite of what it means.
 
-KNOWN GAP, deliberately not built: a ledger-only person still cannot RECEIVE a
-message (`send_admin_message` keys `user_memory_notes` by user_id). Making that
-work means keying by username and reconciling on first login — a real feature,
-not what he asked for.
+Now measured against the real 64-entry ledger + a read-only prod DB copy:
+- `"Mike Young"` -> "No match. Closest I have: Mike and Nicole (Baldguy) [no
+  account yet], Mike (mwco8) [no account yet]. **Neither has ever logged into
+  Plexorcist, so there's no account to send this to.**"
+- `"Mike and Nicole"` / `"Baldguy"` -> the same answer, singular.
+
+Claim verified before shipping, since it asserts something about real people:
+dumped all 15 distinct `plex_auth_sessions` usernames and cross-checked them
+against the ledger. None of them is Mike or Nicole (nearest neighbours are
+`rmk1900` -> "Kat and Ryan", `DirtyCopper` -> "Chris"), so "never logged in" is
+true and not a dedupe-key artifact.
+
+DEPLOYED 2026-08-03. `./deploy.local.sh` (note: `.rsync-filter` excludes
+friendlynames.json and *.db, so prod's live ledger is never overwritten by the
+stale repo copy), then `jexec 5 supervisorctl restart plexorcist` on NALA.
+Proof, not just a status line: pid 94915 -> 11397, new strings grep-confirmed in
+the jail at /mnt/webroot/apps/plexorcist, three workers listening on :5500,
+`curl http://127.0.0.1:5500/` -> 200. net_ssh session closed. That clearance is
+now spent.
+
+KNOWN GAP, deliberately not built — Ben was asked and said "That's fine": a
+ledger-only person still cannot RECEIVE a message (`send_admin_message` keys
+`user_memory_notes` by user_id). Making that work means keying by username and
+reconciling on first login — a real feature. The lookup now just says so
+plainly, which is all he wanted.
 
 ALSO LOGGED THIS TURN (not started, Ben said "as a todo"): SickChill never
 finishes adding a show — Neuromancer added days ago is still a "Loading..."
