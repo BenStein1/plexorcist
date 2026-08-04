@@ -73,14 +73,18 @@ def build_request_alert(
 
     if status == "missing_show_identifier":
         raw_id = result.get("tvdb_id")
+        # Priority -2 (Prowl's quietest) on purpose: the model is told to fix this one
+        # itself -- search the title, retry with the real id, same turn -- so it fires
+        # even on runs that go on to succeed. It is a log entry, not a phone buzz.
         return (
             f"request-missing-id:{name}:{user_label}:{raw_id}",
             "Request Blocked",
             (
                 f"User {user_label} asked for a show request, but no usable TVDB id was resolved "
-                f"(tvdb_id={raw_id!r}); nothing was sent to Ombi."
+                f"(tvdb_id={raw_id!r}); nothing was sent to Ombi. The model was told to resolve the "
+                "id and retry, so check whether the retry landed before treating this as a failure."
             ),
-            0,
+            -2,
         )
 
     failure_type = str(result.get("failure_type") or "").strip()

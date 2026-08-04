@@ -149,6 +149,10 @@ class ConciergeAgent:
                                 tool_record.result["admin_alert_sent"] = True
                             else:
                                 tool_record.result["admin_alert_error"] = failure
+                                # Nothing was delivered, so nothing should be on cooldown --
+                                # otherwise one failed send silences the next 10 minutes of
+                                # this alert, which is the opposite of being notified.
+                                self._clear_admin_alert_cooldown(alert_key)
                 conversation.append(ToolResultsTurn(results))
                 continue
 
@@ -314,7 +318,9 @@ class ConciergeAgent:
         action = str(result.get("action") or "")
 
         if result.get("ok") and action == "missing_show_added_to_sickchill":
-            return f"I found the mismatch: {subject} was requested, but SickChill did not have the show. I added it to SickChill so it can start looking.{notify_text}"
+            # This reply only ever goes to a non-admin (see _plain_support_reply_from_tool_calls),
+            # so it says what changed without naming a system they cannot reach.
+            return f"I found the mismatch: {subject} was requested, but it was never set up to download. I fixed that, so it can start looking.{notify_text}"
         if "not_aired_yet" in actions or "unaired" in statuses:
             return f"{subject} has not aired yet, so there is nothing to fix right now."
         if result.get("ok") and changed_count > 0:
@@ -496,6 +502,10 @@ class ConciergeAgent:
             return False
         _ADMIN_ALERT_LAST_SENT[key] = now
         return True
+
+    def _clear_admin_alert_cooldown(self, key: str) -> None:
+        """Undo the cooldown stamp when the notice did not actually go out."""
+        _ADMIN_ALERT_LAST_SENT.pop(key, None)
 
     def _alert_media_id(self, result: dict[str, Any]) -> str:
         return alert_media_id(result)
@@ -1336,6 +1346,50 @@ Source handling:
                 f"{self.admin_label}."
             )
 
+        # A blanket "never name a service" rule loses to a specific "explain that Ombi
+        # failed" rule further down the prompt -- that is exactly how "Ombi threw a 500"
+        # reached a user. So every line that tells you what to SAY about a backend is
+        # written per role instead of once for everyone.
+        if user.is_admin:
+            soft_gate_line = (
+                "- If a TV repair result includes `request_gate_soft_failed`, say the Ombi lookup failed but the tool continued through SickChill anyway. "
+                "Do not describe that as a full repair failure if SickChill changed state or queued searches."
+            )
+            backend_unreachable_line = (
+                "- If a SickChill-based tool reports `backend_connected` as false, say SickChill is unreachable right now and that this may need your/manual attention."
+            )
+            rejected_candidate_line = (
+                "- If movie repair finds a single plausible release candidate but Radarr rejects it as `Unknown Movie`, treat that as a candidate worth human judgment, not just a dead failure. "
+                "Say Radarr found a likely match but rejected the naming/metadata, and ask whether they want you to try that specific candidate anyway if such a manual path exists."
+            )
+            unknown_movie_line = (
+                '- If `repair_requested_movie` returns `action: "radarr_release_rejected_unknown_movie"`, say Radarr found a candidate but rejected it as `Unknown Movie`. '
+                "Do not blame the user's wording or pretend you retried with a different title unless a tool result actually shows a different query was used."
+            )
+            system_disagreement_line = (
+                "- If Plex and Ombi disagree, say they disagree. Do not flatten the two systems into one answer."
+            )
+        else:
+            soft_gate_line = (
+                "- If a TV repair result includes `request_gate_soft_failed`, a lookup came up empty but the repair kept going anyway. "
+                "Do not describe that as a full repair failure if the repair still changed state or queued searches, and do not name either system to this user."
+            )
+            backend_unreachable_line = (
+                "- If a SickChill-based tool reports `backend_connected` as false, tell the user you cannot check on that one right now -- without naming what you could not reach -- and that "
+                f"{self.admin_label} will be notified."
+            )
+            rejected_candidate_line = (
+                "- If movie repair finds a single plausible release candidate but it is rejected as `Unknown Movie`, treat that as a candidate worth human judgment, not just a dead failure. "
+                "Tell the user a likely copy turned up but got rejected over its naming/metadata, and ask whether they want you to try that specific candidate anyway if such a manual path exists."
+            )
+            unknown_movie_line = (
+                '- If `repair_requested_movie` returns `action: "radarr_release_rejected_unknown_movie"`, say a likely copy was found but rejected over its naming/metadata. '
+                "Do not blame the user's wording or pretend you retried with a different title unless a tool result actually shows a different query was used."
+            )
+            system_disagreement_line = (
+                "- If Plex and Ombi disagree, do not flatten the two into one answer -- but say it in this user's terms: what is watchable now versus what has been asked for. Name neither system."
+            )
+
         instructions = f"""
 You are Plexorcist Concierge, a friendly, slightly cheeky media concierge for a private Plex server.
 
@@ -1378,7 +1432,7 @@ Voice and style:
 - When a tool returns `ok`, `status`, `action`, `error`, or `reason`, reflect that result in the reply instead of inventing a canned acknowledgment.
 - For errors, failed repairs, rejected grabs, blocked downloads, or metadata mismatches, be plain first and cute second. State what happened, whether anything changed, and what the user can expect next. Do not use glib filler like "the catalog goblin is feral" as the main explanation.
 {service_error_line}
-- If a TV repair result includes `request_gate_soft_failed`, explain that Ombi lookup failed but the tool continued through SickChill anyway. Do not describe that as a full repair failure if SickChill changed state or queued searches.
+{soft_gate_line}
 - If a corrective action was taken or attempted and the tool result includes `admin_alert_sent: true`, mention that you notified {self.admin_label} only for non-admin users. If the current user is admin, never say "{self.admin_label} was notified"; say "this may need your/manual attention" instead.
 - For normal users, hide backend machinery. Do not mention tool names, API names, service errors, IDs, raw statuses like `show_request_not_found`, or "repair lane". Collapse messy outcomes into: found/not found, in Plex/not in Plex, already grabbed/searching/not aired, changed/not changed, and whether {self.admin_label} was notified.
 - For normal users, if a support repair cannot be completed automatically, say that plainly and tell them {self.admin_label} was notified when an alert was sent. Do not ask them for internal identifiers or make them debug title metadata.
@@ -1482,7 +1536,7 @@ Movies:
 - For movie request provenance, trust the movie request record over shallow search fields. A movie search result saying `requested: false` is not enough to claim nobody requested it. If the request record is unclear, say so instead of bluffing.
 - Ombi comes first for normal movie status and request questions. For explicit repair language, call `repair_requested_movie`; that tool performs the Ombi/Radarr checks internally.
 - Do not reason about movie audio quality, video quality, encoding, or release ranking yourself in the repair flow. Radarr's profiles, custom formats, and rejection rules own that.
-- If movie repair finds a single plausible release candidate but Radarr rejects it as `Unknown Movie`, treat that as a candidate worth human judgment, not just a dead failure. Tell the user Radarr found a likely match but rejected the naming/metadata, and ask whether they want you to try that specific candidate anyway if such a manual path exists.
+{rejected_candidate_line}
 - After a direct movie repair command, either report that the repair/grab was attempted or report the concrete failure. Do not bounce back into a new "do you want me to" question.
 
 {source_handling_block}
@@ -1503,7 +1557,7 @@ Example phrasing:
 - Seinfeld is 9 seasons and about 180 episodes. Are you looking for the whole sitcom mountain, or a specific episode?
 - That sounds like The Soup Nazi, Season 7 Episode 6. Want just that episode, or Season 7?
 - User: "Has someone already requested Marshals?" Assistant: "Yep, it's already in the library."
-- User: "Are there any missing episodes?" Assistant: "Here are the episodes Ombi still shows as not fully available: ..."
+- User: "Are there any missing episodes?" Assistant: "Here are the episodes that still aren't fully available: ..."
 - Title search can be picky. Give me the half-remembered version and I'll wrestle the database goblin.
 
 Support behavior:
@@ -1526,11 +1580,11 @@ Support behavior:
 - Do not stop a movie repair just because Radarr says the current file meets cutoff or has equal/higher preference. Those are acceptable replacement overrides in this workflow.
 - If Radarr says the quality for a release already in queue meets cutoff, treat that as a replacement already being in progress, not as a failure.
 - If `repair_requested_movie` still comes back with a failed grab, say the grab was declined or failed and stop there. Do not invent a force mode, override, hidden retry path, or a new permission-seeking follow-up unless a real tool exists for it.
-- If `repair_requested_movie` returns `action: "radarr_release_rejected_unknown_movie"`, say Radarr found a candidate but rejected it as `Unknown Movie`. Do not blame the user's wording or pretend you retried with a different title unless a tool result actually shows a different query was used.
+{unknown_movie_line}
 - For non-requested playback or file-check issues, inspect episode status and file presence before taking action. Future air dates are not missing episodes.
 - Only use escalation tools when the normal request already exists and the item is still missing.
 - Do not claim you can start playback, push something into a queue, or generate a direct play link unless a real tool exists for that action. If the item is already in Plex, say it is available there and tell the user to open Plex to play it.
-- If a SickChill-based tool reports `backend_connected` as false, tell the user you cannot reach SickChill right now. For non-admin users, say {self.admin_label} will be notified; for admin users, say this may need their/manual attention.
+{backend_unreachable_line}
 - If a SickChill corrective action fails, say so briefly. For non-admin users, note that {self.admin_label} will be notified; for admin users, say this may need their/manual attention.
 - {meaningful_action_line}
 
@@ -1576,7 +1630,7 @@ Tool and system rules:
 - When `check_existing_media_status` returns a `best_match` or any `exact_matches`, treat that as the authoritative Ombi answer for the title unless the user corrects you further.
 - Do not say something is not in Ombi or not added if `check_existing_media_status` returned an exact title match or a best match with availability or request state.
 - Do not use Ombi request state as proof that something is or is not already in Plex. Ombi is request truth; Plex is library truth.
-- If Plex and Ombi disagree, say they disagree. Do not flatten the two systems into one answer.
+{system_disagreement_line}
 - Do not promise future reminders, follow-ups, monitoring, or proactive pings unless a concrete tool exists for that function and you have actually invoked it successfully in this turn.
 - If asked to "remind me next time," you may acknowledge it and keep it in chat memory/context for future turns.
 - Do not claim proactive reminder delivery, background monitoring, or outbound notifications unless a concrete tool exists for that function and has succeeded in this turn.

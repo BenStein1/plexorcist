@@ -22,7 +22,12 @@ from backend.models import ConversationState, ToolCallRecord, UserContext
 from backend.shabbos import render
 from backend.shabbos.router import ShabbosRouter
 from backend.state import ConversationStore
+from clients.llm_providers import LlmResponse, ToolCall
 from clients.ombi_client import OmbiClient
+from tests.test_agent_loop import FakeLlmClient
+from tools import schemas
+from tools.bridge import ToolBridge
+from tools.catalog import ToolSpec
 from tools.request_tools import RequestTools, _stamp_request_failure
 
 ALTERED_CARBON_TVDB = 332331
@@ -203,7 +208,9 @@ def test_missing_show_identifier_alerts_quietly():
     assert alert is not None
     _key, event, summary, priority = alert
     assert event == "Request Blocked"
-    assert priority == 0
+    # Prowl's quietest priority: the model is told to resolve the id and retry in the
+    # same turn, so this fires even when the retry lands. Log it, do not buzz his phone.
+    assert priority == -2
     assert "Richard" in summary
 
 
@@ -241,6 +248,57 @@ class FakeProwl:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
+
+
+@pytest.mark.asyncio
+async def test_a_failed_send_leaves_nothing_on_cooldown():
+    """A send that never happened must not silence the next 10 minutes of that alert."""
+    unconfirmed = await unconfirmed_result()
+
+    class OneToolToolkit:
+        async def request(self, **kwargs) -> dict:
+            return dict(unconfirmed)
+
+    specs = [
+        ToolSpec(
+            name="request_show_scope_for_user",
+            description="fake request",
+            input_model=schemas.EmptyInput,
+            resolve=lambda tk: tk.request,
+        )
+    ]
+
+    def call_then_answer() -> FakeLlmClient:
+        return FakeLlmClient(
+            [
+                LlmResponse(
+                    text="",
+                    tool_calls=[ToolCall(call_id="c1", name="request_show_scope_for_user", arguments_json="{}")],
+                    native_turn=[],
+                ),
+                LlmResponse(text="I put that in.", tool_calls=[], native_turn=[]),
+            ]
+        )
+
+    prowl = FakeProwl({"ok": False, "error": "missing_api_key"})
+    agent = ConciergeAgent(
+        ToolBridge(OneToolToolkit(), specs, after_call=None),
+        ombi_continue_url="http://ombi.example",
+        llm_client=call_then_answer(),
+        admin_label="Ben",
+        prowl=prowl,
+        movie_direct_source_enabled=False,
+    )
+    _reply, calls = await agent.respond(USER, ConversationState(user_id=USER.user_id), "add altered carbon")
+
+    assert calls[0].result.get("admin_alert_error") == "missing_api_key"
+    assert "admin_alert_sent" not in calls[0].result
+
+    # Same failure again, immediately: it must try again rather than sit on a cooldown
+    # started by a notice that was never delivered.
+    agent.client = call_then_answer()
+    await agent.respond(USER, ConversationState(user_id=USER.user_id), "add altered carbon")
+    assert len(prowl.calls) == 2
 
 
 @pytest.mark.asyncio
