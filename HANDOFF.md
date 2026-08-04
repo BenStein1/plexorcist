@@ -314,3 +314,57 @@ ledger-only person genuinely cannot receive a stored message yet — the win is
 an honest, actionable answer instead of a false "no such user."
 
 Prod DB was READ ONLY (copied to a scratch file). Do not write to it.
+
+## 2026-08-03 — Admin user lookup FIXED (f45d008, 4f66b6f). NOT DEPLOYED.
+
+Both halves of Ben's transcript now work. Full suite 153 green (was 141).
+
+**f45d008 — resolution.**
+- `_load_user_labels()` is now the UNION of `plex_auth_sessions` and the
+  friendly-names ledger. Ledger-only people carry `has_account: False` and an
+  empty `user_id`, keyed by a synthetic `"ledger:<username>"` dict key that is
+  deliberately neither searchable text nor stampable onto a result (the old
+  `{**label, "user_id": user_id}` would have written that key into
+  `user_memory_notes` as a real recipient id — a note rotting against nobody
+  while Ben is told it was sent).
+- `_resolve_user_query()` gained two passes after exact/substring: all-tokens
+  (auto-select) and any-token (offered as "Closest I have: …", never
+  auto-selected — one shared token is a guess).
+- New kwarg `require_account=True` (fail closed). Callers that key durable
+  state by user_id can never key to `""`; they get `reason=user_not_registered`
+  with a summary that says the person has never logged in.
+  `set_user_friendly_name` passes `require_account=False` — it keys off
+  username, and renaming is how a ledger-only entry gets a searchable name.
+- `_format_user_label` no longer renders `"Mike (mwco8, )"` for an empty id.
+- New: `FriendlyNameDirectory.all_names()` in backend/auth_context.py.
+
+**4f66b6f — new admin tool `find_users(query, limit)`.** There was no way to
+BROWSE the roster at all, only to resolve one person or fail — which is why
+"take a look at the friendly names for Mike" had nothing to call. Wired at all
+four points (AdminTools method, ToolKit handler + is_admin guard in
+tools/catalog.py, ToolSpec, `schemas.FindUsersInput`). Verified visible to an
+admin (34 tools) and hidden from a normal user (23).
+
+Measured against the real ledger:
+- `"Mike Young"` -> "No match. Closest I have: Mike and Nicole (Baldguy) [no
+  account yet], Mike (mwco8) [no account yet]. Which one?"
+- `"Mike"` -> "Mike (mwco8) is in your friendly-names list but has never logged
+  into Plexorcist, so there's no account to attach this to."
+- `find_users("Mike")` -> both Mikes.
+
+12 new tests in tests/test_admin_user_lookup.py; 5 of them proven to fail
+against the pre-fix code (stash-and-run, restored).
+
+NOT DEPLOYED — Ben asked whether the lookup could be improved, not to ship it.
+Prod still runs the previous commit. The net_ssh clearance from the earlier
+deploy is spent; ask again before connecting.
+
+KNOWN GAP, deliberately not built: a ledger-only person still cannot RECEIVE a
+message (`send_admin_message` keys `user_memory_notes` by user_id). Making that
+work means keying by username and reconciling on first login — a real feature,
+not what he asked for.
+
+ALSO LOGGED THIS TURN (not started, Ben said "as a todo"): SickChill never
+finishes adding a show — Neuromancer added days ago is still a "Loading..."
+placeholder row, as is "Stuart Fails to Save the Universe". Written up in
+~/Projects/overlord-bridge/OVERLORD_BACKLOG.md.
