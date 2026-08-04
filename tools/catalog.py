@@ -174,6 +174,11 @@ class Toolkit:
             return self._admin_required()
         return await self.admin_tools.set_user_friendly_name(user_query=user_query, friendly_name=friendly_name)
 
+    async def find_users(self, query: str | None = None, limit: int = 25) -> dict:
+        if not self.is_admin:
+            return self._admin_required()
+        return await self.admin_tools.find_users(query=query, limit=limit)
+
     async def set_shabbos_mode(self, user_query: str, enabled: bool) -> dict:
         if not self.is_admin:
             return self._admin_required()
@@ -557,6 +562,19 @@ CATALOG: list[ToolSpec] = [
         ),
         input_model=schemas.SetUserFriendlyNameInput,
         resolve=lambda tk: tk.set_user_friendly_name,
+        tags=_tags(ADMIN),
+    ),
+    ToolSpec(
+        name="find_users",
+        description=(
+            "Admin-only: look up or browse the people on file — searches friendly names, usernames and display names, "
+            "and covers everyone in the friendly-names ledger, not just people who have logged in. "
+            "Use when the admin asks who someone is, asks to see the friendly names for a partial name, or when a "
+            "send_admin_message / rename lookup came back not-found or ambiguous and you need to show them the options. "
+            "Results marked [no account yet] exist only in the name ledger and cannot receive an admin message."
+        ),
+        input_model=schemas.FindUsersInput,
+        resolve=lambda tk: tk.find_users,
         tags=_tags(ADMIN),
     ),
     ToolSpec(

@@ -195,6 +195,11 @@ class SetUserFriendlyNameInput(ToolInput):
     friendly_name: str = Field(min_length=1, max_length=60, description="The new friendly name for that user.")
 
 
+class FindUsersInput(ToolInput):
+    query: str | None = Field(default=None, description="Partial name to search for: any part of a friendly name, username, or display name. Omit to list everyone.")
+    limit: int = Field(default=25, ge=1, le=200, description="Maximum people to return.")
+
+
 class SetMyFriendlyNameInput(ToolInput):
     friendly_name: str = Field(min_length=1, max_length=60, description="The new friendly name for the current authenticated user.")
 

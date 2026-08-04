@@ -316,6 +316,65 @@ class AdminTools:
             else f"I found a matching task but couldn't update it (id {match['note_id']}).",
         }
 
+    async def find_users(self, query: str | None = None, limit: int = 25) -> dict[str, Any]:
+        """Admin-only: browse the people on file.
+
+        There was previously no way to LOOK at the roster at all -- only to
+        resolve a name to exactly one person and fail otherwise. So "take a look
+        at the friendly names for Mike" had nothing to call, and came back empty
+        even though two Mikes were sitting in the ledger.
+        """
+        if self.store is None:
+            return {
+                "ok": False,
+                "action": "find_users_unavailable",
+                "reason": "store_unavailable",
+                "user_summary": "I can't look up users because the memory store is not configured.",
+            }
+        limit = max(1, min(int(limit or 25), 200))
+        needle = str(query or "").strip().lower()
+        tokens = [token for token in re.split(r"\W+", needle) if token]
+
+        people: list[dict[str, Any]] = []
+        for label in self._load_user_labels().values():
+            if tokens:
+                haystack = " ".join(value.lower() for value in self._searchable_values(label) if value)
+                if not any(token in haystack for token in tokens):
+                    continue
+            people.append(dict(label))
+        # Registered accounts first -- those are the ones Ben can act on.
+        people.sort(key=lambda item: (not item.get("has_account"), str(item.get("friendly_name") or "").lower()))
+        registered = sum(1 for item in people if item.get("has_account"))
+
+        if not people:
+            return {
+                "ok": True,
+                "action": "find_users",
+                "query": query,
+                "users": [],
+                "match_count": 0,
+                "user_summary": (
+                    f"Nobody on file matches {query}." if needle else "There's nobody on file at all."
+                ),
+            }
+        shown = people[:limit]
+        listing = ", ".join(self._candidate_summary(item) for item in shown)
+        more = f" (+{len(people) - len(shown)} more)" if len(people) > len(shown) else ""
+        scope = f"matching {query}" if needle else "on file"
+        return {
+            "ok": True,
+            "action": "find_users",
+            "query": query,
+            "users": shown,
+            "match_count": len(people),
+            "registered_count": registered,
+            "user_summary": (
+                f"{len(people)} {scope} ({registered} with a Plexorcist account): {listing}{more}. "
+                "Anyone marked [no account yet] is in the friendly-names list but has never logged in, "
+                "so there's no account to attach a message to."
+            ),
+        }
+
     async def set_user_friendly_name(self, user_query: str, friendly_name: str) -> dict[str, Any]:
         if self.friendly_names is None:
             return {

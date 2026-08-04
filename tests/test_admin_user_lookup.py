@@ -195,3 +195,62 @@ def test_user_universe_is_the_union_of_logins_and_the_ledger(tmp_path):
     assert by_username["qq_mikeston"]["has_account"] is True
     assert by_username["qq_mikeston"]["user_id"] == "u-1"
     assert by_username["zz_pairfolk"]["has_account"] is False
+
+
+# --- find_users: there was no way to LOOK at the roster at all ----------------
+
+
+@pytest.mark.asyncio
+async def test_find_users_shows_ledger_only_people_for_a_partial_name(tmp_path):
+    """The second half of Ben's transcript: "take a look at the friendly names
+    for Mike". Resolution is all-or-nothing by design, so a browse tool is the
+    only thing that can answer that question."""
+    store = _store(tmp_path)
+    _seed_login(tmp_path, user_id="u-1", username="someoneelse", display_name="Someone Else")
+    tools = _tools(tmp_path, store)
+
+    result = await tools.find_users(query="Mikeston")
+
+    assert result["ok"] is True
+    assert result["match_count"] == 2
+    assert result["registered_count"] == 0
+    assert {item["username"] for item in result["users"]} == {"qq_mikeston", "zz_pairfolk"}
+    assert "no account yet" in result["user_summary"]
+    # Someone who doesn't match is not padding the answer.
+    assert "someoneelse" not in result["user_summary"]
+
+
+@pytest.mark.asyncio
+async def test_find_users_lists_registered_accounts_first(tmp_path):
+    store = _store(tmp_path)
+    _seed_login(tmp_path, user_id="u-1", username="mikestonhall", display_name="Mikeston Hall")
+    tools = _tools(tmp_path, store)
+
+    result = await tools.find_users(query="Mikeston")
+
+    assert [item["has_account"] for item in result["users"]] == [True, False, False]
+    assert result["registered_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_find_users_with_no_query_lists_everyone(tmp_path):
+    store = _store(tmp_path)
+    _seed_login(tmp_path, user_id="u-1", username="someoneelse", display_name="Someone Else")
+    tools = _tools(tmp_path, store)
+
+    result = await tools.find_users()
+
+    assert result["match_count"] == 3
+    assert result["registered_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_find_users_says_so_when_nothing_matches(tmp_path):
+    store = _store(tmp_path)
+    tools = _tools(tmp_path, store)
+
+    result = await tools.find_users(query="Bartholomew")
+
+    assert result["ok"] is True
+    assert result["users"] == []
+    assert result["user_summary"] == "Nobody on file matches Bartholomew."
