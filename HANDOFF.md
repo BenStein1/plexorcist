@@ -962,6 +962,17 @@ when `matched_by == "tmdb_id"`, since the search behind it is title-ranked.
 
 Full suite **228 pass**; the 3 new tests each verified failing pre-fix.
 
+**Residual, pre-existing, not introduced here.** The model-facing tool
+(`tools/catalog.py`) calls `check_movie_request_status` with a query only — no
+tmdb id — so `matched_by` is `"title_rank"` and the hit may be a different film.
+The `"requested"` floor makes the status honest *for the record that matched*;
+it does not make the match right. Tolerable because `_render_request_status`
+prints the matched record's own title, so a stranger announces itself
+("Commitment — request status: requested.") rather than vouching for what was
+asked. Checked: nothing downstream keys on the old `"missing"` /
+`"Common.ProcessingRequest"` strings. If it ever needs tightening, give the tool
+a tmdb id the way the reconcile has one.
+
 **Unverified, left open on purpose.** Both movie reconcile call sites query by
 `detail.get("title") or str(tmdb_id)`. For TV that degrades badly because
 `get_tv_detail` 204s on prod, but `get_movie_detail` asks
