@@ -435,7 +435,7 @@ class OmbiClient(BaseHttpClient):
             "exists_in_ombi": bool(match),
             "matched_by": matched_by,
             "requested_tmdb_id": safe_tmdb_id,
-            "status": self._extract_request_status(match),
+            "status": self._extract_movie_request_record_status(match),
             "tmdb_id": self._movie_tmdb_id(match),
             "title": match.get("title") or query.title(),
             "raw": match,
@@ -646,12 +646,22 @@ class OmbiClient(BaseHttpClient):
                         query=detail.get("title") or item.get("title") or query,
                         tmdb_id=self._safe_int(item.get("tmdb_id")),
                     )
-                request_status = self._extract_request_status(request_lookup or detail)
-                request_id = (
-                    request_lookup.get("raw", {}).get("requestId")
-                    if request_lookup
-                    else detail.get("requestId")
+                # request_lookup is check_movie_request_status's envelope, not an Ombi
+                # record: its verdict lives under "status"/"raw", so passing the whole
+                # dict to a record extractor matched none of the flag keys and always
+                # returned "missing" -- the lookup's own HTTP call was paid for and
+                # then discarded. Only an id-matched hit may speak, because the search
+                # behind it is title-ranked and would otherwise offer a stranger.
+                matched = (
+                    bool(request_lookup.get("exists_in_ombi"))
+                    and request_lookup.get("matched_by") == "tmdb_id"
                 )
+                if matched:
+                    request_status = str(request_lookup.get("status") or "missing")
+                    request_id = (request_lookup.get("raw") or {}).get("requestId")
+                else:
+                    request_status = self._extract_request_status(detail)
+                    request_id = detail.get("requestId")
                 requested = bool(detail.get("requested")) or request_status in {"requested", "approved"}
                 movie_year = self._extract_year(
                     str(
@@ -812,6 +822,33 @@ class OmbiClient(BaseHttpClient):
         if item.get("approved"):
             return "approved"
         return item.get("requestStatus") or "missing"
+
+    def _extract_movie_request_record_status(self, record: dict) -> str:
+        """Status of a /api/v1/Request/movie/search record.
+
+        The search-hit extractor above is the wrong tool for these. Presence in Ombi's
+        request list already means the request exists, so the floor is "requested", not
+        "missing" -- and a real record carries no `requested` key at all. Measured from
+        prod: an approved one is {"approved": true, "available": false, "denied": false,
+        "requestStatus": "Common.ProcessingRequest"}, with no `requested` anywhere. So a
+        request that had landed but was still awaiting approval fell through to
+        "Common.ProcessingRequest", which is in no landed state, and the reconcile called
+        it unconfirmed -- the mirror of the false success this path already guards.
+        Same reasoning as _extract_tv_request_record_status.
+        """
+        if not record:
+            return "missing"
+        if record.get("denied"):
+            return "denied"
+        if record.get("fullyAvailable"):
+            return "fully_available"
+        if record.get("partlyAvailable"):
+            return "partly_available"
+        if record.get("available"):
+            return "available"
+        if record.get("approved"):
+            return "approved"
+        return "requested"
 
     def _extract_episode_status(self, item: dict) -> str:
         request_status = str(item.get("requestStatus") or item.get("request_status") or "").lower()

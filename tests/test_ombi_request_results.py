@@ -485,9 +485,15 @@ COMMITMENTS_TMDB = 10437
 
 
 def movie_request_record(tmdb_id=COMMITMENTS_TMDB, title="The Commitments", **fields):
-    """A /api/v1/Request/movie/search/{query} hit."""
+    """A /api/v1/Request/movie/search/{query} hit, keyed like the real thing.
+
+    Copied from a live response in plexorcist.log. The earlier version of this fixture
+    invented a `requested: True` key; a real Ombi movie request has no such field, and
+    the invention hid a bug where a landed-but-unapproved request read as no request.
+    """
     return {"id": 71, "theMovieDbId": tmdb_id, "title": title,
-            "requested": True, "approved": False, "available": False, **fields}
+            "requestStatus": "Common.ProcessingRequest",
+            "approved": False, "available": False, "denied": False, **fields}
 
 
 @pytest.mark.asyncio
@@ -531,3 +537,68 @@ async def test_movie_reconcile_finds_a_match_that_did_not_rank_first():
     assert result["reconciled_by"] == "tmdb_id"
     assert result["title"] == "The Commitments"
     assert result["tmdb_id"] == COMMITMENTS_TMDB
+
+
+@pytest.mark.asyncio
+async def test_movie_reconcile_confirms_a_request_still_awaiting_approval():
+    """Ombi auto-approves most of Ben's requests, which is what hid this: a request
+    sitting unapproved carries no `requested` key, only requestStatus
+    "Common.ProcessingRequest". Read with the search-hit extractor that is no landed
+    state, so a request that plainly exists was called unconfirmed and paged Ben."""
+    client = FakeOmbi(
+        get_routes={
+            "/api/v2/Search/movie/10437": {"title": "The Commitments"},
+            "/api/v1/Request/movie/search/The Commitments": [movie_request_record()],
+        },
+        post_result=PROD_AMBIGUOUS_RESULT,
+    )
+
+    result = await client.request_movie_for_user(username="rmk1900", tmdb_id=COMMITMENTS_TMDB)
+
+    assert result["ok"] is True
+    assert result["status"] == "requested"
+    assert result["request_reconciled"] is True
+    # A landed request must not acquire the {service, failure_type} shape that pages Ben.
+    assert _stamp_request_failure(dict(result), operation="request_movie") == result
+
+
+@pytest.mark.asyncio
+async def test_movie_request_record_states_are_read_off_the_record():
+    """The approved/available/denied trio still outranks the "requested" floor."""
+    client = FakeOmbi(get_routes={})
+
+    assert client._extract_movie_request_record_status({}) == "missing"
+    assert client._extract_movie_request_record_status(movie_request_record()) == "requested"
+    assert client._extract_movie_request_record_status(
+        movie_request_record(approved=True)) == "approved"
+    assert client._extract_movie_request_record_status(
+        movie_request_record(approved=True, available=True)) == "available"
+    assert client._extract_movie_request_record_status(
+        movie_request_record(denied=True)) == "denied"
+
+
+@pytest.mark.asyncio
+async def test_existing_media_status_keeps_the_request_lookup_it_paid_for():
+    """check_existing_media_status called check_movie_request_status and then fed the
+    whole envelope to a record extractor, which matched none of its keys and said
+    "missing" every time -- so an already-requested movie read as never requested."""
+    client = FakeOmbi(
+        get_routes={
+            "/api/v2/Search/movie/10437": {"title": "The Commitments", "releaseDate": "1991-08-14T00:00:00"},
+            "/api/v1/Request/movie/search/The Commitments": [
+                movie_request_record(approved=True, requestId=4471)
+            ],
+        },
+    )
+
+    async def fake_search(query, **kwargs):
+        return {"results": [{"type": "movie", "tmdb_id": COMMITMENTS_TMDB, "title": "The Commitments", "raw": {}}]}
+
+    client.search_media = fake_search
+
+    status = await client.check_existing_media_status(query="The Commitments")
+    movie = next(item for item in status["candidates"] if item["type"] == "movie")
+
+    assert movie["requested"] is True
+    assert movie["status"] == "approved"
+    assert movie["request_id"] == 4471
