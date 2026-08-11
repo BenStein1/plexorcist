@@ -943,16 +943,25 @@ all**:
 
 So a request that had landed but was still awaiting approval fell through to
 `"Common.ProcessingRequest"` — in no landed state — and the reconcile called it
-unconfirmed. Ombi auto-approves most of Ben's requests (`approved: true` →
-`"approved"` → lands), which is exactly why it worked often enough to look
-correct. TV had already been given `_extract_tv_request_record_status` with a
-`"requested"` floor in 75087af for this same reason; movies now have
-`_extract_movie_request_record_status`. **The old fixture invented
+unconfirmed.
+
+**This half is defensive, not load-bearing — Ben confirmed Ombi auto-approves
+everything.** Every request record reads `approved: true` → `"approved"` → a
+landed state, under the old extractor too, so the pending branch is unreachable
+today. Measured, not assumed: every `check_movie_request_status` result in
+`plexorcist.log` that found a record is `"approved"`, none pending. Kept because
+it costs nothing and changes no current behavior (an unapproved record is the
+only input whose reading differs), and it is what would break quietly if
+auto-approve were ever off for one user or missing from a new friend's role —
+the failure being a *false* "unconfirmed" page for a request that worked. TV
+already had `_extract_tv_request_record_status` with the same `"requested"`
+floor from 75087af; movies now have `_extract_movie_request_record_status`. **The old fixture invented
 `requested: True`, which is what hid it — it is now copied from the real
 payload.** Denied movie records also now surface as `"denied"` rather than
 silently reading as no-request.
 
-Same confusion one layer up: `check_existing_media_status` called
+Same confusion one layer up — and **this half is live under auto-approve**, in
+fact auto-approve is precisely when it fires: `check_existing_media_status` called
 `check_movie_request_status` and then passed the whole **envelope**
 (`{query, username, exists_in_ombi, status, raw, …}`) to a record extractor,
 which matched none of its flag keys and returned `"missing"` unconditionally —
