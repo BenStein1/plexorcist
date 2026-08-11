@@ -380,8 +380,9 @@ async def test_movie_ambiguous_result_reconciles_too():
         post_result=PROD_AMBIGUOUS_RESULT,
     )
 
-    async def fake_status(query, username=None):
-        return {"exists_in_ombi": True, "status": "requested", "raw": {"title": "The Matrix"}}
+    async def fake_status(query, username=None, tmdb_id=None):
+        return {"exists_in_ombi": True, "status": "requested", "tmdb_id": tmdb_id,
+                "matched_by": "tmdb_id", "raw": {"title": "The Matrix"}}
 
     client.check_movie_request_status = fake_status
 
@@ -474,3 +475,59 @@ def test_message_still_classifies_when_ombi_omits_error_message():
     )
     assert denied["status"] == "permission_denied"
     assert denied["ok"] is False
+
+
+# --------------------------------------------------------------------------------
+# The movie reconcile must match on the id, not on whatever ranked first.
+# --------------------------------------------------------------------------------
+
+COMMITMENTS_TMDB = 10437
+
+
+def movie_request_record(tmdb_id=COMMITMENTS_TMDB, title="The Commitments", **fields):
+    """A /api/v1/Request/movie/search/{query} hit."""
+    return {"id": 71, "theMovieDbId": tmdb_id, "title": title,
+            "requested": True, "approved": False, "available": False, **fields}
+
+
+@pytest.mark.asyncio
+async def test_movie_reconcile_rejects_a_different_movie():
+    """A title search that answers with some other film must not vouch for this one."""
+    client = FakeOmbi(
+        get_routes={
+            "/api/v2/Search/movie/10437": {"title": "The Commitments"},
+            "/api/v1/Request/movie/search/The Commitments": [
+                movie_request_record(tmdb_id=99999, title="Commitment")
+            ],
+        },
+        post_result=PROD_AMBIGUOUS_RESULT,
+    )
+
+    result = await client.request_movie_for_user(username="rmk1900", tmdb_id=COMMITMENTS_TMDB)
+
+    assert result["ok"] is False
+    assert result["status"] == "unconfirmed"
+
+
+@pytest.mark.asyncio
+async def test_movie_reconcile_finds_a_match_that_did_not_rank_first():
+    """The opposite failure: id-checking only results[0] would call this unconfirmed
+    and page Ben about a request that is sitting right there in the list."""
+    client = FakeOmbi(
+        get_routes={
+            "/api/v2/Search/movie/10437": {"title": "The Commitments"},
+            "/api/v1/Request/movie/search/The Commitments": [
+                movie_request_record(tmdb_id=99999, title="Commitment"),
+                movie_request_record(),
+            ],
+        },
+        post_result=PROD_AMBIGUOUS_RESULT,
+    )
+
+    result = await client.request_movie_for_user(username="rmk1900", tmdb_id=COMMITMENTS_TMDB)
+
+    assert result["ok"] is True
+    assert result["status"] == "requested"
+    assert result["reconciled_by"] == "tmdb_id"
+    assert result["title"] == "The Commitments"
+    assert result["tmdb_id"] == COMMITMENTS_TMDB

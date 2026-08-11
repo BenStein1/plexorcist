@@ -160,17 +160,20 @@ class OmbiClient(BaseHttpClient):
                 headers=self._user_headers(username),
             )
         except httpx.HTTPError as exc:
-            reconciled = await self._reconcile_movie_request_failure(query=detail.get("title") or str(tmdb_id))
+            reconciled = await self._reconcile_movie_request_failure(
+                query=detail.get("title") or str(tmdb_id),
+                tmdb_id=tmdb_id,
+            )
             if reconciled is not None:
-                reconciled.update(
+                return self._merge_request_context(
+                    reconciled,
                     {
                         "username": username,
                         "tmdb_id": tmdb_id,
                         "title": detail.get("title"),
                         "ombi_detail": detail,
-                    }
+                    },
                 )
-                return reconciled
             failed_context: dict[str, object] = {
                 "username": username,
                 "tmdb_id": tmdb_id,
@@ -198,6 +201,7 @@ class OmbiClient(BaseHttpClient):
         if normalized.get("status") == "unconfirmed":
             reconciled = await self._reconcile_movie_request_failure(
                 query=detail.get("title") or str(tmdb_id),
+                tmdb_id=tmdb_id,
             )
             if reconciled is not None:
                 return self._merge_request_context(reconciled, context)
@@ -396,7 +400,12 @@ class OmbiClient(BaseHttpClient):
             "ombi": result,
         }
 
-    async def check_movie_request_status(self, query: str, username: str | None = None) -> dict:
+    async def check_movie_request_status(
+        self,
+        query: str,
+        username: str | None = None,
+        tmdb_id: int | None = None,
+    ) -> dict:
         try:
             payload = await self.get_json(f"/api/v1/Request/movie/search/{query}")
         except httpx.HTTPError as exc:
@@ -407,17 +416,36 @@ class OmbiClient(BaseHttpClient):
                 "status": "error",
                 "error": str(exc),
             }
-        results = payload if isinstance(payload, list) else []
-        match = results[0] if results else {}
+        results = [item for item in (payload if isinstance(payload, list) else []) if isinstance(item, dict)]
+        # Title-ranked, so results[0] is whatever sorted first, not what was asked for.
+        # When a tmdb id is known, the whole list is searched for it: id-checking only
+        # the first hit would call a request that landed but ranked second "missing".
+        match: dict = {}
+        matched_by = None
+        safe_tmdb_id = self._safe_int(tmdb_id)
+        if safe_tmdb_id:
+            match = next((item for item in results if self._movie_tmdb_id(item) == safe_tmdb_id), {})
+            matched_by = "tmdb_id" if match else None
+        if not match and results:
+            match = results[0]
+            matched_by = "title_rank"
         return {
             "query": query,
             "username": username,
-            "exists_in_ombi": bool(results),
+            "exists_in_ombi": bool(match),
+            "matched_by": matched_by,
+            "requested_tmdb_id": safe_tmdb_id,
             "status": self._extract_request_status(match),
-            "tmdb_id": match.get("theMovieDbId") or match.get("themoviedbId"),
+            "tmdb_id": self._movie_tmdb_id(match),
             "title": match.get("title") or query.title(),
             "raw": match,
         }
+
+    def _movie_tmdb_id(self, item: dict) -> int | None:
+        """Ombi spells this key both ways depending on which endpoint answered."""
+        if not isinstance(item, dict):
+            return None
+        return self._safe_int(item.get("theMovieDbId") or item.get("themoviedbId"))
 
     async def check_show_request_status(
         self,
@@ -616,6 +644,7 @@ class OmbiClient(BaseHttpClient):
                 if not detail.get("requested") and not detail.get("approved") and not detail.get("requestId"):
                     request_lookup = await self.check_movie_request_status(
                         query=detail.get("title") or item.get("title") or query,
+                        tmdb_id=self._safe_int(item.get("tmdb_id")),
                     )
                 request_status = self._extract_request_status(request_lookup or detail)
                 request_id = (
@@ -845,17 +874,30 @@ class OmbiClient(BaseHttpClient):
             payload["languageProfile"] = language_profile
         return payload
 
-    async def _reconcile_movie_request_failure(self, query: str) -> dict[str, object] | None:
-        status = await self.check_movie_request_status(query=query)
-        request_state = status.get("status")
+    async def _reconcile_movie_request_failure(
+        self,
+        query: str,
+        tmdb_id: int | None = None,
+    ) -> dict[str, object] | None:
+        status = await self.check_movie_request_status(query=query, tmdb_id=tmdb_id)
         if not status.get("exists_in_ombi"):
             return None
-        if request_state in {"requested", "approved", "available", "fully_available", "partly_available"}:
+        # Never let a title-ranked hit vouch for an id we did not ask about -- the same
+        # false success the TV path was hardened against, which answered a question
+        # about Altered Carbon with Cinta 7 Susun.
+        safe_tmdb_id = self._safe_int(tmdb_id)
+        if safe_tmdb_id and self._safe_int(status.get("tmdb_id")) != safe_tmdb_id:
+            return None
+        request_state = status.get("status")
+        if request_state in self.REQUEST_LANDED_STATES:
             return {
-                "ok": request_state in {"requested", "approved", "available", "fully_available", "partly_available"},
+                "ok": True,
                 "status": request_state,
+                "title": status.get("title"),
+                "tmdb_id": status.get("tmdb_id"),
                 "ombi": status.get("raw") or {},
                 "request_reconciled": True,
+                "reconciled_by": status.get("matched_by") or "title_search",
             }
         return None
 
@@ -932,7 +974,7 @@ class OmbiClient(BaseHttpClient):
         """
         merged = dict(reconciled)
         for key, value in context.items():
-            if key in {"title", "tvdb_id"} and merged.get(key):
+            if key in {"title", "tvdb_id", "tmdb_id"} and merged.get(key):
                 continue
             merged[key] = value
         return merged
