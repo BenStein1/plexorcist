@@ -995,7 +995,17 @@ class OmbiClient(BaseHttpClient):
     ) -> dict[str, object]:
         payload = result if isinstance(result, dict) else {}
         error_code = payload.get("errorCode")
-        error_message = str(payload.get("errorMessage") or payload.get("message") or "")
+        # `message` is Ombi's single human-readable field and it carries BOTH outcomes.
+        # A movie POST that lands answers `{"result": true, "message": "<Title> (<year>)
+        # has been successfully added!"}`, so reading it unconditionally made the success
+        # sentence the error text: Ben was paged "the request failed against Ombi: The
+        # Commitments (1991) has been successfully added!" for a movie that downloaded
+        # fine. Only a non-success payload may speak through `message`, which keeps it
+        # available to _map_request_error_status for the already-requested and permission
+        # wording Ombi does not always duplicate into errorMessage.
+        error_message = str(payload.get("errorMessage") or "")
+        if not error_message.strip() and payload.get("result") is not True:
+            error_message = str(payload.get("message") or "")
         # Ombi's RequestEngineResult derives isError from ErrorMessage being non-empty,
         # so a genuine failure always carries one of these three.
         if payload.get("isError") or error_message.strip() or error_code:

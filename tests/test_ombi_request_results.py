@@ -8,8 +8,10 @@ Every fixture here is shaped like something Ombi actually returned in production
 import httpx
 import pytest
 
-from backend.shabbos.render import render_request_show_scope_for_user
+from backend.shabbos.render import render_request_movie_for_user, render_request_show_scope_for_user
 from clients.ombi_client import OmbiClient
+from tools.admin_alerts import build_request_alert
+from tools.request_tools import _stamp_request_failure
 
 ALTERED_CARBON_TVDB = 332331
 
@@ -388,3 +390,87 @@ async def test_movie_ambiguous_result_reconciles_too():
     assert result["ok"] is True
     assert result["status"] == "requested"
     assert result["request_reconciled"] is True
+
+
+# --------------------------------------------------------------------------------
+# A success `message` is not an error message.
+# --------------------------------------------------------------------------------
+
+# Verbatim shape of the POST /api/v1/Request/movie that DID create Kat and Ryan's
+# Commitments request, 2026-08-10. Unlike the TV engine, the movie engine fills
+# `message` on the way out -- and it says the opposite of what it was read as.
+PROD_MOVIE_SUCCESS = {
+    "result": True,
+    "isError": False,
+    "errorMessage": None,
+    "errorCode": None,
+    "message": "The Commitments (1991) has been successfully added!",
+    "requestId": 4471,
+}
+
+
+def test_success_message_is_not_an_error():
+    """The reported bug: 'the request failed against Ombi: ...successfully added!'"""
+    client = FakeOmbi(get_routes={})
+    normalized = client._normalize_request_engine_result(
+        result=PROD_MOVIE_SUCCESS,
+        success_status="requested",
+        error_context={"title": "The Commitments", "tmdb_id": 10437},
+    )
+    assert normalized["ok"] is True
+    assert normalized["status"] == "requested"
+    assert "error" not in normalized
+    assert "user_summary" not in normalized
+
+
+@pytest.mark.asyncio
+async def test_landed_movie_request_never_reaches_the_admin_alert():
+    """End to end over the path that paged Ben: tool result must not look like a fault."""
+    client = FakeOmbi(
+        get_routes={"/api/v2/Search/movie/10437": {"title": "The Commitments"}},
+        post_result=PROD_MOVIE_SUCCESS,
+    )
+
+    result = await client.request_movie_for_user(username="rmk1900", tmdb_id=10437)
+
+    assert result["ok"] is True
+    assert result["status"] == "requested"
+    # No reconcile needed: Ombi said yes outright.
+    assert "/api/v1/Request/movie/search/The Commitments" not in client.get_calls
+    stamped = _stamp_request_failure(result, operation="movie_request")
+    assert "failure_type" not in stamped
+    assert (
+        build_request_alert(
+            user_label="Kat and Ryan (rmk1900)",
+            name="request_movie_for_user",
+            result=stamped,
+            subject="The Commitments",
+        )
+        is None
+    )
+    assert "successfully added" not in render_request_movie_for_user(stamped)
+
+
+def test_message_still_classifies_when_ombi_omits_error_message():
+    """`message` stays live on a non-success payload -- these two must not degrade
+    into 'unconfirmed', least of all the permission refusal, which cannot self-heal
+    through the reconcile because no request was ever created."""
+    client = FakeOmbi(get_routes={})
+
+    already = client._normalize_request_engine_result(
+        result={"result": False, "isError": False, "errorMessage": None,
+                "message": "This has already been requested"},
+        success_status="requested",
+        error_context={},
+    )
+    assert already["status"] == "already_requested"
+    assert already["ok"] is True
+
+    denied = client._normalize_request_engine_result(
+        result={"result": False, "isError": False, "errorMessage": None,
+                "message": "You do not have the correct permissions to request this"},
+        success_status="requested",
+        error_context={},
+    )
+    assert denied["status"] == "permission_denied"
+    assert denied["ok"] is False
