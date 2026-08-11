@@ -926,8 +926,51 @@ at first if a landed movie request ever starts alerting as unconfirmed.
 
 5 tests; the 4 regression ones were each run against the pre-fix client and fail
 there. The classification test passes either way by design — it exists to stop a
-future simplification from eating the already-requested/permission wording. Full
-suite 225 pass.
+future simplification from eating the already-requested/permission wording.
+
+**Third defect, found by checking the record shape instead of trusting the
+fixture (888396d).** The e8695cd claim above — that the movie path now
+reconciles — was still only half true. `check_movie_request_status` read hits
+from `/api/v1/Request/movie/search` with `_extract_request_status`, the
+extractor for *search-index* hits, whose floor is `"missing"`. A real movie
+request record (verbatim from `plexorcist.log`) has **no `requested` key at
+all**:
+
+```
+{"theMovieDbId": 11393, "approved": true, "available": false, "denied": false,
+ "requestStatus": "Common.ProcessingRequest", "requestedDate": "...", ...}
+```
+
+So a request that had landed but was still awaiting approval fell through to
+`"Common.ProcessingRequest"` — in no landed state — and the reconcile called it
+unconfirmed. Ombi auto-approves most of Ben's requests (`approved: true` →
+`"approved"` → lands), which is exactly why it worked often enough to look
+correct. TV had already been given `_extract_tv_request_record_status` with a
+`"requested"` floor in 75087af for this same reason; movies now have
+`_extract_movie_request_record_status`. **The old fixture invented
+`requested: True`, which is what hid it — it is now copied from the real
+payload.** Denied movie records also now surface as `"denied"` rather than
+silently reading as no-request.
+
+Same confusion one layer up: `check_existing_media_status` called
+`check_movie_request_status` and then passed the whole **envelope**
+(`{query, username, exists_in_ombi, status, raw, …}`) to a record extractor,
+which matched none of its flag keys and returned `"missing"` unconditionally —
+the HTTP call was paid for and its answer thrown away, so an already-requested
+movie read as never requested. It now reads the lookup's own verdict, and only
+when `matched_by == "tmdb_id"`, since the search behind it is title-ranked.
+
+Full suite **228 pass**; the 3 new tests each verified failing pre-fix.
+
+**Unverified, left open on purpose.** Both movie reconcile call sites query by
+`detail.get("title") or str(tmdb_id)`. For TV that degrades badly because
+`get_tv_detail` 204s on prod, but `get_movie_detail` asks
+`/api/v2/Search/movie/{tmdb_id}` — a TMDB id against a TMDB-keyed route, the
+right namespace — so it should populate. Not confirmed against prod. Worth a
+glance if a movie reconcile ever misses: if the title is empty the query becomes
+a bare id string and the title search cannot match. Note Ben's alert said
+"TheCommitments" while Ombi said "The Commitments (1991)", so that subject line
+did not come from Ombi's detail.
 
 **NOT DEPLOYED.** Commits are not live until the deploy script runs on jail 5
 (via NALA `jexec 5`); needs Ben's SSH go-ahead.
