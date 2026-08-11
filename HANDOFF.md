@@ -992,5 +992,63 @@ a bare id string and the title search cannot match. Note Ben's alert said
 "TheCommitments" while Ombi said "The Commitments (1991)", so that subject line
 did not come from Ombi's detail.
 
-**NOT DEPLOYED.** Commits are not live until the deploy script runs on jail 5
-(via NALA `jexec 5`); needs Ben's SSH go-ahead.
+**NOT DEPLOYED** at the time this was written. Superseded — see the deploy
+checkpoint below.
+
+## 2026-08-10 23:33 MST — Ombi false-failure fix DEPLOYED AND RESTARTED
+
+Done at Ben's explicit "run the plexorcist deploy script and ssh to the jail and
+restart plexorcist". Branch `ombi-false-failure-fix` at `7610442`, clean tree.
+Not merged to `main`, not pushed — deploying the branch working tree is the
+established pattern here, and both remain Ben's call.
+
+Context: the session that did this work (`d99bca4a`) died mid-instruction on an
+`API Error: Unable to connect to API (ENOTFOUND)` before it could deploy. Ben's
+two deploy instructions to that session were never executed. This closes that
+gap; nothing else was left in flight.
+
+What shipped — the rsync delta was exactly the Ombi fix, everything else on the
+branch was already live:
+
+- `clients/ombi_client.py` (c40d863 success-message-read-as-error, e8695cd
+  title-ranked hit vouching for the wrong movie, 888396d the movie-request-record
+  extractor)
+- `tests/test_ombi_request_results.py`
+- `HANDOFF.md` (one commit stale on the server — this section is not synced)
+
+Verified, not assumed:
+
+- Pre-flight `pytest tests/test_ombi_request_results.py
+  tests/test_request_failure_notification.py` — 46 passed.
+- `rsync -avn` dry run first, to see the delta before writing to prod.
+- `./deploy.local.sh` over the NFS mount (autofs → `10.0.0.12:/mnt/STORAGEpool`).
+  No ssh needed for this half.
+- **Jail number checked, not assumed** — Ben flagged it might have moved. `jls -v`
+  on NALA: JID 5 is still `sandbox_1` (`/mnt/NASpool/jails/sandbox_1/root`), and
+  `jexec 5 supervisorctl status` confirmed plexorcist is the service living
+  there before anything was restarted. Other JIDs shown: 1 plexmediaserver_3,
+  2 tautulli_1, 4 radarr_2, 6 unifi_3, 7 urbackup_1.
+- New code visible from *inside* the jail at the path gunicorn actually loads:
+  `jexec 5 md5 /mnt/webroot/apps/plexorcist/clients/ombi_client.py` ==
+  `2bd026a889ae7ed92cf27ceb0cb0b431`, identical to the local file.
+- `jexec 5 supervisorctl restart plexorcist`: pid 69372 (6d 12h uptime) → 31916,
+  workers 31919/31920, all three bound to `*:5500`.
+- App serving: the `memory_sweep_run` background job is still ticking at its
+  120s cadence, which is the proof the event loop is alive and not just a bound
+  socket. Zero tracebacks / ImportError / SyntaxError in the last 200 log lines.
+  Stable pid, no crash loop.
+- **Weak spot, flagged not papered over.** The HTTP probe on 127.0.0.1:5500
+  returned a full `<!doctype html>` page, not the inert 404 that the 2026-08-03
+  checkpoint records as the correct unauthenticated response — and the probe's
+  exit status was piped into `head`, so `probe-exit=0` was head's status and
+  checked nothing. So that probe is not evidence either way. **Untouched by this
+  deploy**: the rsync delta was `clients/ombi_client.py`, its test, and this
+  file — no auth code moved, so whatever bare-`/` does now, it did before.
+  Worth one clean `fetch -s` next time someone is legitimately in the box.
+- net_ssh session to root@10.0.0.12 **CLOSED** afterwards. That clearance was
+  ONE TIME for that request and does NOT carry forward — ask Ben again before
+  any future connection.
+
+NEXT STEP: nothing to build or deploy. The residual and the unverified item in
+the section directly above are both still open and both still pre-existing —
+neither was touched by this deploy.
