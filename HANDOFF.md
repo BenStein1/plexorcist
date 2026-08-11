@@ -868,3 +868,66 @@ AUTO-RESUME ARMED: overlord-resume-autoresume-d3b955de.timer (fires ~5 min after
 continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-d3b955de.timer
 If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+---
+
+## 2026-08-10 — Movie requests reported as failures (c40d863, e8695cd)
+
+Ben's report: Kat and Ryan (rmk1900) requested The Commitments. It worked — the
+request landed, the movie downloaded, it is in Plex. He was paged anyway:
+
+    User Kat and Ryan (rmk1900) requested TheCommitments; the request failed
+    against Ombi: The Commitments (1991) has been successfully added!
+
+and the user was told "I could not put in the request — nothing was added."
+
+**Root cause (c40d863).** Ombi's `RequestEngineResult` has one human-readable
+field, `Message`, and it carries both outcomes. The TV engine leaves it null;
+the movie engine fills it on success with `"<Title> (<year>) has been
+successfully added!"`. `_normalize_request_engine_result` read
+`errorMessage or message` and then used that string as part of the
+is-this-an-error test, so the success sentence tripped the error branch, matched
+no pattern in `_map_request_error_status`, and came out `status: "error"`. The
+rest is mechanical: `_stamp_request_failure` sets `error_message` to it and
+`build_request_alert` prints it after "the request failed against Ombi:".
+
+**It is a regression from 75087af** — the Altered Carbon fix. That commit hoisted
+`error_message` out of the `if isError or result is False` guard and into the
+guard itself. Before it, `message` was only read once something else had already
+said "error", so a movie success could never reach it. TV was unaffected because
+its engine sends no Message.
+
+`message` now speaks only for a payload that is not `result: true`. It was
+deliberately *not* dropped from error detection outright: `_map_request_error_status`
+classifies already_requested / already_available / permission_denied off that
+text, and if Ombi ever sends one without duplicating it into `errorMessage`, a
+permission refusal would land as "unconfirmed" — "it may not exist" — for a
+request that was deliberately denied and **cannot self-heal through the
+reconcile**, because no request was ever created. The already_* pair would
+self-heal; permission_denied is the one that would not.
+
+**Second defect, same family (e8695cd).** 75087af's message claims "the movie
+path shares the normalizer and now reconciles the same way". Only the normalizer
+half was true. `_reconcile_movie_request_failure` still took
+`check_movie_request_status`'s `results[0]` with no id comparison — so an
+ambiguous POST for The Commitments could be confirmed by a hit for *Commitment*
+and reported to the user as landed. `check_movie_request_status` now takes an
+optional `tmdb_id` and scans the **whole** list for it (id-checking only
+`results[0]` would make a request that ranked second "unconfirmed" — the same
+lie pointing the other way). Reconciled movie results carry `title`, `tmdb_id`,
+`reconciled_by` and go through `_merge_request_context`, which now protects
+`tmdb_id` too. `check_existing_media_status` passes the id it already has.
+
+Because the full list is scanned before the guard fires, a rejection means the
+id is genuinely absent, not merely outranked. **Known trade:** a request record
+with no `theMovieDbId` cannot match, falls to `title_rank`, and is dropped —
+intended (a hit we cannot identify does not vouch), but it is the shape to look
+at first if a landed movie request ever starts alerting as unconfirmed.
+
+5 tests; the 4 regression ones were each run against the pre-fix client and fail
+there. The classification test passes either way by design — it exists to stop a
+future simplification from eating the already-requested/permission wording. Full
+suite 225 pass.
+
+**NOT DEPLOYED.** Commits are not live until the deploy script runs on jail 5
+(via NALA `jexec 5`); needs Ben's SSH go-ahead.
