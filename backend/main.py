@@ -1028,7 +1028,7 @@ _CONCIERGE_STARTER_CARD_JS = """
           <p>Ask for a movie, show, episode, recommendation, or help with something missing.</p>
           <div class="starter-chips">
             ${isFirstTime ? '<button type="button" class="starter-chip" data-prompt="Give me a quick tour of what you can do.">✨ Show me around</button>' : ''}
-            <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now by listing the most popular movies and most popular TV shows from Tautulli.">What’s popular right now?</button>
+            <button type="button" class="starter-chip" data-prompt="Tell me what's popular on Plex right now. Show movies and TV ranked both by total plays and by unique viewers, and include both numbers for every title.">What’s popular right now?</button>
             <button type="button" class="starter-chip" data-prompt="Recommend three movies based on what I watch, and keep at least one weird pick.">Smart recommendations</button>
             <button type="button" class="starter-chip" data-prompt="Check if my shows are missing episodes in Plex, and tell me exactly what’s missing.">Find missing episodes</button>
             <button type="button" class="starter-chip" data-prompt="Help me search for a movie or show and request it if it is missing.">Search and request</button>

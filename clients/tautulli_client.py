@@ -43,15 +43,10 @@ class TautulliClient(BaseHttpClient):
             user_id=str(user["user_id"]),
             grouping="0",
         )
-        home_stats = await self._api(
-            "get_home_stats",
-            time_range="30",
-            stats_type="plays",
-            stats_count="10",
-        )
         recently_watched = self._build_recently_watched(self._extract_rows(history))
         year_history_summary = self._build_year_history_summary(self._extract_rows(year_history))
-        top_media_30d = self._build_top_media(home_stats)
+        popularity = await self.get_plex_popularity(days=30, limit=10)
+        top_media_30d = popularity["rankings"]
         return {
             "user_id": user_id,
             "username": username,
@@ -63,22 +58,31 @@ class TautulliClient(BaseHttpClient):
             "preferences": [],
             "watch_time_stats": watch_time_stats if isinstance(watch_time_stats, list) else [],
             "serverwide_top_picks_note": "Top picks are server-wide for the last 30 days, not user-personal.",
-            "top_movies_30d_by_plays": top_media_30d["top_movies_by_plays"],
-            "top_movies_30d_by_users": top_media_30d["top_movies_by_users"],
-            "top_tv_30d_by_plays": top_media_30d["top_tv_by_plays"],
-            "top_tv_30d_by_users": top_media_30d["top_tv_by_users"],
-            "top_movies_30d": {
-                "scope": "server_wide",
-                "label": "Top Movies (server-wide, last 30 days)",
-                "by_plays": top_media_30d["top_movies_by_plays"],
-                "by_users": top_media_30d["top_movies_by_users"],
-            },
-            "top_tv_30d": {
-                "scope": "server_wide",
-                "label": "Top TV (server-wide, last 30 days)",
-                "by_plays": top_media_30d["top_tv_by_plays"],
-                "by_users": top_media_30d["top_tv_by_users"],
-            },
+            "top_movies_30d_by_plays": top_media_30d["movies_by_plays"],
+            "top_movies_30d_by_users": top_media_30d["movies_by_unique_viewers"],
+            "top_tv_30d_by_plays": top_media_30d["tv_by_plays"],
+            "top_tv_30d_by_users": top_media_30d["tv_by_unique_viewers"],
+            # Compatibility aliases used by older prompts and the AI-free renderer.
+            "top_movies_30d": top_media_30d["movies_by_plays"],
+            "top_tv_30d": top_media_30d["tv_by_plays"],
+        }
+
+    async def get_plex_popularity(self, *, days: int = 30, limit: int = 10) -> dict:
+        safe_days = max(1, min(int(days), 365))
+        safe_limit = max(1, min(int(limit), 25))
+        home_stats = await self._api(
+            "get_home_stats",
+            time_range=str(safe_days),
+            stats_type="plays",
+            stats_count=str(safe_limit),
+        )
+        rankings = self._build_top_media(home_stats, limit=safe_limit)
+        return {
+            "ok": True,
+            "scope": "server_wide",
+            "period_days": safe_days,
+            "rankings": rankings,
+            **rankings,
         }
 
     async def _resolve_user(self, user_id: str | None = None, username: str | None = None) -> dict | None:
@@ -214,19 +218,16 @@ class TautulliClient(BaseHttpClient):
                 return fallback
         return None
 
-    def _build_top_media(self, home_stats: object) -> dict[str, list[dict]]:
+    def _build_top_media(self, home_stats: object, *, limit: int = 10) -> dict[str, list[dict]]:
         if not isinstance(home_stats, list):
             return {
-                "top_movies_by_plays": [],
-                "top_movies_by_users": [],
-                "top_tv_by_plays": [],
-                "top_tv_by_users": [],
+                "movies_by_plays": [],
+                "movies_by_unique_viewers": [],
+                "tv_by_plays": [],
+                "tv_by_unique_viewers": [],
             }
 
-        top_movies_by_plays: list[dict] = []
-        top_movies_by_users: list[dict] = []
-        top_tv_by_plays: list[dict] = []
-        top_tv_by_users: list[dict] = []
+        merged: dict[tuple[str, str], dict] = {}
         for block in home_stats:
             if not isinstance(block, dict):
                 continue
@@ -240,28 +241,51 @@ class TautulliClient(BaseHttpClient):
                 title = str(row.get("title") or row.get("full_title") or "").strip()
                 if not title:
                     continue
-                record = {
-                    "title": title,
-                    "media_type": row.get("media_type"),
-                    "year": row.get("year"),
-                    "rating_key": row.get("rating_key"),
-                    "play_count": row.get("total_plays") or row.get("plays"),
-                    "users_watched": row.get("users_watched"),
-                }
-                if stat_id == "top_movies":
-                    top_movies_by_plays.append(record)
-                elif stat_id == "popular_movies":
-                    top_movies_by_users.append(record)
-                elif stat_id == "top_tv":
-                    top_tv_by_plays.append(record)
-                elif stat_id == "popular_tv":
-                    top_tv_by_users.append(record)
+                category = "movie" if stat_id in {"top_movies", "popular_movies"} else "show" if stat_id in {"top_tv", "popular_tv"} else None
+                if category is None:
+                    continue
+                rating_key = str(row.get("rating_key") or "").strip()
+                identity = rating_key or f"{title.lower()}::{row.get('year') or ''}"
+                key = (category, identity)
+                record = merged.setdefault(
+                    key,
+                    {
+                        "title": title,
+                        "media_type": category,
+                        "year": row.get("year"),
+                        "rating_key": rating_key or None,
+                        "play_count": 0,
+                        "unique_viewer_count": 0,
+                    },
+                )
+                plays = self._count_value(row.get("total_plays") if row.get("total_plays") is not None else row.get("plays"))
+                viewers = self._count_value(row.get("users_watched"))
+                record["play_count"] = max(int(record["play_count"]), plays)
+                record["unique_viewer_count"] = max(int(record["unique_viewer_count"]), viewers)
+
+        movies = [row for (category, _), row in merged.items() if category == "movie"]
+        tv = [row for (category, _), row in merged.items() if category == "show"]
+
+        def by_plays(row: dict) -> tuple[int, int, str]:
+            return (-int(row["play_count"]), -int(row["unique_viewer_count"]), str(row["title"]).lower())
+
+        def by_viewers(row: dict) -> tuple[int, int, str]:
+            return (-int(row["unique_viewer_count"]), -int(row["play_count"]), str(row["title"]).lower())
+
         return {
-            "top_movies_by_plays": top_movies_by_plays[:10],
-            "top_movies_by_users": top_movies_by_users[:10],
-            "top_tv_by_plays": top_tv_by_plays[:10],
-            "top_tv_by_users": top_tv_by_users[:10],
+            "movies_by_plays": sorted(movies, key=by_plays)[:limit],
+            "movies_by_unique_viewers": sorted(movies, key=by_viewers)[:limit],
+            "tv_by_plays": sorted(tv, key=by_plays)[:limit],
+            "tv_by_unique_viewers": sorted(tv, key=by_viewers)[:limit],
         }
+
+    def _count_value(self, value: object) -> int:
+        if isinstance(value, list):
+            return len(value)
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
     async def _api(self, cmd: str, **params: str) -> object:
         if not self.api_key:

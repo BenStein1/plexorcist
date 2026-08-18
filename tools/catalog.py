@@ -154,6 +154,9 @@ class Toolkit:
             "requests": entries,
         }
 
+    async def get_plex_popularity(self, days: int = 30, limit: int = 10) -> dict:
+        return await self.recs.get_plex_popularity(days=days, limit=limit)
+
     async def get_token_usage(self) -> dict:
         if not self.is_admin:
             return self._admin_required()
@@ -554,6 +557,17 @@ CATALOG: list[ToolSpec] = [
         input_model=schemas.RequestHistoryInput,
         resolve=lambda tk: tk.get_my_request_history,
         tags=_tags(READONLY, REQUEST),
+    ),
+    ToolSpec(
+        name="get_plex_popularity",
+        description=(
+            "Read server-wide Plex popularity from Tautulli. Returns separate movie and TV rankings by total plays "
+            "and by unique viewers, with both metrics on every title. Use for 'what is popular' questions; these are "
+            "server-wide statistics, never the authenticated user's personal watch history."
+        ),
+        input_model=schemas.PopularityInput,
+        resolve=lambda tk: tk.get_plex_popularity,
+        tags=_tags(READONLY),
     ),
     ToolSpec(
         name="set_my_friendly_name",

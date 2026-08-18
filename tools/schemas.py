@@ -35,6 +35,11 @@ class RequestHistoryInput(ToolInput):
     limit: int = Field(default=50, ge=1, le=100, description="Maximum number of newest confirmed requests to return.")
 
 
+class PopularityInput(ToolInput):
+    days: int = Field(default=30, ge=1, le=365, description="Number of recent days to rank.")
+    limit: int = Field(default=10, ge=1, le=25, description="Maximum titles in each ranking.")
+
+
 # --- Media lookup -----------------------------------------------------------
 
 
