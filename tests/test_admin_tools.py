@@ -139,8 +139,10 @@ async def test_summary_accepts_enum_scope_and_lists_verbatim_ids(tmp_path):
     note_id = result["tasks"][0]["note_id"]
     assert result["user_summary"] == (
         "Found 1 live open user task(s), verbatim:\n"
-        f"- [note_id={note_id}] Jeff (jeff1, u-jeff): {exact}"
+        f"- [{note_id}] Jeff (jeff1): {exact}"
     )
+    assert result["tasks"][0]["note_id"] == note_id
+    assert result["tasks"][0]["user_id"] == "u-jeff"
 
 
 @pytest.mark.asyncio

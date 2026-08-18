@@ -167,6 +167,7 @@ class AdminTools:
         for row in rows:
             user_id = str(row["user_id"])
             user_label = self._format_user_label(user_id, users.get(user_id))
+            display_label = self._format_user_label("", users.get(user_id)) or user_label
             searchable = " ".join(
                 str(item or "")
                 for item in (
@@ -185,6 +186,7 @@ class AdminTools:
                     "note_id": row["note_id"],
                     "user_id": user_id,
                     "user_label": user_label,
+                    "display_label": display_label,
                     "note_type": row["note_type"],
                     "status": row["status"],
                     "content": row["content"],
@@ -205,7 +207,7 @@ class AdminTools:
         else:
             lines = [f"Found {len(tasks)} live open user task(s), verbatim:"]
             for task in tasks:
-                lines.append(f"- [note_id={task['note_id']}] {task['user_label']}: {task['content']}")
+                lines.append(f"- [{task['note_id']}] {task['display_label']}: {task['content']}")
             summary = "\n".join(lines)
 
         return {

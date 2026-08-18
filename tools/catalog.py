@@ -551,7 +551,8 @@ CATALOG: list[ToolSpec] = [
             "Use when the admin asks about open user tasks, unresolved issues, or what a named user has pending. "
             "scope='all_users' for broad questions ('any open tasks?', 'anything new?'); scope='specific_user' only when a user is named. "
             "Omit days to include every open task regardless of age. Each task includes exact stored content and a note_id. "
-            "When presenting a task list, preserve every returned task's exact content and note_id; do not merge, deduplicate, paraphrase, or supplement it from chat memory. "
+            "When presenting a task list, preserve every returned task's exact content and use the compact '- [note_id] Friendly name (username): content' format from user_summary. "
+            "Do not print internal user IDs, merge, deduplicate, paraphrase, or supplement the list from chat memory. "
             "Use note_id with resolve_admin_task once a task is fixed."
         ),
         input_model=schemas.AdminTaskSummaryInput,
