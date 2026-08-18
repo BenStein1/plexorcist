@@ -8,6 +8,7 @@ falls back cleanly instead of hanging or crashing.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,7 +57,16 @@ class FakeToolkit:
         raise RuntimeError("handler exploded")
 
     async def notice(self, summary: str, priority: int | None = None) -> dict:
-        return {"ok": True, "summary": summary}
+        return {
+            "ok": True,
+            "summary": summary,
+            "delivery_confirmation": {
+                "direction": "user_to_admin",
+                "status": "sent",
+                "recipient_label": "the admin",
+                "message": summary,
+            },
+        }
 
 
 FAKE_SPECS = [
@@ -225,9 +235,46 @@ async def test_final_text_not_overwritten_when_tool_calls_succeeded():
     agent = _agent(client, _bridge())
     reply, tool_calls = await agent.respond(_user(), _state(), "let the admin know about this")
 
-    assert reply == "Custom final reply from the model."
+    assert reply == (
+        "Custom final reply from the model.\n\n"
+        "Message confirmation — Sent to the admin:\nissue"
+    )
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "send_admin_prowl_notice"
+
+
+def test_admin_message_confirmation_echoes_exact_multiline_text():
+    exact = "The new season is ready.\nThanks for the cat food. : )"
+    call = SimpleNamespace(
+        result={
+            "ok": True,
+            "delivery_confirmation": {
+                "direction": "admin_to_user",
+                "status": "queued",
+                "recipient_label": "Alice",
+                "message": exact,
+            },
+        }
+    )
+
+    reply = ConciergeAgent._append_delivery_confirmations("Done.", [call])
+
+    assert reply == f"Done.\n\nMessage confirmation — Queued for Alice:\n{exact}"
+
+
+def test_failed_message_delivery_has_no_confirmation_echo():
+    call = SimpleNamespace(
+        result={
+            "ok": False,
+            "delivery_confirmation": {
+                "status": "sent",
+                "recipient_label": "the admin",
+                "message": "This was not delivered",
+            },
+        }
+    )
+
+    assert ConciergeAgent._append_delivery_confirmations("It failed.", [call]) == "It failed."
 
 
 # --- (e) max-turns exhaustion -> fallback reply, no crash/hang --------------

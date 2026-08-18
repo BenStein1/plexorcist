@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from difflib import SequenceMatcher
 import json
 import re
+import unicodedata
 from typing import Any
 
 import httpx
@@ -127,8 +129,8 @@ class AdminTools:
         self,
         user_query: str | None = None,
         scope: str = "all_users",
-        days: int = 30,
-        limit: int = 20,
+        days: int | None = None,
+        limit: int | None = None,
     ) -> dict[str, Any]:
         if self.store is None:
             return {
@@ -138,9 +140,10 @@ class AdminTools:
                 "user_summary": "Admin task summary is unavailable because the memory store is not configured.",
             }
 
-        days = max(1, min(int(days or 30), 365))
-        limit = max(1, min(int(limit or 20), 100))
-        scope = str(scope or "all_users").strip().lower()
+        days = max(1, min(int(days), 365)) if days is not None else None
+        limit = max(1, min(int(limit or 100), 100))
+        scope_value = getattr(scope, "value", scope)
+        scope = str(scope_value or "all_users").strip().lower()
         if scope not in {"all_users", "specific_user"}:
             scope = "all_users"
         query = (user_query or "").strip()
@@ -197,13 +200,12 @@ class AdminTools:
 
         if not tasks:
             target = f" for {query}" if query else ""
-            summary = f"No open user tasks found{target} in the last {days} day(s)."
+            window = f" in the last {days} day(s)" if days is not None else ""
+            summary = f"No open user tasks found{target}{window}."
         else:
-            lines = [f"Found {len(tasks)} open user task(s):"]
-            for task in tasks[:10]:
-                lines.append(f"- User {task['user_label']}: {task['content']}")
-            if len(tasks) > 10:
-                lines.append(f"- plus {len(tasks) - 10} more.")
+            lines = [f"Found {len(tasks)} live open user task(s), verbatim:"]
+            for task in tasks:
+                lines.append(f"- [note_id={task['note_id']}] {task['user_label']}: {task['content']}")
             summary = "\n".join(lines)
 
         return {
@@ -222,6 +224,7 @@ class AdminTools:
         self,
         note_id: int | None = None,
         task_query: str | None = None,
+        resolve_all_matches: bool = False,
     ) -> dict[str, Any]:
         if self.store is None:
             return {
@@ -232,20 +235,36 @@ class AdminTools:
             }
 
         if note_id is not None:
-            resolved = self.store.resolve_user_memory_note(int(note_id))
-            if not resolved:
+            task = self._get_open_task(int(note_id))
+            if task is None:
                 return {
                     "ok": False,
                     "action": "admin_task_resolve",
                     "reason": "task_not_found",
                     "note_id": note_id,
+                    "verified_closed": False,
                     "user_summary": f"I couldn't find an open task with id {note_id} to resolve.",
+                }
+            resolved = self.store.resolve_user_memory_note(int(note_id))
+            verified_closed = resolved and self._get_open_task(int(note_id)) is None
+            if not verified_closed:
+                return {
+                    "ok": False,
+                    "action": "admin_task_resolve",
+                    "reason": "task_update_failed",
+                    "note_id": note_id,
+                    "verified_closed": False,
+                    "user_summary": f"Task {note_id} was found but is still open after the update attempt.",
                 }
             return {
                 "ok": True,
                 "action": "admin_task_resolve",
                 "note_id": note_id,
-                "user_summary": "Marked that task resolved.",
+                "resolved_task": task,
+                "resolved_note_ids": [int(note_id)],
+                "resolved_count": 1,
+                "verified_closed": True,
+                "user_summary": f"Closed and verified task {note_id}: {task['content']}",
             }
 
         query = str(task_query or "").strip()
@@ -257,35 +276,42 @@ class AdminTools:
                 "user_summary": "I need either a note_id from a recent task summary or a description of the task to resolve.",
             }
 
-        rows = self._query_open_tasks(days=365, limit=200)
+        rows = self._query_open_tasks(days=None, limit=1000)
         users = self._load_user_labels()
-        matches: list[dict[str, Any]] = []
-        lowered_query = query.lower()
+        scored_matches: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
-            metadata = self._parse_json(row.get("metadata_json"), default={})
-            searchable = " ".join(
-                str(item or "")
-                for item in (
-                    row.get("content"),
-                    row.get("task_id"),
-                    json.dumps(metadata, ensure_ascii=False) if metadata else "",
-                )
-            ).lower()
-            if lowered_query not in searchable:
-                continue
             user_id = str(row["user_id"])
-            matches.append(
-                {
-                    "note_id": row["note_id"],
-                    "user_id": user_id,
-                    "user_label": self._format_user_label(user_id, users.get(user_id)),
-                    "content": row["content"],
-                    "status": row["status"],
-                    "updated_at": row["updated_at"],
-                }
+            user_label = self._format_user_label(user_id, users.get(user_id))
+            metadata = self._parse_json(row.get("metadata_json"), default={})
+            score = self._task_match_score(
+                query,
+                user_id=user_id,
+                user_label=user_label,
+                note_type=str(row.get("note_type") or ""),
+                content=str(row.get("content") or ""),
+                task_id=str(row.get("task_id") or ""),
+                metadata=metadata,
+            )
+            if score < 0.58:
+                continue
+            scored_matches.append(
+                (
+                    score,
+                    {
+                        "note_id": row["note_id"],
+                        "user_id": user_id,
+                        "user_label": user_label,
+                        "content": row["content"],
+                        "task_id": row["task_id"],
+                        "status": row["status"],
+                        "updated_at": row["updated_at"],
+                        "metadata": metadata,
+                        "match_score": round(score, 3),
+                    },
+                )
             )
 
-        if not matches:
+        if not scored_matches:
             return {
                 "ok": False,
                 "action": "admin_task_resolve",
@@ -293,27 +319,53 @@ class AdminTools:
                 "task_query": task_query,
                 "user_summary": f"I could not find an open task matching {task_query}.",
             }
-        if len(matches) > 1:
+
+        top_score = max(item[0] for item in scored_matches)
+        selected = [item for item in scored_matches if item[0] >= max(0.58, top_score - 0.08)]
+        matches = [item[1] for item in selected]
+        unique_user_ids = {str(match["user_id"]) for match in matches}
+        same_user_group = len(unique_user_ids) == 1 and self._query_has_task_terms_for_user(
+            query,
+            matches[0]["user_label"],
+        )
+        if len(matches) > 1 and not (resolve_all_matches or same_user_group):
             return {
                 "ok": False,
                 "action": "admin_task_resolve",
                 "reason": "task_ambiguous",
                 "task_query": task_query,
                 "candidates": matches[:10],
-                "user_summary": "That matches multiple open tasks. Which one? "
+                "user_summary": "That matches open tasks for multiple people. Choose note_id(s), or retry with resolve_all_matches=true: "
                 + "; ".join(f"{m['user_label']}: {m['content']}" for m in matches[:5]),
             }
 
-        match = matches[0]
-        resolved = self.store.resolve_user_memory_note(int(match["note_id"]))
+        targets = matches if (resolve_all_matches or same_user_group) else matches[:1]
+        resolved_tasks: list[dict[str, Any]] = []
+        failed_note_ids: list[int] = []
+        for match in targets:
+            target_id = int(match["note_id"])
+            if self.store.resolve_user_memory_note(target_id) and self._get_open_task(target_id) is None:
+                resolved_tasks.append(match)
+            else:
+                failed_note_ids.append(target_id)
+        resolved_note_ids = [int(match["note_id"]) for match in resolved_tasks]
+        verified_closed = bool(resolved_tasks) and not failed_note_ids
         return {
-            "ok": bool(resolved),
+            "ok": verified_closed,
             "action": "admin_task_resolve",
-            "note_id": match["note_id"],
-            "resolved_task": match,
-            "user_summary": f"Marked resolved: {match['user_label']}: {match['content']}"
-            if resolved
-            else f"I found a matching task but couldn't update it (id {match['note_id']}).",
+            "note_id": resolved_note_ids[0] if len(resolved_note_ids) == 1 else None,
+            "resolved_note_ids": resolved_note_ids,
+            "resolved_count": len(resolved_tasks),
+            "resolved_tasks": resolved_tasks,
+            "failed_note_ids": failed_note_ids,
+            "verified_closed": verified_closed,
+            "match_scope": "explicit_all" if resolve_all_matches else ("same_user_group" if same_user_group else "single"),
+            "user_summary": (
+                f"Closed and verified {len(resolved_tasks)} task(s): "
+                + "; ".join(f"[{m['note_id']}] {m['user_label']}: {m['content']}" for m in resolved_tasks)
+                if verified_closed
+                else f"Some matching tasks are still open after the update attempt: {failed_note_ids}."
+            ),
         }
 
     async def find_users(self, query: str | None = None, limit: int = 25) -> dict[str, Any]:
@@ -467,6 +519,13 @@ class AdminTools:
             "recipient": recipient,
             "recipient_label": recipient["label"],
             "message": message,
+            "sent_message": message,
+            "delivery_confirmation": {
+                "direction": "admin_to_user",
+                "status": "queued",
+                "recipient_label": recipient["label"],
+                "message": message,
+            },
             "target_basis": resolved.get("target_basis"),
             "matched_task": resolved.get("matched_task"),
             "user_summary": f"Queued admin message for {recipient['label']}: {message}",
@@ -654,19 +713,102 @@ class AdminTools:
             "percent_done": torrent.get("percentDone"),
         }
 
-    def _query_open_tasks(self, *, days: int, limit: int) -> list[dict[str, Any]]:
+    def _get_open_task(self, note_id: int) -> dict[str, Any] | None:
         with self.store._connect() as conn:  # type: ignore[union-attr, protected-access]
-            rows = conn.execute(
+            row = conn.execute(
                 """
                 SELECT id, user_id, note_type, content, task_id, status, tier, metadata_json, created_at, updated_at
                 FROM user_memory_notes
-                WHERE status IN ('open', 'unresolved')
-                  AND datetime(updated_at) >= datetime('now', ?)
-                ORDER BY datetime(updated_at) DESC
-                LIMIT ?
+                WHERE id = ? AND status IN ('open', 'unresolved')
                 """,
-                (f"-{int(days)} days", int(limit)),
-            ).fetchall()
+                (int(note_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        columns = ["note_id", "user_id", "note_type", "content", "task_id", "status", "tier", "metadata_json", "created_at", "updated_at"]
+        task = dict(zip(columns, row))
+        task["metadata"] = self._parse_json(task.pop("metadata_json", None), default={})
+        return task
+
+    @staticmethod
+    def _normalize_task_text(value: Any) -> str:
+        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        return " ".join("".join(char if char.isalnum() else " " for char in normalized).split())
+
+    @classmethod
+    def _task_match_score(
+        cls,
+        query: str,
+        *,
+        user_id: str,
+        user_label: str,
+        note_type: str,
+        content: str,
+        task_id: str,
+        metadata: dict[str, Any],
+    ) -> float:
+        normalized_query = cls._normalize_task_text(query)
+        if not normalized_query:
+            return 0.0
+        chunks = [
+            content,
+            f"{user_label} {content}",
+            user_label,
+            user_id,
+            note_type,
+            task_id,
+            json.dumps(metadata, ensure_ascii=False) if metadata else "",
+        ]
+        normalized_chunks = [cls._normalize_task_text(chunk) for chunk in chunks if chunk]
+        searchable = " ".join(normalized_chunks)
+        if normalized_query in searchable:
+            return 1.0
+
+        query_tokens = set(normalized_query.split())
+        searchable_tokens = set(searchable.split())
+        if not query_tokens:
+            return 0.0
+        overlap = len(query_tokens & searchable_tokens) / len(query_tokens)
+        if query_tokens <= searchable_tokens:
+            return 0.98
+        sequence = max(
+            (SequenceMatcher(None, normalized_query, chunk).ratio() for chunk in normalized_chunks),
+            default=0.0,
+        )
+        return (overlap * 0.72) + (sequence * 0.28)
+
+    @classmethod
+    def _query_has_task_terms_for_user(cls, query: str, user_label: str) -> bool:
+        query_tokens = set(cls._normalize_task_text(query).split())
+        label_tokens = set(cls._normalize_task_text(user_label).split())
+        task_tokens = {token for token in query_tokens - label_tokens if len(token) >= 2}
+        return bool(task_tokens)
+
+    def _query_open_tasks(self, *, days: int | None, limit: int) -> list[dict[str, Any]]:
+        with self.store._connect() as conn:  # type: ignore[union-attr, protected-access]
+            if days is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, user_id, note_type, content, task_id, status, tier, metadata_json, created_at, updated_at
+                    FROM user_memory_notes
+                    WHERE status IN ('open', 'unresolved')
+                    ORDER BY datetime(updated_at) DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, user_id, note_type, content, task_id, status, tier, metadata_json, created_at, updated_at
+                    FROM user_memory_notes
+                    WHERE status IN ('open', 'unresolved')
+                      AND datetime(updated_at) >= datetime('now', ?)
+                    ORDER BY datetime(updated_at) DESC
+                    LIMIT ?
+                    """,
+                    (f"-{int(days)} days", int(limit)),
+                ).fetchall()
         columns = ["note_id", "user_id", "note_type", "content", "task_id", "status", "tier", "metadata_json", "created_at", "updated_at"]
         return [dict(zip(columns, row)) for row in rows]
 

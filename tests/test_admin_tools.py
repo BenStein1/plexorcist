@@ -9,6 +9,7 @@ from backend.auth_store import PlexAuthSessionStore
 from backend.models import PlexAuthSession
 from backend.state import ConversationStore
 from tools.admin_tools import AdminTools
+from tools.schemas import AdminSummaryScope
 
 
 def _store(tmp_path) -> ConversationStore:
@@ -56,6 +57,7 @@ async def test_resolve_by_note_id_closes_task(tmp_path):
 
     assert result["ok"] is True
     assert result["note_id"] == note_id
+    assert result["verified_closed"] is True
     summary = await tools.get_admin_task_summary(scope="all_users")
     assert summary["task_count"] == 0
 
@@ -114,6 +116,74 @@ async def test_resolve_by_task_query_ambiguous_does_not_guess(tmp_path):
     # neither task was actually closed
     summary = await tools.get_admin_task_summary(scope="all_users")
     assert summary["task_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_summary_accepts_enum_scope_and_lists_verbatim_ids(tmp_path):
+    store = _store(tmp_path)
+    PlexAuthSessionStore(f"sqlite:///{tmp_path / 'admin_tools.db'}").save(
+        PlexAuthSession(session_id="s-jeff", user_id="u-jeff", username="jeff1", display_name="Jeff", is_admin=False)
+    )
+    exact = "Dutton Ranch S1E8 — reset to wanted / look again"
+    _add_note(store, user_id="u-jeff", content=exact)
+    _add_note(store, user_id="u-other", content="Unrelated old task")
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.get_admin_task_summary(
+        scope=AdminSummaryScope.SPECIFIC_USER,
+        user_query="Jeff",
+    )
+
+    assert result["scope"] == "specific_user"
+    assert result["task_count"] == 1
+    note_id = result["tasks"][0]["note_id"]
+    assert result["user_summary"] == (
+        "Found 1 live open user task(s), verbatim:\n"
+        f"- [note_id={note_id}] Jeff (jeff1, u-jeff): {exact}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_natural_paraphrase_closes_matching_task(tmp_path):
+    store = _store(tmp_path)
+    _add_note(
+        store,
+        user_id="u1",
+        content="Seven Days in May (1964) — queued for replacement/request, waiting on import",
+    )
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(
+        task_query="Seven Days in May 1964 replacement request waiting import"
+    )
+
+    assert result["ok"] is True
+    assert result["verified_closed"] is True
+    assert result["resolved_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_same_user_title_duplicates_close_together_without_touching_other_user(tmp_path):
+    store = _store(tmp_path)
+    auth_store = PlexAuthSessionStore(f"sqlite:///{tmp_path / 'admin_tools.db'}")
+    auth_store.save(
+        PlexAuthSession(session_id="s-jeff", user_id="u-jeff", username="jeff1", display_name="Jeff", is_admin=False)
+    )
+    auth_store.save(
+        PlexAuthSession(session_id="s-jared", user_id="u-jared", username="jared1", display_name="Jared", is_admin=False)
+    )
+    _add_note(store, user_id="u-jeff", content="Dutton Ranch S1E8 — reset to wanted / look again")
+    _add_note(store, user_id="u-jeff", content="Dutton Ranch S1E9 — reminder to download after July 3")
+    _add_note(store, user_id="u-jared", content="Dutton Ranch S1E8 is missing")
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(task_query="Jeff Dutton Ranch")
+
+    assert result["ok"] is True
+    assert result["verified_closed"] is True
+    assert result["resolved_count"] == 2
+    remaining = await tools.get_admin_task_summary(scope="all_users")
+    assert [task["user_label"] for task in remaining["tasks"]] == ["Jared (jared1, u-jared)"]
 
 
 @pytest.mark.asyncio

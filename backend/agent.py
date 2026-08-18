@@ -165,6 +165,7 @@ class ConciergeAgent:
                     if plain_reply is not None
                     else "I ran the checks I could, but I need a little more detail to answer cleanly."
                 )
+            reply = self._append_delivery_confirmations(reply, tool_calls)
             state.messages.append(ChatMessage(role="assistant", content=reply))
             self._advance_nilbog_memory_mode(state, reply)
             state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
@@ -174,6 +175,7 @@ class ConciergeAgent:
         if not last_failure_reason:
             last_failure_reason = "max_turns_without_final_text"
         reply = self._fallback_reply_from_tool_calls(user, tool_calls, last_failure_reason)
+        reply = self._append_delivery_confirmations(reply, tool_calls)
         state.messages.append(ChatMessage(role="assistant", content=reply))
         self._advance_nilbog_memory_mode(state, reply)
         state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
@@ -197,10 +199,37 @@ class ConciergeAgent:
             reply = self._fallback_reply_from_tool_calls(user, tool_calls, failure_reason)
         else:
             reply = fallback_text or "I hit an upstream API error while generating that reply. Please retry."
+        reply = self._append_delivery_confirmations(reply, tool_calls)
         state.messages.append(ChatMessage(role="assistant", content=reply))
         state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
+
+    @staticmethod
+    def _append_delivery_confirmations(reply: str, tool_calls: list[Any]) -> str:
+        confirmations: list[str] = []
+        seen: set[tuple[str, str, str]] = set()
+        for call in tool_calls:
+            result = getattr(call, "result", None)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                continue
+            confirmation = result.get("delivery_confirmation")
+            if not isinstance(confirmation, dict):
+                continue
+            message = str(confirmation.get("message") or "")
+            recipient = str(confirmation.get("recipient_label") or "the recipient").strip()
+            status = str(confirmation.get("status") or "sent").strip().lower()
+            if not message:
+                continue
+            key = (status, recipient, message)
+            if key in seen:
+                continue
+            seen.add(key)
+            verb = "Queued for" if status == "queued" else "Sent to"
+            confirmations.append(f"Message confirmation — {verb} {recipient}:\n{message}")
+        if not confirmations:
+            return reply
+        return f"{reply.rstrip()}\n\n" + "\n\n".join(confirmations)
 
     def _plain_support_reply_from_tool_calls(self, user: UserContext, tool_calls: list[Any]) -> str | None:
         if user.is_admin or not tool_calls:

@@ -134,7 +134,13 @@ class Toolkit:
             return self._admin_required()
         return await self.admin_tools.run_transmission_maintenance()
 
-    async def get_admin_task_summary(self, user_query: str | None = None, scope: str = "all_users", days: int = 30, limit: int = 20) -> dict:
+    async def get_admin_task_summary(
+        self,
+        user_query: str | None = None,
+        scope: str = "all_users",
+        days: int | None = None,
+        limit: int | None = None,
+    ) -> dict:
         if not self.is_admin:
             return self._admin_required()
         return await self.admin_tools.get_admin_task_summary(user_query=user_query, scope=scope, days=days, limit=limit)
@@ -164,10 +170,19 @@ class Toolkit:
             return self._admin_required()
         return await self.admin_tools.clear_admin_motd()
 
-    async def resolve_admin_task(self, note_id: int | None = None, task_query: str | None = None) -> dict:
+    async def resolve_admin_task(
+        self,
+        note_id: int | None = None,
+        task_query: str | None = None,
+        resolve_all_matches: bool = False,
+    ) -> dict:
         if not self.is_admin:
             return self._admin_required()
-        return await self.admin_tools.resolve_admin_task(note_id=note_id, task_query=task_query)
+        return await self.admin_tools.resolve_admin_task(
+            note_id=note_id,
+            task_query=task_query,
+            resolve_all_matches=resolve_all_matches,
+        )
 
     async def set_user_friendly_name(self, user_query: str, friendly_name: str) -> dict:
         if not self.is_admin:
@@ -532,10 +547,12 @@ CATALOG: list[ToolSpec] = [
     ToolSpec(
         name="get_admin_task_summary",
         description=(
-            "Admin-only task dashboard over compact memory/task summaries (not raw conversations). "
+            "Admin-only LIVE task dashboard over compact memory/task records (not raw conversations or remembered lists). "
             "Use when the admin asks about open user tasks, unresolved issues, or what a named user has pending. "
             "scope='all_users' for broad questions ('any open tasks?', 'anything new?'); scope='specific_user' only when a user is named. "
-            "Each returned task includes a note_id — use it with resolve_admin_task to close a task once it's actually fixed, so it stops showing up here."
+            "Omit days to include every open task regardless of age. Each task includes exact stored content and a note_id. "
+            "When presenting a task list, preserve every returned task's exact content and note_id; do not merge, deduplicate, paraphrase, or supplement it from chat memory. "
+            "Use note_id with resolve_admin_task once a task is fixed."
         ),
         input_model=schemas.AdminTaskSummaryInput,
         resolve=lambda tk: tk.get_admin_task_summary,
@@ -547,7 +564,9 @@ CATALOG: list[ToolSpec] = [
             "Admin-only: mark an open task/issue as resolved so it stops appearing in get_admin_task_summary. "
             "Use when the admin says a task/issue is fixed, done, resolved, handled, or no longer needed. "
             "Prefer note_id from a get_admin_task_summary result seen earlier in this conversation — it's unambiguous. "
-            "Otherwise pass task_query describing it; if that matches more than one open task, ask the admin which one instead of guessing which to close."
+            "Otherwise pass task_query in the admin's natural wording; backend matching covers user labels, exact task text, metadata, and close paraphrases. "
+            "If matching tasks are duplicates for the same person/title, they are closed together automatically. Set resolve_all_matches=true when the admin says all/every/both or supplies a bulk close instruction. "
+            "Never claim success unless ok=true and verified_closed=true; after failure, use returned candidates/note_ids instead of asking the admin to reword the same task repeatedly."
         ),
         input_model=schemas.ResolveAdminTaskInput,
         resolve=lambda tk: tk.resolve_admin_task,

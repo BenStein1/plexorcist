@@ -159,8 +159,8 @@ class AdminSummaryScope(str, Enum):
 class AdminTaskSummaryInput(ToolInput):
     scope: AdminSummaryScope = Field(description="'all_users' for broad questions like 'any open tasks?' or 'anything need attention?'. 'specific_user' ONLY when the admin names a user, friendly name, username, or user id.")
     user_query: str | None = Field(default=None, description="The named user/friendly name/username/user id, when scope is 'specific_user'.")
-    days: int | None = Field(default=None, ge=1, le=365, description="Lookback window in days (default 30).")
-    limit: int | None = Field(default=None, ge=1, le=100, description="Max tasks to return (default 20).")
+    days: int | None = Field(default=None, ge=1, le=365, description="Optional lookback window in days. Omit it to return all live open tasks regardless of age.")
+    limit: int | None = Field(default=None, ge=1, le=100, description="Max tasks to return (default 100).")
 
     @model_validator(mode="after")
     def _user_query_when_specific(self) -> "AdminTaskSummaryInput":
@@ -181,7 +181,8 @@ class SetMotdInput(ToolInput):
 
 class ResolveAdminTaskInput(ToolInput):
     note_id: int | None = Field(default=None, ge=1, description="The exact task's note_id from a recent get_admin_task_summary result in this conversation. Prefer this when available — it resolves unambiguously.")
-    task_query: str | None = Field(default=None, description="Fallback when note_id is unknown: describe the task/title/issue in plain language. If it matches more than one open task, you'll be asked to pick one instead of guessing.")
+    task_query: str | None = Field(default=None, description="Fallback when note_id is unknown: describe the person/title/issue in natural language. The backend matches user labels, stored text, metadata, and close paraphrases.")
+    resolve_all_matches: bool = Field(default=False, description="Close every matching task. Use when the admin says all/every/both, gives a bulk-close instruction, or wants duplicate tasks for one person/title cleared.")
 
     @model_validator(mode="after")
     def _require_target(self) -> "ResolveAdminTaskInput":

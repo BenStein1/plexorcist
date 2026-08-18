@@ -30,15 +30,25 @@ class EscalationTools:
     async def send_admin_prowl_notice(self, summary: str, priority: int = 0, event: str = "Concierge Alert") -> dict:
         formatted_summary = self._format_admin_summary(summary)
         try:
-            return await self.prowl.send_notice(summary=formatted_summary, priority=priority, event=event)
+            result = await self.prowl.send_notice(summary=formatted_summary, priority=priority, event=event)
         except Exception as exc:  # noqa: BLE001
-            return {
+            result = {
                 "ok": False,
                 "summary": formatted_summary,
                 "priority": priority,
                 "event": event,
                 "error": str(exc),
             }
+        result = dict(result)
+        result["sent_message"] = formatted_summary
+        if result.get("ok"):
+            result["delivery_confirmation"] = {
+                "direction": "user_to_admin",
+                "status": "sent",
+                "recipient_label": "the admin",
+                "message": formatted_summary,
+            }
+        return result
 
     def _format_admin_summary(self, summary: str) -> str:
         summary = summary.strip()

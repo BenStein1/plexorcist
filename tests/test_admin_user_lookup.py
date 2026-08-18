@@ -194,6 +194,13 @@ async def test_registered_user_wins_over_a_ledger_only_near_match(tmp_path):
     result = await tools.send_admin_message(user_query="Mikeston Hall", message="it's in there now")
 
     assert result["ok"] is True
+    assert result["sent_message"] == "it's in there now"
+    assert result["delivery_confirmation"] == {
+        "direction": "admin_to_user",
+        "status": "queued",
+        "recipient_label": "Mikeston Hall (mikestonhall, u-1)",
+        "message": "it's in there now",
+    }
     assert _admin_note_count(store) == 1
     with store._connect() as conn:  # noqa: SLF001
         assert conn.execute("SELECT user_id FROM user_memory_notes").fetchone()[0] == "u-1"
