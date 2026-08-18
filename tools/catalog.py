@@ -97,17 +97,27 @@ class Toolkit:
     async def request_movie(self, tmdb_id: int | None = None, title: str | None = None, year: int | None = None) -> dict:
         if not self._username:
             return self._auth_required()
-        return await self.requests.request_movie_for_user(username=self._username, tmdb_id=tmdb_id, title=title, year=year)
+        return await self.requests.request_movie_for_user(
+            username=self._username, user_id=self.user.user_id, tmdb_id=tmdb_id, title=title, year=year
+        )
 
     async def request_show_scope(self, tvdb_id: int, scope: str) -> dict:
         if not self._username:
             return self._auth_required()
-        return await self.requests.request_show_scope_for_user(username=self._username, tvdb_id=tvdb_id, scope=scope)
+        return await self.requests.request_show_scope_for_user(
+            username=self._username, user_id=self.user.user_id, tvdb_id=tvdb_id, scope=scope
+        )
 
     async def request_episode(self, tvdb_id: int, season: int, episode: int) -> dict:
         if not self._username:
             return self._auth_required()
-        return await self.requests.request_episode_for_user(username=self._username, tvdb_id=tvdb_id, season=season, episode=episode)
+        return await self.requests.request_episode_for_user(
+            username=self._username,
+            user_id=self.user.user_id,
+            tvdb_id=tvdb_id,
+            season=season,
+            episode=episode,
+        )
 
     async def check_movie_request_status(self, query: str) -> dict:
         if not self._username:
@@ -122,7 +132,27 @@ class Toolkit:
     async def get_user_watch_context(self) -> dict:
         if not self.user or (not self.user.username and not self.user.user_id):
             return {"resolved": False, "action": "auth_required", "reason": "authenticated_user_required"}
-        return await self.recs.get_user_watch_context(user_id=self.user.user_id, username=self.user.username)
+        context = await self.recs.get_user_watch_context(user_id=self.user.user_id, username=self.user.username)
+        return {
+            **context,
+            "recent_request_history": self.store.list_media_request_history(user_id=self.user.user_id, limit=25),
+        }
+
+    async def get_my_request_history(self, media_type: str | None = None, limit: int = 50) -> dict:
+        if not self.user:
+            return self._auth_required()
+        entries = self.store.list_media_request_history(
+            user_id=self.user.user_id,
+            media_type=media_type,
+            limit=limit,
+        )
+        return {
+            "ok": True,
+            "user_id": self.user.user_id,
+            "media_type": media_type,
+            "request_count": len(entries),
+            "requests": entries,
+        }
 
     async def get_token_usage(self) -> dict:
         if not self.is_admin:
@@ -271,7 +301,7 @@ def build_toolkit(settings: Settings, store: ConversationStore, user: UserContex
         store=store,
         user=user,
         media=MediaSearchTools(ombi, plex),
-        requests=RequestTools(ombi),
+        requests=RequestTools(ombi, store=store),
         episodes=EpisodeTools(plex, sickchill),
         movie_repairs=MovieRepairTools(ombi, radarr),
         repairs=RepairTools(ombi, sickchill),
@@ -514,6 +544,16 @@ CATALOG: list[ToolSpec] = [
         input_model=schemas.EmptyInput,
         resolve=lambda tk: tk.get_user_watch_context,
         tags=_tags(READONLY),
+    ),
+    ToolSpec(
+        name="get_my_request_history",
+        description=(
+            "Read the authenticated user's confirmed request ledger. Use when they ask what they previously requested, "
+            "or as request-specific context for recommendations. These are requests, not proof that the user watched a title."
+        ),
+        input_model=schemas.RequestHistoryInput,
+        resolve=lambda tk: tk.get_my_request_history,
+        tags=_tags(READONLY, REQUEST),
     ),
     ToolSpec(
         name="set_my_friendly_name",

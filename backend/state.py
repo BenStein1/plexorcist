@@ -90,6 +90,39 @@ class ConversationStore:
                 ON openai_token_usage (model, created_at)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_request_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    title TEXT,
+                    year INTEGER,
+                    tmdb_id INTEGER,
+                    tvdb_id INTEGER,
+                    request_scope TEXT NOT NULL,
+                    season INTEGER,
+                    episode INTEGER,
+                    source TEXT NOT NULL DEFAULT 'ombi',
+                    source_request_id TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_media_request_history_user_created
+                ON media_request_history (user_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_media_request_history_source_request
+                ON media_request_history (source, media_type, source_request_id)
+                WHERE source_request_id IS NOT NULL
+                """
+            )
             self._ensure_openai_token_usage_columns(conn)
             self._ensure_conversation_compaction_columns(conn)
 
@@ -415,6 +448,89 @@ class ConversationStore:
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
         }
+
+    def record_media_request(
+        self,
+        *,
+        user_id: str,
+        username: str,
+        media_type: str,
+        request_scope: str,
+        title: str | None = None,
+        year: int | None = None,
+        tmdb_id: int | None = None,
+        tvdb_id: int | None = None,
+        season: int | None = None,
+        episode: int | None = None,
+        source: str = "ombi",
+        source_request_id: str | int | None = None,
+    ) -> dict[str, Any]:
+        """Record one request that the request backend confirmed actually landed."""
+        created_at = datetime.utcnow().isoformat()
+        normalized_source_id = str(source_request_id) if source_request_id is not None else None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO media_request_history (
+                    user_id, username, media_type, title, year, tmdb_id, tvdb_id,
+                    request_scope, season, episode, source, source_request_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(user_id),
+                    str(username),
+                    str(media_type),
+                    str(title).strip() if title else None,
+                    int(year) if year is not None else None,
+                    int(tmdb_id) if tmdb_id is not None else None,
+                    int(tvdb_id) if tvdb_id is not None else None,
+                    str(request_scope),
+                    int(season) if season is not None else None,
+                    int(episode) if episode is not None else None,
+                    str(source),
+                    normalized_source_id,
+                    created_at,
+                ),
+            )
+            inserted = cursor.rowcount > 0
+            if inserted:
+                history_id = int(cursor.lastrowid)
+            elif normalized_source_id is not None:
+                row = conn.execute(
+                    "SELECT id FROM media_request_history WHERE source = ? AND media_type = ? AND source_request_id = ?",
+                    (str(source), str(media_type), normalized_source_id),
+                ).fetchone()
+                history_id = int(row[0]) if row else None
+            else:
+                history_id = None
+        return {"recorded": inserted, "history_id": history_id, "duplicate": not inserted}
+
+    def list_media_request_history(
+        self,
+        *,
+        user_id: str,
+        media_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        sql = (
+            "SELECT id, user_id, username, media_type, title, year, tmdb_id, tvdb_id, "
+            "request_scope, season, episode, source, source_request_id, created_at "
+            "FROM media_request_history WHERE user_id = ? "
+        )
+        params: list[Any] = [str(user_id)]
+        if media_type:
+            sql += "AND media_type = ? "
+            params.append(str(media_type))
+        sql += "ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 100)))
+        with self._connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        keys = (
+            "history_id", "user_id", "username", "media_type", "title", "year",
+            "tmdb_id", "tvdb_id", "request_scope", "season", "episode", "source",
+            "source_request_id", "requested_at",
+        )
+        return [dict(zip(keys, row, strict=True)) for row in rows]
 
     def list_openai_usage_other_models_since(self, *, model: str, since: datetime, limit: int = 10) -> list[str]:
         with self._connect() as conn:

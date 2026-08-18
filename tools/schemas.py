@@ -21,6 +21,20 @@ class EmptyInput(ToolInput):
     """Tool takes no arguments."""
 
 
+class RequestHistoryMediaType(str, Enum):
+    MOVIE = "movie"
+    SHOW = "show"
+    EPISODE = "episode"
+
+
+class RequestHistoryInput(ToolInput):
+    media_type: RequestHistoryMediaType | None = Field(
+        default=None,
+        description="Optional request type to return. Omit to include movies, shows, and episodes.",
+    )
+    limit: int = Field(default=50, ge=1, le=100, description="Maximum number of newest confirmed requests to return.")
+
+
 # --- Media lookup -----------------------------------------------------------
 
 
