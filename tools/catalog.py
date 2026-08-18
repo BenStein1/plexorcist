@@ -98,22 +98,19 @@ class Toolkit:
         if not self._username:
             return self._auth_required()
         return await self.requests.request_movie_for_user(
-            username=self._username, user_id=self.user.user_id, tmdb_id=tmdb_id, title=title, year=year
+            username=self._username, tmdb_id=tmdb_id, title=title, year=year
         )
 
     async def request_show_scope(self, tvdb_id: int, scope: str) -> dict:
         if not self._username:
             return self._auth_required()
-        return await self.requests.request_show_scope_for_user(
-            username=self._username, user_id=self.user.user_id, tvdb_id=tvdb_id, scope=scope
-        )
+        return await self.requests.request_show_scope_for_user(username=self._username, tvdb_id=tvdb_id, scope=scope)
 
     async def request_episode(self, tvdb_id: int, season: int, episode: int) -> dict:
         if not self._username:
             return self._auth_required()
         return await self.requests.request_episode_for_user(
             username=self._username,
-            user_id=self.user.user_id,
             tvdb_id=tvdb_id,
             season=season,
             episode=episode,
@@ -325,7 +322,7 @@ def build_toolkit(settings: Settings, store: ConversationStore, user: UserContex
         store=store,
         user=user,
         media=MediaSearchTools(ombi, plex),
-        requests=RequestTools(ombi, store=store),
+        requests=RequestTools(ombi, store=store, user_id=user.user_id if user else None),
         episodes=EpisodeTools(plex, sickchill),
         movie_repairs=MovieRepairTools(ombi, radarr),
         repairs=RepairTools(ombi, sickchill),

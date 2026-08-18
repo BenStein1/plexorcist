@@ -43,11 +43,11 @@ async def test_confirmed_request_records_authenticated_user(tmp_path):
     tools = RequestTools(
         FakeOmbi({"ok": True, "status": "requested", "ombi": {"requestId": 72}}),
         store=history,
+        user_id="plex-123",
     )
 
     result = await tools.request_movie_for_user(
         username="geoff",
-        user_id="plex-123",
         tmdb_id=578,
     )
 
@@ -80,10 +80,11 @@ async def test_duplicate_source_id_reuses_history_receipt(tmp_path):
     tools = RequestTools(
         FakeOmbi({"ok": True, "status": "requested", "ombi": {"requestId": 72}}),
         store=history,
+        user_id="u1",
     )
 
-    first = await tools.request_movie_for_user(username="geoff", user_id="u1", tmdb_id=578)
-    second = await tools.request_movie_for_user(username="geoff", user_id="u1", tmdb_id=578)
+    first = await tools.request_movie_for_user(username="geoff", tmdb_id=578)
+    second = await tools.request_movie_for_user(username="geoff", tmdb_id=578)
 
     assert second["history_recorded"] is True
     assert second["history_created"] is False
@@ -104,9 +105,9 @@ async def test_duplicate_source_id_reuses_history_receipt(tmp_path):
 )
 async def test_non_new_request_outcomes_do_not_write_history(tmp_path, result):
     history = store(tmp_path)
-    tools = RequestTools(FakeOmbi(result), store=history)
+    tools = RequestTools(FakeOmbi(result), store=history, user_id="u1")
 
-    response = await tools.request_movie_for_user(username="geoff", user_id="u1", tmdb_id=578)
+    response = await tools.request_movie_for_user(username="geoff", tmdb_id=578)
 
     assert "history_recorded" not in response
     assert history.list_media_request_history(user_id="u1") == []

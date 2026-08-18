@@ -52,9 +52,15 @@ def _stamp_request_failure(result: dict, *, operation: str) -> dict:
 
 
 class RequestTools:
-    def __init__(self, ombi: OmbiClient, store: ConversationStore | None = None) -> None:
+    def __init__(
+        self,
+        ombi: OmbiClient,
+        store: ConversationStore | None = None,
+        user_id: str | None = None,
+    ) -> None:
         self.ombi = ombi
         self.store = store
+        self.user_id = user_id
 
     def _record_confirmed_request(
         self,
@@ -135,7 +141,6 @@ class RequestTools:
     async def request_movie_for_user(
         self,
         username: str,
-        user_id: str | None = None,
         tmdb_id: int | None = None,
         title: str | None = None,
         year: int | None = None,
@@ -152,15 +157,13 @@ class RequestTools:
         stamped = _stamp_request_failure(result, operation="movie_request")
         return self._record_confirmed_request(
             stamped,
-            user_id=user_id,
+            user_id=self.user_id,
             username=username,
             media_type="movie",
             request_scope="movie",
         )
 
-    async def request_show_scope_for_user(
-        self, username: str, tvdb_id: int, scope: str, user_id: str | None = None
-    ) -> dict:
+    async def request_show_scope_for_user(self, username: str, tvdb_id: int, scope: str) -> dict:
         not_ready = await self._account_not_ready(username)
         if not_ready is not None:
             return not_ready
@@ -168,7 +171,7 @@ class RequestTools:
         stamped = _stamp_request_failure(result, operation="tv_request")
         return self._record_confirmed_request(
             stamped,
-            user_id=user_id,
+            user_id=self.user_id,
             username=username,
             media_type="show",
             request_scope=scope,
@@ -180,7 +183,6 @@ class RequestTools:
         tvdb_id: int,
         season: int,
         episode: int,
-        user_id: str | None = None,
     ) -> dict:
         not_ready = await self._account_not_ready(username)
         if not_ready is not None:
@@ -194,7 +196,7 @@ class RequestTools:
         stamped = _stamp_request_failure(result, operation="episode_request")
         return self._record_confirmed_request(
             stamped,
-            user_id=user_id,
+            user_id=self.user_id,
             username=username,
             media_type="episode",
             request_scope="episode",
