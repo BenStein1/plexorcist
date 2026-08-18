@@ -170,9 +170,9 @@ class AdminTaskSummaryInput(ToolInput):
 
 
 class SendAdminMessageInput(ToolInput):
-    message: str = Field(description="The admin's note, relayed verbatim exactly as written. Do not sanitize, soften, or rewrite tone or wording.")
+    message: str = Field(description="The complete recipient-facing note. The recipient sees only this text, not the admin conversation: resolve pronouns, implied referents, shorthand, and missing subjects from the full conversation so it makes sense on its own. Preserve the admin's meaning, facts, humor, affection, profanity, and tone; do not sanitize or invent details. Messages may be about any topic and need not be verbatim.")
     user_query: str | None = Field(default=None, description="Recipient when the admin names a user directly.")
-    task_query: str | None = Field(default=None, description="The title/issue this message is about. Pass it even with user_query when the message uses context-dependent wording like 'it's fixed'; the backend adds the context to the delivered text. When the admin says 'whoever requested X', leave user_query empty and this also resolves the affected user from open tasks.")
+    task_query: str | None = Field(default=None, description="Title/issue text only when the admin identifies the recipient indirectly, such as 'whoever requested X'. Leave user_query empty in that case so the backend can resolve the affected user from open tasks.")
 
 
 class SetMotdInput(ToolInput):

@@ -599,11 +599,12 @@ CATALOG: list[ToolSpec] = [
     ToolSpec(
         name="send_admin_message",
         description=(
-            "Admin-only: deliver an admin note to a user, relayed verbatim as the admin wrote it — this is a private server "
-            "shared with the admin's real-life friends, so do not sanitize, soften, or rewrite crude/ribald/affectionate humor. "
+            "Admin-only: deliver a note to a user. Apply recipient perspective before calling: imagine the recipient sees only "
+            "the message argument and none of this conversation. Resolve pronouns, shorthand, omitted subjects, and implied context "
+            "so the note stands on its own. For example, after discussing Top Chef, 'tell Don it is fixed' must become a complete "
+            "recipient-facing message such as 'The Top Chef issue is fixed', never merely 'Fixed.' This applies to every topic, not only media or fixes. "
+            "Preserve the admin's meaning, facts, crude/ribald/affectionate humor, profanity, and tone; do not sanitize or invent details. "
             "Named recipient → user_query. "
-            "Always pass task_query when the message refers to a title/issue, including named recipients and phrases like 'tell Don it's fixed'; "
-            "the backend makes the delivered note standalone (for example task_query='Top Chef', message='Fixed.' becomes 'Top Chef: Fixed.'). "
             "'Whoever requested X' → task_query with the title/issue and user_query empty (the backend resolves the user from open tasks). "
             "Do not guess recipients from prior chat prose, do not validate media titles, and do not call media tools for this."
         ),

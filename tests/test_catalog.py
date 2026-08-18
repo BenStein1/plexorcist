@@ -168,3 +168,11 @@ def test_resolve_admin_task_and_set_user_friendly_name_are_admin_only():
         assert name not in normal_names
     # self-service rename is not admin-gated
     assert "set_my_friendly_name" in normal_names
+
+
+def test_admin_message_tool_requires_recipient_perspective_for_every_topic():
+    spec = next(item for item in CATALOG if item.name == "send_admin_message")
+
+    assert "recipient sees only" in spec.description
+    assert "every topic" in spec.description
+    assert "never merely 'Fixed.'" in spec.description

@@ -207,7 +207,7 @@ async def test_registered_user_wins_over_a_ledger_only_near_match(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_named_recipient_message_gets_task_context_in_stored_text(tmp_path):
+async def test_delivery_tool_stores_exact_recipient_facing_message_without_mechanical_prefix(tmp_path):
     store = _store(tmp_path)
     _seed_login(tmp_path, user_id="u-1", username="mikestonhall", display_name="Mikeston Hall")
     tools = _tools(tmp_path, store)
@@ -215,14 +215,14 @@ async def test_named_recipient_message_gets_task_context_in_stored_text(tmp_path
     result = await tools.send_admin_message(
         user_query="Mikeston Hall",
         task_query="Top Chef",
-        message="Fixed.",
+        message="The Top Chef issue is fixed.",
     )
 
     assert result["ok"] is True
-    assert result["sent_message"] == "Top Chef: Fixed."
-    assert result["delivery_confirmation"]["message"] == "Top Chef: Fixed."
+    assert result["sent_message"] == "The Top Chef issue is fixed."
+    assert result["delivery_confirmation"]["message"] == "The Top Chef issue is fixed."
     with store._connect() as conn:  # noqa: SLF001
-        assert conn.execute("SELECT content FROM user_memory_notes").fetchone()[0] == "Top Chef: Fixed."
+        assert conn.execute("SELECT content FROM user_memory_notes").fetchone()[0] == "The Top Chef issue is fixed."
 
 
 @pytest.mark.asyncio

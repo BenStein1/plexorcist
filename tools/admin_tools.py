@@ -500,10 +500,6 @@ class AdminTools:
                 "action": "admin_message_not_queued",
             }
         recipient = resolved["user"]
-        context = str(task_query or "").strip()
-        delivered_message = message
-        if context and context.casefold() not in message.casefold():
-            delivered_message = f"{context}: {message}"
         confirmation_name = str(
             recipient.get("friendly_name")
             or recipient.get("display_name")
@@ -513,7 +509,7 @@ class AdminTools:
         self.store.add_user_memory_note(
             user_id=recipient["user_id"],
             note_type="admin_message",
-            content=delivered_message,
+            content=message,
             status="unread",
             tier=1,
             metadata={
@@ -528,18 +524,17 @@ class AdminTools:
             "action": "admin_message_queued",
             "recipient": recipient,
             "recipient_label": recipient["label"],
-            "message": delivered_message,
-            "sent_message": delivered_message,
-            "message_context": context or None,
+            "message": message,
+            "sent_message": message,
             "delivery_confirmation": {
                 "direction": "admin_to_user",
                 "status": "queued",
                 "recipient_label": confirmation_name,
-                "message": delivered_message,
+                "message": message,
             },
             "target_basis": resolved.get("target_basis"),
             "matched_task": resolved.get("matched_task"),
-            "user_summary": f"Queued admin message for {recipient['label']}: {delivered_message}",
+            "user_summary": f"Queued admin message for {recipient['label']}: {message}",
         }
 
     async def set_admin_motd(self, message: str, sender_user_id: str, sender_name: str = "Ben") -> dict[str, Any]:
