@@ -165,6 +165,7 @@ class ConciergeAgent:
                     if plain_reply is not None
                     else "I ran the checks I could, but I need a little more detail to answer cleanly."
                 )
+            reply = self._append_task_closure_confirmations(reply, tool_calls)
             reply = self._append_delivery_confirmations(reply, tool_calls)
             state.messages.append(ChatMessage(role="assistant", content=reply))
             self._advance_nilbog_memory_mode(state, reply)
@@ -175,6 +176,7 @@ class ConciergeAgent:
         if not last_failure_reason:
             last_failure_reason = "max_turns_without_final_text"
         reply = self._fallback_reply_from_tool_calls(user, tool_calls, last_failure_reason)
+        reply = self._append_task_closure_confirmations(reply, tool_calls)
         reply = self._append_delivery_confirmations(reply, tool_calls)
         state.messages.append(ChatMessage(role="assistant", content=reply))
         self._advance_nilbog_memory_mode(state, reply)
@@ -199,11 +201,51 @@ class ConciergeAgent:
             reply = self._fallback_reply_from_tool_calls(user, tool_calls, failure_reason)
         else:
             reply = fallback_text or "I hit an upstream API error while generating that reply. Please retry."
+        reply = self._append_task_closure_confirmations(reply, tool_calls)
         reply = self._append_delivery_confirmations(reply, tool_calls)
         state.messages.append(ChatMessage(role="assistant", content=reply))
         state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
+
+    @staticmethod
+    def _append_task_closure_confirmations(reply: str, tool_calls: list[Any]) -> str:
+        closed: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        remaining_count: int | None = None
+        for call in tool_calls:
+            if str(getattr(call, "name", "") or "") != "resolve_admin_task":
+                continue
+            result = getattr(call, "result", None)
+            if not isinstance(result, dict) or result.get("ok") is not True or result.get("verified_closed") is not True:
+                continue
+            tasks = result.get("resolved_tasks")
+            if not isinstance(tasks, list):
+                tasks = [result.get("resolved_task")]
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                try:
+                    note_id = int(task.get("note_id"))
+                except (TypeError, ValueError):
+                    continue
+                if note_id in seen_ids:
+                    continue
+                seen_ids.add(note_id)
+                closed.append(task)
+            try:
+                remaining_count = int(result.get("remaining_open_task_count"))
+            except (TypeError, ValueError):
+                pass
+        if not closed:
+            return reply
+        lines = ["Closed:"]
+        for task in closed:
+            label = str(task.get("display_label") or task.get("user_label") or task.get("user_id") or "unknown")
+            lines.append(f"- [{int(task['note_id'])}] {label}: {task.get('content') or ''}")
+        if remaining_count is not None:
+            lines.append(f"{remaining_count} open task(s) remain.")
+        return f"{reply.rstrip()}\n\n" + "\n".join(lines)
 
     def _append_delivery_confirmations(self, reply: str, tool_calls: list[Any]) -> str:
         confirmations: list[str] = []
@@ -1535,6 +1577,8 @@ Admin messaging:
 - Do not offer a "cleaned up" or "sanitized" rewrite of an admin message unless the admin asks for one.
 - Sending an admin message via `send_admin_message` is admin-only — do not attempt it, or claim you sent one, on behalf of a normal user.
 - If a `send_admin_message` or `set_user_friendly_name` lookup comes back not-found or ambiguous, call `find_users` with just the distinctive part of the name before telling {self.admin_label} you found nobody. Do not ask him to supply a username you could have looked up yourself.
+- When the admin asks to list, show, check, or re-check open tasks, you MUST call `get_admin_task_summary` in that same turn and answer from its fresh result. A prior list, conversation memory, or `resolve_admin_task` result is never a substitute. Never say there are no open tasks unless that fresh call returns `task_count: 0`.
+- `resolve_all_matches` closes every task matching the supplied query, not the entire board. After a close, treat `remaining_open_task_count` as authoritative; do not infer that the board is empty merely because the requested match was cleared.
 - When {self.admin_label} asks what names or friendly names you have on file for someone, that is `find_users` — answer from its result. Never answer a "who do I have on file" question from memory or from prior chat prose.
 - `find_users` covers everyone in the friendly-names ledger, including people who have never logged in. Those are marked "[no account yet]": they are real people {self.admin_label} knows, but there is no account to attach an admin message to, so say that plainly rather than reporting them as unknown.
 - If the conversation already has injected media context, treat it as the current subject and answer from it before asking for more detail.

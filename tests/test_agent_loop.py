@@ -279,6 +279,34 @@ def test_failed_message_delivery_has_no_confirmation_echo():
     assert agent._append_delivery_confirmations("It failed.", [call]) == "It failed."
 
 
+def test_task_close_confirmation_lists_exact_tasks_and_remaining_count():
+    calls = [
+        SimpleNamespace(
+            name="resolve_admin_task",
+            result={
+                "ok": True,
+                "verified_closed": True,
+                "remaining_open_task_count": 51,
+                "resolved_tasks": [
+                    {
+                        "note_id": 378,
+                        "display_label": "Erin (chrislschwimmer)",
+                        "content": "User asked about goblin-related movies.",
+                    }
+                ],
+            },
+        )
+    ]
+
+    reply = ConciergeAgent._append_task_closure_confirmations("Done.", calls)
+
+    assert reply == (
+        "Done.\n\nClosed:\n"
+        "- [378] Erin (chrislschwimmer): User asked about goblin-related movies.\n"
+        "51 open task(s) remain."
+    )
+
+
 # --- (e) max-turns exhaustion -> fallback reply, no crash/hang --------------
 
 

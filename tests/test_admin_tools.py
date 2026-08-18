@@ -58,6 +58,8 @@ async def test_resolve_by_note_id_closes_task(tmp_path):
     assert result["ok"] is True
     assert result["note_id"] == note_id
     assert result["verified_closed"] is True
+    assert result["remaining_open_task_count"] == 0
+    assert result["board_empty"] is True
     summary = await tools.get_admin_task_summary(scope="all_users")
     assert summary["task_count"] == 0
 
@@ -87,6 +89,22 @@ async def test_resolve_by_task_query_single_match(tmp_path):
     assert result["ok"] is True
     summary = await tools.get_admin_task_summary(scope="all_users")
     assert summary["task_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_one_match_reports_other_open_tasks_remaining(tmp_path):
+    store = _store(tmp_path)
+    _add_note(store, user_id="u1", content="Goblin-related movies need a follow-up")
+    _add_note(store, user_id="u2", content="Top Chef request is still pending")
+    tools = _admin_tools(tmp_path, store)
+
+    result = await tools.resolve_admin_task(task_query="goblin-related movies", resolve_all_matches=True)
+
+    assert result["ok"] is True
+    assert result["resolved_count"] == 1
+    assert result["remaining_open_task_count"] == 1
+    assert result["board_empty"] is False
+    assert "1 open task(s) remain" in result["user_summary"]
 
 
 @pytest.mark.asyncio

@@ -258,15 +258,26 @@ class AdminTools:
                     "verified_closed": False,
                     "user_summary": f"Task {note_id} was found but is still open after the update attempt.",
                 }
+            remaining_open_task_count = self._count_open_tasks()
+            users = self._load_user_labels()
+            user_id = str(task["user_id"])
+            task["user_label"] = self._format_user_label(user_id, users.get(user_id))
+            task["display_label"] = self._format_user_label("", users.get(user_id)) or task["user_label"]
             return {
                 "ok": True,
                 "action": "admin_task_resolve",
                 "note_id": note_id,
                 "resolved_task": task,
+                "resolved_tasks": [task],
                 "resolved_note_ids": [int(note_id)],
                 "resolved_count": 1,
                 "verified_closed": True,
-                "user_summary": f"Closed and verified task {note_id}: {task['content']}",
+                "remaining_open_task_count": remaining_open_task_count,
+                "board_empty": remaining_open_task_count == 0,
+                "user_summary": (
+                    f"Closed and verified task {note_id}: {task['content']} "
+                    f"{remaining_open_task_count} open task(s) remain."
+                ),
             }
 
         query = str(task_query or "").strip()
@@ -284,6 +295,7 @@ class AdminTools:
         for row in rows:
             user_id = str(row["user_id"])
             user_label = self._format_user_label(user_id, users.get(user_id))
+            display_label = self._format_user_label("", users.get(user_id)) or user_label
             metadata = self._parse_json(row.get("metadata_json"), default={})
             score = self._task_match_score(
                 query,
@@ -303,6 +315,7 @@ class AdminTools:
                         "note_id": row["note_id"],
                         "user_id": user_id,
                         "user_label": user_label,
+                        "display_label": display_label,
                         "content": row["content"],
                         "task_id": row["task_id"],
                         "status": row["status"],
@@ -352,6 +365,7 @@ class AdminTools:
                 failed_note_ids.append(target_id)
         resolved_note_ids = [int(match["note_id"]) for match in resolved_tasks]
         verified_closed = bool(resolved_tasks) and not failed_note_ids
+        remaining_open_task_count = self._count_open_tasks()
         return {
             "ok": verified_closed,
             "action": "admin_task_resolve",
@@ -361,10 +375,13 @@ class AdminTools:
             "resolved_tasks": resolved_tasks,
             "failed_note_ids": failed_note_ids,
             "verified_closed": verified_closed,
+            "remaining_open_task_count": remaining_open_task_count,
+            "board_empty": remaining_open_task_count == 0,
             "match_scope": "explicit_all" if resolve_all_matches else ("same_user_group" if same_user_group else "single"),
             "user_summary": (
                 f"Closed and verified {len(resolved_tasks)} task(s): "
                 + "; ".join(f"[{m['note_id']}] {m['user_label']}: {m['content']}" for m in resolved_tasks)
+                + f" {remaining_open_task_count} open task(s) remain."
                 if verified_closed
                 else f"Some matching tasks are still open after the update attempt: {failed_note_ids}."
             ),
@@ -737,6 +754,13 @@ class AdminTools:
         task = dict(zip(columns, row))
         task["metadata"] = self._parse_json(task.pop("metadata_json", None), default={})
         return task
+
+    def _count_open_tasks(self) -> int:
+        with self.store._connect() as conn:  # type: ignore[union-attr, protected-access]
+            row = conn.execute(
+                "SELECT COUNT(*) FROM user_memory_notes WHERE status IN ('open', 'unresolved')"
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     @staticmethod
     def _normalize_task_text(value: Any) -> str:

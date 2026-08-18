@@ -549,6 +549,7 @@ CATALOG: list[ToolSpec] = [
         description=(
             "Admin-only LIVE task dashboard over compact memory/task records (not raw conversations or remembered lists). "
             "Use when the admin asks about open user tasks, unresolved issues, or what a named user has pending. "
+            "For EVERY list/show/check-again request, call this tool fresh in that same turn; never answer from a prior result or infer the board from a resolve action. "
             "scope='all_users' for broad questions ('any open tasks?', 'anything new?'); scope='specific_user' only when a user is named. "
             "Omit days to include every open task regardless of age. Each task includes exact stored content and a note_id. "
             "When presenting a task list, preserve every returned task's exact content and use the compact '- [note_id] Friendly name (username): content' format from user_summary. "
@@ -567,6 +568,8 @@ CATALOG: list[ToolSpec] = [
             "Prefer note_id from a get_admin_task_summary result seen earlier in this conversation — it's unambiguous. "
             "Otherwise pass task_query in the admin's natural wording; backend matching covers user labels, exact task text, metadata, and close paraphrases. "
             "If matching tasks are duplicates for the same person/title, they are closed together automatically. Set resolve_all_matches=true when the admin says all/every/both or supplies a bulk close instruction. "
+            "resolve_all_matches means every task matching task_query, never every task on the board. "
+            "The result includes remaining_open_task_count; never claim the board is empty unless that value is zero or a fresh summary has task_count=0. "
             "Never claim success unless ok=true and verified_closed=true; after failure, use returned candidates/note_ids instead of asking the admin to reword the same task repeatedly."
         ),
         input_model=schemas.ResolveAdminTaskInput,
