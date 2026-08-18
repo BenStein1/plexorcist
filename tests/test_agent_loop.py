@@ -29,7 +29,15 @@ class FakeLlmClient:
         self._responses = list(responses)
         self.calls: list[dict] = []
 
-    async def generate_response(self, *, instructions, conversation, tools, usage_context=None) -> LlmResponse:
+    async def generate_response(
+        self,
+        *,
+        instructions,
+        conversation,
+        tools,
+        usage_context=None,
+        tool_choice=None,
+    ) -> LlmResponse:
         # Snapshot now: the agent mutates one shared conversation list turn by
         # turn, so a live reference would make every recorded call look like
         # the final state.
@@ -39,6 +47,7 @@ class FakeLlmClient:
                 "conversation": list(conversation),
                 "tools": list(tools),
                 "usage_context": usage_context,
+                "tool_choice": tool_choice,
             }
         )
         if not self._responses:
@@ -68,6 +77,9 @@ class FakeToolkit:
             },
         }
 
+    async def exit_task_mode(self) -> dict:
+        return {"ok": True, "action": "admin_task_mode_exited"}
+
 
 FAKE_SPECS = [
     ToolSpec(
@@ -87,6 +99,12 @@ FAKE_SPECS = [
         description="fake admin notice",
         input_model=schemas.ProwlNoticeInput,
         resolve=lambda tk: tk.notice,
+    ),
+    ToolSpec(
+        name="exit_admin_task_mode",
+        description="fake task-mode exit",
+        input_model=schemas.EmptyInput,
+        resolve=lambda tk: tk.exit_task_mode,
     ),
 ]
 
@@ -287,12 +305,9 @@ def test_task_close_confirmation_lists_exact_tasks_and_remaining_count():
                 "ok": True,
                 "verified_closed": True,
                 "remaining_open_task_count": 51,
-                "resolved_tasks": [
-                    {
-                        "note_id": 378,
-                        "display_label": "Erin (chrislschwimmer)",
-                        "content": "User asked about goblin-related movies.",
-                    }
+                "resolved_note_ids": [378],
+                "closed_task_lines": [
+                    "- [378] Erin (chrislschwimmer): User asked about goblin-related movies."
                 ],
             },
         )
@@ -305,6 +320,32 @@ def test_task_close_confirmation_lists_exact_tasks_and_remaining_count():
         "- [378] Erin (chrislschwimmer): User asked about goblin-related movies.\n"
         "51 open task(s) remain."
     )
+
+
+@pytest.mark.asyncio
+async def test_active_admin_task_mode_forces_a_structured_routing_tool_before_text():
+    client = FakeLlmClient(
+        [
+            LlmResponse(
+                text="",
+                tool_calls=[ToolCall(call_id="exit-1", name="exit_admin_task_mode", arguments_json="{}")],
+                native_turn=[],
+            ),
+            LlmResponse(text="Changed subjects normally.", tool_calls=[], native_turn=[]),
+        ]
+    )
+    state = _state()
+    state.support_context["admin_task_mode"] = True
+    agent = _agent(client, _bridge())
+
+    reply, tool_calls = await agent.respond(_user(is_admin=True), state, "Actually, tell me about a movie")
+
+    assert reply == "Changed subjects normally."
+    assert tool_calls[0].name == "exit_admin_task_mode"
+    assert client.calls[0]["tool_choice"] == "required"
+    assert {tool.name for tool in client.calls[0]["tools"]} == {"exit_admin_task_mode"}
+    assert client.calls[1]["tool_choice"] is None
+    assert state.support_context["admin_task_mode"] is False
 
 
 # --- (e) max-turns exhaustion -> fallback reply, no crash/hang --------------

@@ -60,6 +60,7 @@ async def test_resolve_by_note_id_closes_task(tmp_path):
     assert result["verified_closed"] is True
     assert result["remaining_open_task_count"] == 0
     assert result["board_empty"] is True
+    assert result["closure_receipt"].startswith(f"Closed:\n- [{note_id}]")
     summary = await tools.get_admin_task_summary(scope="all_users")
     assert summary["task_count"] == 0
 
@@ -104,7 +105,8 @@ async def test_resolve_one_match_reports_other_open_tasks_remaining(tmp_path):
     assert result["resolved_count"] == 1
     assert result["remaining_open_task_count"] == 1
     assert result["board_empty"] is False
-    assert "1 open task(s) remain" in result["user_summary"]
+    assert result["closure_receipt"].endswith("1 open task(s) remain.")
+    assert result["user_summary"] == result["closure_receipt"]
 
 
 @pytest.mark.asyncio

@@ -184,6 +184,15 @@ class Toolkit:
             resolve_all_matches=resolve_all_matches,
         )
 
+    async def exit_admin_task_mode(self) -> dict:
+        if not self.is_admin:
+            return self._admin_required()
+        return {
+            "ok": True,
+            "action": "admin_task_mode_exited",
+            "user_summary": "Left admin task mode without changing any tasks.",
+        }
+
     async def set_user_friendly_name(self, user_query: str, friendly_name: str) -> dict:
         if not self.is_admin:
             return self._admin_required()
@@ -574,6 +583,17 @@ CATALOG: list[ToolSpec] = [
         ),
         input_model=schemas.ResolveAdminTaskInput,
         resolve=lambda tk: tk.resolve_admin_task,
+        tags=_tags(ADMIN),
+    ),
+    ToolSpec(
+        name="exit_admin_task_mode",
+        description=(
+            "Admin-only task-mode routing control. Use only when the admin's latest message is NOT asking to list, "
+            "re-check, close, resolve, or otherwise act on admin tasks. This changes no data and lets the conversation "
+            "continue normally. Never use it for a task request merely to avoid calling the task tool."
+        ),
+        input_model=schemas.EmptyInput,
+        resolve=lambda tk: tk.exit_admin_task_mode,
         tags=_tags(ADMIN),
     ),
     ToolSpec(

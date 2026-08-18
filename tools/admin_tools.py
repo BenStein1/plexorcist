@@ -263,6 +263,12 @@ class AdminTools:
             user_id = str(task["user_id"])
             task["user_label"] = self._format_user_label(user_id, users.get(user_id))
             task["display_label"] = self._format_user_label("", users.get(user_id)) or task["user_label"]
+            closed_task_lines = [f"- [{note_id}] {task['display_label']}: {task['content']}"]
+            closure_receipt = (
+                "Closed:\n"
+                + "\n".join(closed_task_lines)
+                + f"\n{remaining_open_task_count} open task(s) remain."
+            )
             return {
                 "ok": True,
                 "action": "admin_task_resolve",
@@ -274,10 +280,9 @@ class AdminTools:
                 "verified_closed": True,
                 "remaining_open_task_count": remaining_open_task_count,
                 "board_empty": remaining_open_task_count == 0,
-                "user_summary": (
-                    f"Closed and verified task {note_id}: {task['content']} "
-                    f"{remaining_open_task_count} open task(s) remain."
-                ),
+                "closed_task_lines": closed_task_lines,
+                "closure_receipt": closure_receipt,
+                "user_summary": closure_receipt,
             }
 
         query = str(task_query or "").strip()
@@ -366,6 +371,17 @@ class AdminTools:
         resolved_note_ids = [int(match["note_id"]) for match in resolved_tasks]
         verified_closed = bool(resolved_tasks) and not failed_note_ids
         remaining_open_task_count = self._count_open_tasks()
+        closed_task_lines = [
+            f"- [{match['note_id']}] {match['display_label']}: {match['content']}"
+            for match in resolved_tasks
+        ]
+        closure_receipt = (
+            "Closed:\n"
+            + "\n".join(closed_task_lines)
+            + f"\n{remaining_open_task_count} open task(s) remain."
+            if verified_closed
+            else ""
+        )
         return {
             "ok": verified_closed,
             "action": "admin_task_resolve",
@@ -377,14 +393,12 @@ class AdminTools:
             "verified_closed": verified_closed,
             "remaining_open_task_count": remaining_open_task_count,
             "board_empty": remaining_open_task_count == 0,
+            "closed_task_lines": closed_task_lines,
+            "closure_receipt": closure_receipt or None,
             "match_scope": "explicit_all" if resolve_all_matches else ("same_user_group" if same_user_group else "single"),
-            "user_summary": (
-                f"Closed and verified {len(resolved_tasks)} task(s): "
-                + "; ".join(f"[{m['note_id']}] {m['user_label']}: {m['content']}" for m in resolved_tasks)
-                + f" {remaining_open_task_count} open task(s) remain."
-                if verified_closed
-                else f"Some matching tasks are still open after the update attempt: {failed_note_ids}."
-            ),
+            "user_summary": closure_receipt
+            if verified_closed
+            else f"Some matching tasks are still open after the update attempt: {failed_note_ids}.",
         }
 
     async def find_users(self, query: str | None = None, limit: int = 25) -> dict[str, Any]:

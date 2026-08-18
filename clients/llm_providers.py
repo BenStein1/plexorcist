@@ -123,6 +123,7 @@ class LlmClient(Protocol):
         conversation: list[ConversationItem],
         tools: list[ToolSchema],
         usage_context: dict[str, Any] | None = None,
+        tool_choice: str | None = None,
     ) -> LlmResponse:
         ...
 
@@ -196,14 +197,20 @@ class OpenAIProviderClient:
         conversation: list[ConversationItem],
         tools: list[ToolSchema],
         usage_context: dict[str, Any] | None = None,
+        tool_choice: str | None = None,
     ) -> LlmResponse:
         input_items = self._build_input(conversation)
         tool_payloads = [self._tool_payload(tool) for tool in tools]
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "instructions": instructions,
+            "input": input_items,
+            "tools": tool_payloads,
+        }
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
         response = await self._client.responses.create(
-            model=self.model,
-            instructions=instructions,
-            input=input_items,
-            tools=tool_payloads,
+            **kwargs,
         )
         self._record_usage(response, usage_context or {})
         return self._build_response(response)
@@ -329,6 +336,7 @@ class AnthropicProviderClient:
         conversation: list[ConversationItem],
         tools: list[ToolSchema],
         usage_context: dict[str, Any] | None = None,
+        tool_choice: str | None = None,
     ) -> LlmResponse:
         system, messages = self._build_messages(instructions, conversation)
         tool_payloads = [self._tool_payload(tool) for tool in tools]
@@ -340,6 +348,8 @@ class AnthropicProviderClient:
         }
         if tool_payloads:
             kwargs["tools"] = tool_payloads
+        if tool_choice == "required":
+            kwargs["tool_choice"] = {"type": "any"}
         response = await self._client.messages.create(**kwargs)
         self._record_usage(response, usage_context or {})
         return self._build_response(response)
@@ -485,6 +495,7 @@ class OllamaProviderClient:
         conversation: list[ConversationItem],
         tools: list[ToolSchema],
         usage_context: dict[str, Any] | None = None,
+        tool_choice: str | None = None,
     ) -> LlmResponse:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -494,6 +505,8 @@ class OllamaProviderClient:
         tool_payloads = [self._tool_payload(tool) for tool in tools]
         if tool_payloads:
             payload["tools"] = tool_payloads
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)

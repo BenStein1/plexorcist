@@ -35,6 +35,7 @@ _NILBOG_REDACTED_TEXT = (
 
 _DEFAULT_MAX_TURNS = 6
 _MIN_MAX_TURNS = 2
+_ADMIN_TASK_GATE_TOOLS = {"get_admin_task_summary", "resolve_admin_task", "exit_admin_task_mode"}
 
 
 class ConciergeAgent:
@@ -90,19 +91,29 @@ class ConciergeAgent:
         tool_calls: list[ToolCallRecord] = []
         alerted_keys: set[str] = set()
         last_failure_reason: str | None = None
+        task_gate_pending = user.is_admin and self._admin_task_mode_active(state)
 
         for _ in range(self.max_turns):
             try:
-                response = await self.client.generate_response(
-                    instructions=instructions,
-                    conversation=conversation,
-                    tools=self.bridge.tool_schemas(),
-                    usage_context={
+                available_tools = self.bridge.tool_schemas()
+                generation_kwargs: dict[str, Any] = {
+                    "instructions": instructions,
+                    "conversation": conversation,
+                    "tools": available_tools,
+                    "usage_context": {
                         "user_id": user.user_id,
                         "username": user.username,
                         "conversation_id": state.conversation_id,
                         "source": "chat",
                     },
+                }
+                if task_gate_pending:
+                    generation_kwargs["tools"] = [
+                        tool for tool in available_tools if tool.name in _ADMIN_TASK_GATE_TOOLS
+                    ]
+                    generation_kwargs["tool_choice"] = "required"
+                response = await self.client.generate_response(
+                    **generation_kwargs,
                 )
             except httpx.TimeoutException:
                 reason = "llm_timeout_after_tool_calls" if tool_calls else None
@@ -137,6 +148,11 @@ class ConciergeAgent:
                         continue
                     tool_record = self._tool_call_record(tool_call, result)
                     tool_calls.append(tool_record)
+                    if tool_record.name in _ADMIN_TASK_GATE_TOOLS:
+                        task_gate_pending = False
+                        state.support_context["admin_task_mode"] = (
+                            tool_record.name != "exit_admin_task_mode"
+                        )
                     self._refresh_active_media_context(state, tool_record.result)
                     alert = self._build_admin_alert(user, tool_record)
                     if alert:
@@ -154,6 +170,19 @@ class ConciergeAgent:
                                 # this alert, which is the opposite of being notified.
                                 self._clear_admin_alert_cooldown(alert_key)
                 conversation.append(ToolResultsTurn(results))
+                continue
+
+            if task_gate_pending:
+                last_failure_reason = "admin_task_gate_returned_text_without_tool"
+                conversation.append(
+                    ChatTurn(
+                        role="system",
+                        text=(
+                            "Task mode is active. Do not answer in free text yet. Call exactly one of the available "
+                            "task routing tools for the user's latest request."
+                        ),
+                    )
+                )
                 continue
 
             reply = response.text
@@ -184,6 +213,20 @@ class ConciergeAgent:
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
 
+    @staticmethod
+    def _admin_task_mode_active(state: ConversationState) -> bool:
+        if "admin_task_mode" in state.support_context:
+            return bool(state.support_context.get("admin_task_mode"))
+        for action in reversed(state.last_tool_actions):
+            if not isinstance(action, dict):
+                continue
+            name = str(action.get("name") or "")
+            if name == "exit_admin_task_mode":
+                return False
+            if name in {"get_admin_task_summary", "resolve_admin_task"}:
+                return True
+        return False
+
     def _tool_call_record(self, tool_call: ToolCall, result: ToolResult) -> ToolCallRecord:
         arguments, _ = tool_call.parse_arguments()
         result_dict = result.content if isinstance(result.content, dict) else {"value": result.content}
@@ -210,7 +253,7 @@ class ConciergeAgent:
 
     @staticmethod
     def _append_task_closure_confirmations(reply: str, tool_calls: list[Any]) -> str:
-        closed: list[dict[str, Any]] = []
+        closed_lines: list[str] = []
         seen_ids: set[int] = set()
         remaining_count: int | None = None
         for call in tool_calls:
@@ -219,30 +262,26 @@ class ConciergeAgent:
             result = getattr(call, "result", None)
             if not isinstance(result, dict) or result.get("ok") is not True or result.get("verified_closed") is not True:
                 continue
-            tasks = result.get("resolved_tasks")
-            if not isinstance(tasks, list):
-                tasks = [result.get("resolved_task")]
-            for task in tasks:
-                if not isinstance(task, dict):
-                    continue
+            note_ids = result.get("resolved_note_ids")
+            lines = result.get("closed_task_lines")
+            if not isinstance(note_ids, list) or not isinstance(lines, list):
+                continue
+            for note_id_value, line_value in zip(note_ids, lines, strict=False):
                 try:
-                    note_id = int(task.get("note_id"))
+                    note_id = int(note_id_value)
                 except (TypeError, ValueError):
                     continue
                 if note_id in seen_ids:
                     continue
                 seen_ids.add(note_id)
-                closed.append(task)
+                closed_lines.append(str(line_value))
             try:
                 remaining_count = int(result.get("remaining_open_task_count"))
             except (TypeError, ValueError):
                 pass
-        if not closed:
+        if not closed_lines:
             return reply
-        lines = ["Closed:"]
-        for task in closed:
-            label = str(task.get("display_label") or task.get("user_label") or task.get("user_id") or "unknown")
-            lines.append(f"- [{int(task['note_id'])}] {label}: {task.get('content') or ''}")
+        lines = ["Closed:", *closed_lines]
         if remaining_count is not None:
             lines.append(f"{remaining_count} open task(s) remain.")
         return f"{reply.rstrip()}\n\n" + "\n".join(lines)
