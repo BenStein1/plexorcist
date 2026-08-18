@@ -500,6 +500,12 @@ class AdminTools:
                 "action": "admin_message_not_queued",
             }
         recipient = resolved["user"]
+        confirmation_name = str(
+            recipient.get("friendly_name")
+            or recipient.get("display_name")
+            or recipient.get("username")
+            or recipient["label"]
+        ).strip()
         self.store.add_user_memory_note(
             user_id=recipient["user_id"],
             note_type="admin_message",
@@ -523,7 +529,7 @@ class AdminTools:
             "delivery_confirmation": {
                 "direction": "admin_to_user",
                 "status": "queued",
-                "recipient_label": recipient["label"],
+                "recipient_label": confirmation_name,
                 "message": message,
             },
             "target_basis": resolved.get("target_basis"),

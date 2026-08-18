@@ -198,7 +198,7 @@ async def test_registered_user_wins_over_a_ledger_only_near_match(tmp_path):
     assert result["delivery_confirmation"] == {
         "direction": "admin_to_user",
         "status": "queued",
-        "recipient_label": "Mikeston Hall (mikestonhall, u-1)",
+        "recipient_label": "Mikeston Hall",
         "message": "it's in there now",
     }
     assert _admin_note_count(store) == 1

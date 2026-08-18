@@ -205,8 +205,7 @@ class ConciergeAgent:
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
 
-    @staticmethod
-    def _append_delivery_confirmations(reply: str, tool_calls: list[Any]) -> str:
+    def _append_delivery_confirmations(self, reply: str, tool_calls: list[Any]) -> str:
         confirmations: list[str] = []
         seen: set[tuple[str, str, str]] = set()
         for call in tool_calls:
@@ -218,6 +217,8 @@ class ConciergeAgent:
                 continue
             message = str(confirmation.get("message") or "")
             recipient = str(confirmation.get("recipient_label") or "the recipient").strip()
+            if recipient == "the admin":
+                recipient = self.admin_label
             status = str(confirmation.get("status") or "sent").strip().lower()
             if not message:
                 continue
@@ -225,8 +226,10 @@ class ConciergeAgent:
             if key in seen:
                 continue
             seen.add(key)
-            verb = "Queued for" if status == "queued" else "Sent to"
-            confirmations.append(f"Message confirmation — {verb} {recipient}:\n{message}")
+            if "\n" in message:
+                confirmations.append(f"To {recipient}:\n“{message}”")
+            else:
+                confirmations.append(f"To {recipient}: “{message}”")
         if not confirmations:
             return reply
         return f"{reply.rstrip()}\n\n" + "\n\n".join(confirmations)

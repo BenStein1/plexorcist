@@ -237,7 +237,7 @@ async def test_final_text_not_overwritten_when_tool_calls_succeeded():
 
     assert reply == (
         "Custom final reply from the model.\n\n"
-        "Message confirmation — Sent to the admin:\nissue"
+        "To the admin: “issue”"
     )
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "send_admin_prowl_notice"
@@ -257,9 +257,10 @@ def test_admin_message_confirmation_echoes_exact_multiline_text():
         }
     )
 
-    reply = ConciergeAgent._append_delivery_confirmations("Done.", [call])
+    agent = _agent(FakeLlmClient([]), _bridge())
+    reply = agent._append_delivery_confirmations("Done.", [call])
 
-    assert reply == f"Done.\n\nMessage confirmation — Queued for Alice:\n{exact}"
+    assert reply == f"Done.\n\nTo Alice:\n“{exact}”"
 
 
 def test_failed_message_delivery_has_no_confirmation_echo():
@@ -274,7 +275,8 @@ def test_failed_message_delivery_has_no_confirmation_echo():
         }
     )
 
-    assert ConciergeAgent._append_delivery_confirmations("It failed.", [call]) == "It failed."
+    agent = _agent(FakeLlmClient([]), _bridge())
+    assert agent._append_delivery_confirmations("It failed.", [call]) == "It failed."
 
 
 # --- (e) max-turns exhaustion -> fallback reply, no crash/hang --------------
