@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from backend.config import Settings
+from backend.models import UserContext
 from backend.state import ConversationStore
+from tools.catalog import build_toolkit
 from tools.request_tools import RequestTools
 
 
@@ -123,3 +126,48 @@ def test_request_history_is_user_scoped_and_filterable(tmp_path):
 
     assert [row["title"] for row in history.list_media_request_history(user_id="u1", media_type="movie")] == ["Jaws"]
     assert [row["title"] for row in history.list_media_request_history(user_id="u2")] == ["Deep Blue Sea"]
+
+
+@pytest.mark.asyncio
+async def test_watch_context_adds_request_history_without_calling_it_watched(tmp_path):
+    history = store(tmp_path)
+    history.record_media_request(
+        user_id="u1", username="one", media_type="movie", request_scope="movie", title="Jaws"
+    )
+    toolkit = build_toolkit(
+        Settings(),
+        history,
+        UserContext(user_id="u1", username="one", display_name="One"),
+    )
+
+    class FakeRecommendations:
+        async def get_user_watch_context(self, **kwargs):
+            return {"resolved": True, "recently_watched": [{"title": "Alien"}]}
+
+    toolkit.recs = FakeRecommendations()
+
+    result = await toolkit.get_user_watch_context()
+
+    assert result["recently_watched"] == [{"title": "Alien"}]
+    assert [row["title"] for row in result["recent_request_history"]] == ["Jaws"]
+
+
+@pytest.mark.asyncio
+async def test_get_my_request_history_is_bound_to_authenticated_user(tmp_path):
+    history = store(tmp_path)
+    history.record_media_request(
+        user_id="u1", username="one", media_type="movie", request_scope="movie", title="Jaws"
+    )
+    history.record_media_request(
+        user_id="u2", username="two", media_type="movie", request_scope="movie", title="Deep Blue Sea"
+    )
+    toolkit = build_toolkit(
+        Settings(),
+        history,
+        UserContext(user_id="u1", username="one", display_name="One"),
+    )
+
+    result = await toolkit.get_my_request_history()
+
+    assert result["request_count"] == 1
+    assert [row["title"] for row in result["requests"]] == ["Jaws"]

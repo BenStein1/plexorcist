@@ -586,7 +586,8 @@ CATALOG: list[ToolSpec] = [
         name="get_user_watch_context",
         description=(
             "Read-only watch history context for the authenticated user, for recommendations. "
-            "Prefer year_history_summary, then recently_watched. top_movies_30d/top_tv_30d are SERVER-WIDE trends — never describe them as titles this user personally watched. "
+            "Prefer year_history_summary, then recently_watched; recent_request_history is a separate taste signal and is NOT proof a title was watched. "
+            "top_movies_30d/top_tv_30d are SERVER-WIDE trends — never describe them as titles this user personally watched. "
             "If personal history is thin, say so; do not invent watched titles."
         ),
         input_model=schemas.EmptyInput,

@@ -101,6 +101,16 @@ def test_get_spec_lookup():
     assert get_spec("nope") is None
 
 
+def test_recommendation_tools_encode_both_plex_directions():
+    verify = get_spec("verify_plex_recommendation_candidates")
+    inventory = get_spec("search_plex_recommendation_pool")
+
+    assert verify is not None and "ALREADY presented" in verify.description
+    assert "initial request explicitly constrained to Plex" in verify.description
+    assert inventory is not None and "inventory FIRST" in inventory.description
+    assert "Recommend only titles returned by this tool" in inventory.description
+
+
 # --- validation preconditions (formerly prose prompt rules) -----------------
 
 
