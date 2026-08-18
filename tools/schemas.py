@@ -63,6 +63,48 @@ class CheckLibraryInventoryInput(ToolInput):
     query: str = Field(description="Broad inventory query: an actor, director, collection, franchise, or theme.")
 
 
+class RecommendationMediaType(str, Enum):
+    ANY = "any"
+    MOVIE = "movie"
+    SHOW = "show"
+
+
+class RecommendationCandidate(ToolInput):
+    title: str = Field(min_length=1, description="Exact recommended title already discussed with the user.")
+    year: int | None = Field(default=None, ge=1880, le=2200, description="Release year when known.")
+    media_type: RecommendationMediaType | None = Field(
+        default=None,
+        description="Movie or show when known. Omit only if the prior recommendation did not establish the type.",
+    )
+
+
+class VerifyRecommendationCandidatesInput(ToolInput):
+    candidates: list[RecommendationCandidate] = Field(
+        min_length=1,
+        max_length=25,
+        description="The concrete recommendation shortlist already presented in this conversation, in its existing order.",
+    )
+
+
+class PlexRecommendationPoolInput(ToolInput):
+    media_type: RecommendationMediaType = Field(default=RecommendationMediaType.ANY)
+    genres: list[str] = Field(default_factory=list, max_length=5, description="Plex genres that must all match.")
+    keywords: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="Concrete subjects or themes to rank within the Plex inventory, such as shark, ocean, or creature feature.",
+    )
+    year_min: int | None = Field(default=None, ge=1880, le=2200)
+    year_max: int | None = Field(default=None, ge=1880, le=2200)
+    limit: int = Field(default=50, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def _valid_year_range(self) -> "PlexRecommendationPoolInput":
+        if self.year_min is not None and self.year_max is not None and self.year_min > self.year_max:
+            raise ValueError("year_min must be less than or equal to year_max")
+        return self
+
+
 # --- Requests (Ombi) --------------------------------------------------------
 
 

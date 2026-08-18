@@ -69,3 +69,24 @@ class MediaSearchTools:
                 for item in ombi_results
             ],
         }
+
+    async def verify_plex_recommendation_candidates(self, candidates: list[dict]) -> dict:
+        return await self.plex.verify_recommendation_candidates(candidates)
+
+    async def search_plex_recommendation_pool(
+        self,
+        media_type: str = "any",
+        genres: list[str] | None = None,
+        keywords: list[str] | None = None,
+        year_min: int | None = None,
+        year_max: int | None = None,
+        limit: int = 50,
+    ) -> dict:
+        return await self.plex.search_recommendation_pool(
+            media_type=media_type,
+            genres=genres,
+            keywords=keywords,
+            year_min=year_min,
+            year_max=year_max,
+            limit=limit,
+        )

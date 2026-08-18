@@ -157,6 +157,27 @@ class Toolkit:
     async def get_plex_popularity(self, days: int = 30, limit: int = 10) -> dict:
         return await self.recs.get_plex_popularity(days=days, limit=limit)
 
+    async def verify_plex_recommendation_candidates(self, candidates: list[dict]) -> dict:
+        return await self.media.verify_plex_recommendation_candidates(candidates=candidates)
+
+    async def search_plex_recommendation_pool(
+        self,
+        media_type: str = "any",
+        genres: list[str] | None = None,
+        keywords: list[str] | None = None,
+        year_min: int | None = None,
+        year_max: int | None = None,
+        limit: int = 50,
+    ) -> dict:
+        return await self.media.search_plex_recommendation_pool(
+            media_type=media_type,
+            genres=genres,
+            keywords=keywords,
+            year_min=year_min,
+            year_max=year_max,
+            limit=limit,
+        )
+
     async def get_token_usage(self) -> dict:
         if not self.is_admin:
             return self._admin_required()
@@ -394,6 +415,30 @@ CATALOG: list[ToolSpec] = [
         ),
         input_model=schemas.CheckLibraryInventoryInput,
         resolve=lambda tk: tk.media.check_library_inventory,
+        tags=_tags(READONLY),
+    ),
+    ToolSpec(
+        name="verify_plex_recommendation_candidates",
+        description=(
+            "Filter a recommendation shortlist that was ALREADY presented earlier in this conversation when the user "
+            "then asks which of those titles are in Plex. Pass that existing shortlist in the same order. Do not use this "
+            "for an initial request explicitly constrained to Plex; use search_plex_recommendation_pool instead."
+        ),
+        input_model=schemas.VerifyRecommendationCandidatesInput,
+        resolve=lambda tk: tk.verify_plex_recommendation_candidates,
+        tags=_tags(READONLY),
+    ),
+    ToolSpec(
+        name="search_plex_recommendation_pool",
+        description=(
+            "Search the actual Plex inventory FIRST for an initial recommendation request constrained to titles in Plex "
+            "or preferably in Plex. Translate the user's natural language into structured media type, genres, concrete "
+            "theme keywords, and optional year bounds. Recommend only titles returned by this tool when the user says "
+            "only/in Plex. The broader_candidates are still verified Plex inventory and let you apply your own knowledge "
+            "when Plex metadata does not literally contain the theme words."
+        ),
+        input_model=schemas.PlexRecommendationPoolInput,
+        resolve=lambda tk: tk.search_plex_recommendation_pool,
         tags=_tags(READONLY),
     ),
     # --- Requests (Ombi) -------------------------------------------------

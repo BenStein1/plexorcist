@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -12,6 +13,8 @@ class PlexClient:
     def __init__(self, base_url: str, token: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self._recommendation_catalog_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._recommendation_catalog_ttl_seconds = 300.0
 
     async def check_availability(self, title: str) -> dict:
         matches = await self.search(title)
@@ -114,6 +117,195 @@ class PlexClient:
                 continue
             by_rating_key[rating_key] = item
         return self._rank_matches(list(by_rating_key.values()), query)
+
+    async def verify_recommendation_candidates(self, candidates: list[dict[str, Any]]) -> dict:
+        catalog = await self._get_recommendation_catalog()
+        results: list[dict[str, Any]] = []
+        for candidate in candidates:
+            title = str(candidate.get("title") or "").strip()
+            raw_media_type = candidate.get("media_type")
+            if hasattr(raw_media_type, "value"):
+                raw_media_type = raw_media_type.value
+            media_type = str(raw_media_type or "").strip().lower() or None
+            if media_type == "any":
+                media_type = None
+            year = self._safe_int(candidate.get("year"))
+            normalized_title = self._normalize(title)
+            title_matches = [
+                item
+                for item in catalog
+                if self._normalize(item.get("title")) == normalized_title
+                and (media_type is None or item.get("media_type") == media_type)
+            ]
+            matches = [item for item in title_matches if year is None or self._safe_int(item.get("year")) == year]
+            if len(matches) == 1:
+                status = "available"
+                match = matches[0]
+            elif len(matches) > 1:
+                status = "ambiguous"
+                match = None
+            else:
+                status = "unavailable"
+                match = None
+            results.append(
+                {
+                    "candidate": {"title": title, "year": year, "media_type": media_type},
+                    "status": status,
+                    "available": status == "available",
+                    "match": match,
+                    "matches": matches if status == "ambiguous" else title_matches[:5],
+                }
+            )
+        return {
+            "ok": True,
+            "results": results,
+            "available": [item for item in results if item["status"] == "available"],
+            "unavailable": [item for item in results if item["status"] == "unavailable"],
+            "ambiguous": [item for item in results if item["status"] == "ambiguous"],
+        }
+
+    async def search_recommendation_pool(
+        self,
+        *,
+        media_type: str = "any",
+        genres: list[str] | None = None,
+        keywords: list[str] | None = None,
+        year_min: int | None = None,
+        year_max: int | None = None,
+        limit: int = 50,
+    ) -> dict:
+        if hasattr(media_type, "value"):
+            media_type = media_type.value
+        media_type = str(media_type or "any").lower()
+        catalog = await self._get_recommendation_catalog()
+        requested_genres = [str(value).strip() for value in (genres or []) if str(value).strip()]
+        requested_keywords = [str(value).strip() for value in (keywords or []) if str(value).strip()]
+        normalized_genres = [self._normalize(value) for value in requested_genres]
+        normalized_keywords = [self._normalize(value) for value in requested_keywords]
+        safe_limit = max(1, min(int(limit), 50))
+
+        hard_filtered: list[dict[str, Any]] = []
+        for item in catalog:
+            if media_type != "any" and item.get("media_type") != media_type:
+                continue
+            item_year = self._safe_int(item.get("year"))
+            if year_min is not None and (item_year is None or item_year < year_min):
+                continue
+            if year_max is not None and (item_year is None or item_year > year_max):
+                continue
+            item_genres = {self._normalize(value) for value in item.get("genres") or []}
+            if normalized_genres and not all(genre in item_genres for genre in normalized_genres):
+                continue
+            hard_filtered.append(item)
+
+        scored: list[tuple[int, dict[str, Any], list[str]]] = []
+        for item in hard_filtered:
+            fields = {
+                "title": self._normalize(item.get("title")),
+                "tagline": self._normalize(item.get("tagline")),
+                "summary": self._normalize(item.get("summary")),
+                "genres": self._normalize(" ".join(item.get("genres") or [])),
+            }
+            score = 0
+            reasons: list[str] = []
+            for original, keyword in zip(requested_keywords, normalized_keywords, strict=True):
+                if not keyword:
+                    continue
+                matched_fields = [name for name, text in fields.items() if keyword in text]
+                if not matched_fields:
+                    continue
+                score += max({"title": 8, "tagline": 5, "summary": 3, "genres": 2}[name] for name in matched_fields)
+                reasons.append(f"{original}: {', '.join(matched_fields)}")
+            scored.append((score, item, reasons))
+
+        def rank(entry: tuple[int, dict[str, Any], list[str]]) -> tuple[float, float, str]:
+            score, item, _ = entry
+            rating = self._safe_float(item.get("audience_rating")) or self._safe_float(item.get("rating")) or 0.0
+            return (-float(score), -rating, str(item.get("title") or "").lower())
+
+        scored.sort(key=rank)
+        keyword_matches = [
+            {**item, "match_score": score, "match_reasons": reasons}
+            for score, item, reasons in scored
+            if score > 0
+        ][:safe_limit]
+        selected_keys = {str(item.get("rating_key")) for item in keyword_matches}
+        broader_candidates = [
+            {**item, "match_score": score, "match_reasons": reasons}
+            for score, item, reasons in scored
+            if str(item.get("rating_key")) not in selected_keys
+        ][: max(0, safe_limit - len(keyword_matches))]
+        candidates = keyword_matches + broader_candidates
+        return {
+            "ok": True,
+            "library_verified": True,
+            "constraints": {
+                "media_type": media_type,
+                "genres": requested_genres,
+                "keywords": requested_keywords,
+                "year_min": year_min,
+                "year_max": year_max,
+            },
+            "catalog_match_count": len(hard_filtered),
+            "keyword_match_count": len(keyword_matches),
+            "candidates": candidates,
+            "keyword_matches": keyword_matches,
+            "broader_candidates": broader_candidates,
+        }
+
+    async def _get_recommendation_catalog(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        if self._recommendation_catalog_cache is not None:
+            cached_at, cached = self._recommendation_catalog_cache
+            if now - cached_at < self._recommendation_catalog_ttl_seconds:
+                return cached
+
+        catalog: list[dict[str, Any]] = []
+        for section in await self.list_sections():
+            for item in await self._scan_section_catalog(section["key"]):
+                media_type = str(item.get("type") or section.get("type") or "").lower()
+                if media_type not in {"movie", "show"}:
+                    continue
+                summary = str(item.get("summary") or "").strip()
+                catalog.append(
+                    {
+                        "title": item.get("title"),
+                        "year": self._safe_int(item.get("year")),
+                        "media_type": media_type,
+                        "summary": summary[:600],
+                        "tagline": str(item.get("tagline") or "").strip()[:300],
+                        "genres": self._tag_values(item.get("Genre")),
+                        "content_rating": item.get("contentRating"),
+                        "rating": self._safe_float(item.get("rating")),
+                        "audience_rating": self._safe_float(item.get("audienceRating")),
+                        "library": section.get("title"),
+                        "rating_key": str(item.get("ratingKey") or item.get("key") or ""),
+                        "library_verified": True,
+                    }
+                )
+        self._recommendation_catalog_cache = (now, catalog)
+        return catalog
+
+    def _tag_values(self, value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(item.get("tag") or "").strip()
+            for item in value
+            if isinstance(item, dict) and str(item.get("tag") or "").strip()
+        ]
+
+    def _safe_int(self, value: object) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _safe_float(self, value: object) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     async def list_sections(self) -> list[dict[str, Any]]:
         payload = await self._request_json("/library/sections")
