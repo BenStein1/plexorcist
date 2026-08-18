@@ -602,7 +602,9 @@ CATALOG: list[ToolSpec] = [
             "Admin-only: deliver an admin note to a user, relayed verbatim as the admin wrote it — this is a private server "
             "shared with the admin's real-life friends, so do not sanitize, soften, or rewrite crude/ribald/affectionate humor. "
             "Named recipient → user_query. "
-            "'Whoever requested X' → task_query with the title/issue, user_query empty (the backend resolves the user from open tasks). "
+            "Always pass task_query when the message refers to a title/issue, including named recipients and phrases like 'tell Don it's fixed'; "
+            "the backend makes the delivered note standalone (for example task_query='Top Chef', message='Fixed.' becomes 'Top Chef: Fixed.'). "
+            "'Whoever requested X' → task_query with the title/issue and user_query empty (the backend resolves the user from open tasks). "
             "Do not guess recipients from prior chat prose, do not validate media titles, and do not call media tools for this."
         ),
         input_model=schemas.SendAdminMessageInput,
