@@ -10,10 +10,11 @@ import httpx
 
 
 class PlexClient:
+    _recommendation_catalog_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+
     def __init__(self, base_url: str, token: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
-        self._recommendation_catalog_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._recommendation_catalog_ttl_seconds = 300.0
 
     async def check_availability(self, title: str) -> dict:
@@ -255,8 +256,10 @@ class PlexClient:
 
     async def _get_recommendation_catalog(self) -> list[dict[str, Any]]:
         now = time.monotonic()
-        if self._recommendation_catalog_cache is not None:
-            cached_at, cached = self._recommendation_catalog_cache
+        cache_key = (self.base_url, self.token or "")
+        cached_entry = self._recommendation_catalog_cache.get(cache_key)
+        if cached_entry is not None:
+            cached_at, cached = cached_entry
             if now - cached_at < self._recommendation_catalog_ttl_seconds:
                 return cached
 
@@ -283,7 +286,7 @@ class PlexClient:
                         "library_verified": True,
                     }
                 )
-        self._recommendation_catalog_cache = (now, catalog)
+        self._recommendation_catalog_cache[cache_key] = (now, catalog)
         return catalog
 
     def _tag_values(self, value: object) -> list[str]:

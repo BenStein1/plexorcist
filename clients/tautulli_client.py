@@ -256,12 +256,14 @@ class TautulliClient(BaseHttpClient):
                         "rating_key": rating_key or None,
                         "play_count": 0,
                         "unique_viewer_count": 0,
+                        "users_watched": 0,
                     },
                 )
                 plays = self._count_value(row.get("total_plays") if row.get("total_plays") is not None else row.get("plays"))
                 viewers = self._count_value(row.get("users_watched"))
                 record["play_count"] = max(int(record["play_count"]), plays)
                 record["unique_viewer_count"] = max(int(record["unique_viewer_count"]), viewers)
+                record["users_watched"] = record["unique_viewer_count"]
 
         movies = [row for (category, _), row in merged.items() if category == "movie"]
         tv = [row for (category, _), row in merged.items() if category == "show"]

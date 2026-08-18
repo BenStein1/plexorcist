@@ -79,6 +79,7 @@ def test_popularity_merges_blocks_by_title_when_rating_key_is_missing():
             "rating_key": None,
             "play_count": 9,
             "unique_viewer_count": 2,
+            "users_watched": 2,
         }
     ]
 

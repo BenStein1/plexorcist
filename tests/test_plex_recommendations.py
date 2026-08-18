@@ -65,7 +65,9 @@ SHOWS = [
 
 
 class FakePlex(PlexClient):
-    def __init__(self) -> None:
+    def __init__(self, *, reset_cache: bool = True) -> None:
+        if reset_cache:
+            self._recommendation_catalog_cache.clear()
         super().__init__("http://plex.invalid", "token")
         self.scans = 0
 
@@ -142,3 +144,16 @@ async def test_recommendation_catalog_is_cached_for_five_minutes():
     await plex.verify_recommendation_candidates([{"title": "Jaws", "media_type": "movie"}])
 
     assert plex.scans == 2  # one scan per library section, not one scan per tool call
+
+
+@pytest.mark.asyncio
+async def test_recommendation_catalog_cache_survives_per_request_client_instances():
+    first = FakePlex()
+    await first.search_recommendation_pool(media_type="movie", genres=["Horror"])
+    second = FakePlex(reset_cache=False)
+
+    result = await second.search_recommendation_pool(media_type="movie", genres=["Horror"])
+
+    assert result["catalog_match_count"] == 3
+    assert first.scans == 2
+    assert second.scans == 0
