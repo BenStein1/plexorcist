@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +118,7 @@ class ConversationStore:
             )
             conn.execute(
                 """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_media_request_history_source_request
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_media_request_history_source_type_request
                 ON media_request_history (source, media_type, source_request_id)
                 WHERE source_request_id IS NOT NULL
                 """
@@ -466,7 +466,7 @@ class ConversationStore:
         source_request_id: str | int | None = None,
     ) -> dict[str, Any]:
         """Record one request that the request backend confirmed actually landed."""
-        created_at = datetime.utcnow().isoformat()
+        created_at = datetime.now(timezone.utc).isoformat()
         normalized_source_id = str(source_request_id) if source_request_id is not None else None
         with self._connect() as conn:
             cursor = conn.execute(

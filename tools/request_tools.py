@@ -72,6 +72,8 @@ class RequestTools:
         request_scope: str,
         season: int | None = None,
         episode: int | None = None,
+        fallback_title: str | None = None,
+        fallback_year: int | None = None,
     ) -> dict:
         stamped = dict(result)
         if not (result.get("ok") is True and result.get("status") == "requested"):
@@ -89,14 +91,20 @@ class RequestTools:
             or result.get("request_id")
         )
         detail = result.get("ombi_detail") if isinstance(result.get("ombi_detail"), dict) else {}
-        year = result.get("year") or detail.get("year")
+        year = self._year_value(
+            result.get("year")
+            or detail.get("year")
+            or detail.get("releaseDate")
+            or detail.get("firstAired")
+            or fallback_year
+        )
         try:
             stored = self.store.record_media_request(
                 user_id=user_id,
                 username=username,
                 media_type=media_type,
-                title=result.get("title") or detail.get("title"),
-                year=int(year) if year is not None else None,
+                title=result.get("title") or detail.get("title") or fallback_title,
+                year=year,
                 tmdb_id=result.get("tmdb_id"),
                 tvdb_id=result.get("tvdb_id"),
                 request_scope=request_scope,
@@ -114,6 +122,12 @@ class RequestTools:
             "history_id": stored.get("history_id"),
             "history_duplicate": bool(stored.get("duplicate")),
         }
+
+    def _year_value(self, value: object) -> int | None:
+        text = str(value or "").strip()
+        if len(text) >= 4 and text[:4].isdigit():
+            return int(text[:4])
+        return None
 
     async def _account_not_ready(self, username: str) -> dict | None:
         """Guard for brand-new users: if their Ombi account hasn't finished
@@ -161,6 +175,8 @@ class RequestTools:
             username=username,
             media_type="movie",
             request_scope="movie",
+            fallback_title=title,
+            fallback_year=year,
         )
 
     async def request_show_scope_for_user(self, username: str, tvdb_id: int, scope: str) -> dict:

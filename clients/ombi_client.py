@@ -390,15 +390,20 @@ class OmbiClient(BaseHttpClient):
                 **failed_context,
                 "user_summary": self._request_failure_summary(failed_context),
             }
-        return {
-            "ok": True,
+        context: dict[str, object] = {
             "username": username,
             "tvdb_id": tvdb_id,
             "season": season,
             "episode": episode,
-            "status": "requested",
-            "ombi": result,
+            "title": detail.get("title"),
+            "ombi_detail": detail,
+            "request_payload": payload,
         }
+        return self._normalize_request_engine_result(
+            result=result,
+            success_status="requested",
+            error_context=context,
+        )
 
     async def check_movie_request_status(
         self,

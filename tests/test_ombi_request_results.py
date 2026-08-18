@@ -83,6 +83,42 @@ def test_ambiguous_result_alone_is_not_an_error():
 
 
 @pytest.mark.asyncio
+async def test_episode_request_does_not_call_an_ambiguous_post_confirmed():
+    client = FakeOmbi(get_routes={}, post_result=PROD_AMBIGUOUS_RESULT)
+
+    result = await client.request_episode_for_user(
+        username="phillip",
+        tvdb_id=ALTERED_CARBON_TVDB,
+        season=1,
+        episode=2,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "unconfirmed"
+    assert result["season"] == 1
+    assert result["episode"] == 2
+
+
+@pytest.mark.asyncio
+async def test_episode_request_preserves_resolved_title_on_success():
+    client = FakeOmbi(
+        get_routes={f"/api/v2/Search/tv/{ALTERED_CARBON_TVDB}": {"title": "Altered Carbon"}},
+        post_result={"result": True, "requestId": 91},
+    )
+
+    result = await client.request_episode_for_user(
+        username="phillip",
+        tvdb_id=ALTERED_CARBON_TVDB,
+        season=1,
+        episode=2,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "requested"
+    assert result["title"] == "Altered Carbon"
+
+
+@pytest.mark.asyncio
 async def test_landed_request_is_reported_as_success_not_failure():
     """Ben's actual bug: Ombi said result=false, the show was in the request list."""
     client = FakeOmbi(

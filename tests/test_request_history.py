@@ -94,6 +94,29 @@ async def test_duplicate_source_id_reuses_history_receipt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_movie_and_episode_ids_do_not_collide_across_ombi_request_tables(tmp_path):
+    history = store(tmp_path)
+    movie_tools = RequestTools(
+        FakeOmbi({"ok": True, "status": "requested", "ombi": {"requestId": 72}}),
+        store=history,
+        user_id="u1",
+    )
+    episode_tools = RequestTools(
+        FakeOmbi({"ok": True, "status": "requested", "ombi": {"requestId": 72}}),
+        store=history,
+        user_id="u1",
+    )
+
+    movie = await movie_tools.request_movie_for_user(username="geoff", tmdb_id=578)
+    episode = await episode_tools.request_episode_for_user(
+        username="geoff", tvdb_id=123, season=1, episode=2
+    )
+
+    assert movie["history_id"] != episode["history_id"]
+    assert {row["media_type"] for row in history.list_media_request_history(user_id="u1")} == {"movie", "episode"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "result",
     [
