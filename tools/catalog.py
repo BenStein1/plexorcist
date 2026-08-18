@@ -589,7 +589,8 @@ CATALOG: list[ToolSpec] = [
         name="exit_admin_task_mode",
         description=(
             "Admin-only task-mode routing control. Use only when the admin's latest message is NOT asking to list, "
-            "re-check, close, resolve, or otherwise act on admin tasks. This changes no data and lets the conversation "
+            "re-check, close, resolve, or otherwise act on admin tasks AND is NOT asking to tell, message, ask, or notify another user. "
+            "Use send_admin_message for any outbound user message. This changes no data and lets the conversation "
             "continue normally. Never use it for a task request merely to avoid calling the task tool."
         ),
         input_model=schemas.EmptyInput,

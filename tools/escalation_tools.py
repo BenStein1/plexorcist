@@ -42,6 +42,11 @@ class EscalationTools:
         result = dict(result)
         result["sent_message"] = formatted_summary
         if result.get("ok"):
+            result["delivery_receipt"] = (
+                f"To the admin: “{formatted_summary}”"
+                if "\n" not in formatted_summary
+                else f"To the admin:\n“{formatted_summary}”"
+            )
             result["delivery_confirmation"] = {
                 "direction": "user_to_admin",
                 "status": "sent",

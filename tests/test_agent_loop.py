@@ -69,6 +69,7 @@ class FakeToolkit:
         return {
             "ok": True,
             "summary": summary,
+            "delivery_receipt": f"To the admin: “{summary}”",
             "delivery_confirmation": {
                 "direction": "user_to_admin",
                 "status": "sent",
@@ -79,6 +80,19 @@ class FakeToolkit:
 
     async def exit_task_mode(self) -> dict:
         return {"ok": True, "action": "admin_task_mode_exited"}
+
+    async def admin_message(
+        self,
+        message: str,
+        user_query: str | None = None,
+        task_query: str | None = None,
+    ) -> dict:
+        return {
+            "ok": True,
+            "action": "admin_message_queued",
+            "sent_message": message,
+            "delivery_receipt": f"To {user_query}: “{message}”",
+        }
 
 
 FAKE_SPECS = [
@@ -105,6 +119,12 @@ FAKE_SPECS = [
         description="fake task-mode exit",
         input_model=schemas.EmptyInput,
         resolve=lambda tk: tk.exit_task_mode,
+    ),
+    ToolSpec(
+        name="send_admin_message",
+        description="fake admin message",
+        input_model=schemas.SendAdminMessageInput,
+        resolve=lambda tk: tk.admin_message,
     ),
 ]
 
@@ -343,9 +363,43 @@ async def test_active_admin_task_mode_forces_a_structured_routing_tool_before_te
     assert reply == "Changed subjects normally."
     assert tool_calls[0].name == "exit_admin_task_mode"
     assert client.calls[0]["tool_choice"] == "required"
-    assert {tool.name for tool in client.calls[0]["tools"]} == {"exit_admin_task_mode"}
+    assert {tool.name for tool in client.calls[0]["tools"]} == {
+        "exit_admin_task_mode",
+        "send_admin_message",
+    }
     assert client.calls[1]["tool_choice"] is None
     assert state.support_context["admin_task_mode"] is False
+
+
+@pytest.mark.asyncio
+async def test_active_admin_workflow_forces_send_tool_and_uses_its_receipt():
+    message = "I fixed most of the open issues. I need more information about Gogol. Is it a movie or show, and what year?"
+    client = FakeLlmClient(
+        [
+            LlmResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="send-1",
+                        name="send_admin_message",
+                        arguments_json=json.dumps({"user_query": "Nathan", "message": message}),
+                    )
+                ],
+                native_turn=[],
+            ),
+            LlmResponse(text="Done — I sent it.", tool_calls=[], native_turn=[]),
+        ]
+    )
+    state = _state()
+    state.support_context["admin_task_mode"] = True
+    agent = _agent(client, _bridge())
+
+    reply, tool_calls = await agent.respond(_user(is_admin=True), state, "Tell Nathan that and ask about Gogol")
+
+    assert tool_calls[0].name == "send_admin_message"
+    assert client.calls[0]["tool_choice"] == "required"
+    assert reply == f"Done — I sent it.\n\nTo Nathan: “{message}”"
+    assert state.support_context["admin_task_mode"] is True
 
 
 # --- (e) max-turns exhaustion -> fallback reply, no crash/hang --------------

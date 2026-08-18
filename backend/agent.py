@@ -35,7 +35,12 @@ _NILBOG_REDACTED_TEXT = (
 
 _DEFAULT_MAX_TURNS = 6
 _MIN_MAX_TURNS = 2
-_ADMIN_TASK_GATE_TOOLS = {"get_admin_task_summary", "resolve_admin_task", "exit_admin_task_mode"}
+_ADMIN_TASK_GATE_TOOLS = {
+    "get_admin_task_summary",
+    "resolve_admin_task",
+    "send_admin_message",
+    "exit_admin_task_mode",
+}
 
 
 class ConciergeAgent:
@@ -288,10 +293,16 @@ class ConciergeAgent:
 
     def _append_delivery_confirmations(self, reply: str, tool_calls: list[Any]) -> str:
         confirmations: list[str] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[str] = set()
         for call in tool_calls:
             result = getattr(call, "result", None)
             if not isinstance(result, dict) or result.get("ok") is not True:
+                continue
+            receipt = str(result.get("delivery_receipt") or "").strip()
+            if receipt:
+                if receipt not in seen:
+                    seen.add(receipt)
+                    confirmations.append(receipt)
                 continue
             confirmation = result.get("delivery_confirmation")
             if not isinstance(confirmation, dict):
@@ -303,7 +314,7 @@ class ConciergeAgent:
             status = str(confirmation.get("status") or "sent").strip().lower()
             if not message:
                 continue
-            key = (status, recipient, message)
+            key = f"{status}\0{recipient}\0{message}"
             if key in seen:
                 continue
             seen.add(key)
@@ -1618,6 +1629,7 @@ Admin messaging:
 - If a `send_admin_message` or `set_user_friendly_name` lookup comes back not-found or ambiguous, call `find_users` with just the distinctive part of the name before telling {self.admin_label} you found nobody. Do not ask him to supply a username you could have looked up yourself.
 - When the admin asks to list, show, check, or re-check open tasks, you MUST call `get_admin_task_summary` in that same turn and answer from its fresh result. A prior list, conversation memory, or `resolve_admin_task` result is never a substitute. Never say there are no open tasks unless that fresh call returns `task_count: 0`.
 - `resolve_all_matches` closes every task matching the supplied query, not the entire board. After a close, treat `remaining_open_task_count` as authoritative; do not infer that the board is empty merely because the requested match was cleared.
+- While admin workflow mode is active, a request to tell, message, ask, or notify another user must call `send_admin_message`; never call `exit_admin_task_mode` for that request. A message was not sent unless that tool returns `ok: true`, and the exact same-turn receipt must come from its `delivery_receipt`.
 - When {self.admin_label} asks what names or friendly names you have on file for someone, that is `find_users` — answer from its result. Never answer a "who do I have on file" question from memory or from prior chat prose.
 - `find_users` covers everyone in the friendly-names ledger, including people who have never logged in. Those are marked "[no account yet]": they are real people {self.admin_label} knows, but there is no account to attach an admin message to, so say that plainly rather than reporting them as unknown.
 - If the conversation already has injected media context, treat it as the current subject and answer from it before asking for more detail.

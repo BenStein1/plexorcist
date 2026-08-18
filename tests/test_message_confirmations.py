@@ -31,6 +31,7 @@ async def test_user_to_admin_notice_returns_exact_sent_confirmation():
         "recipient_label": "the admin",
         "message": exact,
     }
+    assert result["delivery_receipt"] == f"To the admin: “{exact}”"
 
 
 @pytest.mark.asyncio

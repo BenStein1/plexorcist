@@ -539,6 +539,11 @@ class AdminTools:
             or recipient.get("username")
             or recipient["label"]
         ).strip()
+        delivery_receipt = (
+            f"To {confirmation_name}: “{message}”"
+            if "\n" not in message
+            else f"To {confirmation_name}:\n“{message}”"
+        )
         self.store.add_user_memory_note(
             user_id=recipient["user_id"],
             note_type="admin_message",
@@ -559,6 +564,7 @@ class AdminTools:
             "recipient_label": recipient["label"],
             "message": message,
             "sent_message": message,
+            "delivery_receipt": delivery_receipt,
             "delivery_confirmation": {
                 "direction": "admin_to_user",
                 "status": "queued",
