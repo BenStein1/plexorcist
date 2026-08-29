@@ -1,0 +1,192 @@
+{
+  "data": {
+    "0": {
+      "1": {
+        "airdate": "1998-11-08",
+        "file_size": 0,
+        "location": "",
+        "name": "Exiled: A Law & Order Movie",
+        "quality": "N/A",
+        "release_name": "",
+        "status": "Skipped",
+        "subtitles": ""
+      },
+      "2": {
+        "airdate": "2005-05-24",
+        "file_size": 0,
+        "location": "",
+        "name": "Jerry Orbach Tribute",
+        "quality": "N/A",
+        "release_name": "",
+        "status": "Skipped",
+        "subtitles": ""
+      },
+      "3": {
+        "airdate": "2020-11-12",
+        "file_size": 0,
+        "location": "",
+        "name": "The Paley Center Presents Law & Order - Before They Were Stars",
+        "quality": "N/A",
+        "release_name": "",
+        "status": "Skipped",
+        "subtitles": ""
+      }
+    },
+    "1": {
+      "1": {
+        "airdate": "1990-09-13",
+        "file_size": 0,
+        "location": "",
+        "name": "Prescription for Death",
+        "quality": "SD DVD",
+        "release_name": "",
+        "status": "Snatched",
+        "subtitles": ""
+      },
+      "101": {
+        "airdate": "Never",
+        "file_size": 366390814,
+        "location": "/media/Law & Order/Season 01/Law & Order - S01E101 -  - Unknown.mkv",
+        "name": "",
+        "quality": "SDTV",
+        "release_name": "",
+        "status": "Downloaded",
+        "subtitles": ""
+      },
+      "102": {
+        "airdate": "Never",
+        "file_size": 366420293,
+        "location": "/media/Law & Order/Season 01/Law & Order - S01E102 -  - Unknown.mkv",
+        "name": "",
+        "quality": "SDTV",
+        "release_name": "",
+        "status": "Downloaded",
+        "subtitles": ""
+      },
+      "2": {
+        "airdate": "1990-09-20",
+        "file_size": 364747967,
+        "location": "/media/Law & Order/Season 01/Law & Order - S01E02 - Subterranean Homeboy Blues - Unknown.mkv",
+        "name": "Subterranean Homeboy Blues",
+        "quality": "SDTV",
+        "release_name": "",
+        "status": "Downloaded",
+        "subtitles": ""
+      },
+      "3": {
+        "airdate": "1990-10-04",
+        "file_size": 0,
+        "location": "",
+        "name": "The Reaper's Helper",
+        "quality": "SD DVD",
+        "release_name": "",
+        "status": "Snatched",
+        "subtitles": ""
+      },
+      "4": {
+        "airdate": "1990-10-11",
+        "file_size": 0,
+        "location": "",
+        "name": "Kiss the Girls and Make Them Die",
+        "quality": "SD DVD",
+        "release_name": "",
+        "status": "Snatched",
+        "subtitles": ""
+      },
+      "5": {
+        "airdate": "1990-10-11",
+        "file_size": 0,
+        "location": "",
+        "name": "Kiss the Girls",
+        "quality": "N/A",
+        "release_name": "",
+        "status": "Wanted",
+        "subtitles": ""
+      },
+      "6": {
+        "airdate": "1990-10-18",
+        "file_size": 0,
+        "location": "",
+        "name": "Happily Ever After",
+        "quality": "N/A",
+        "release_name": "",
+        "status": "Failed",
+        "subtitles": ""
+      }
+    },
+    "10": {
+      "1": {
+        "airdate": "1999-09-22",
+        "file_size": 0,
+        "location": "",
+        "name": "Gunshow",
+        "quality": "720p HDTV",
+        "release_name": "",
+        "status": "Snatched (Best)",
+        "subtitles": ""
+      },
+      "1001": {
+        "airdate": "Never",
+        "file_size": 365385368,
+        "location": "/media/Law & Order/Season 10/Law & Order - S10E1001 -  - Unknown.mkv",
+        "name": "",
+        "quality": "SDTV",
+        "release_name": "",
+        "status": "Downloaded",
+        "subtitles": ""
+      },
+      "1002": {
+        "airdate": "Never",
+        "file_size": 364440215,
+        "location": "/media/Law & Order/Season 10/Law & Order - S10E1002 -  - Unknown.mkv",
+        "name": "",
+        "quality": "SDTV",
+        "release_name": "",
+        "status": "Downloaded",
+        "subtitles": ""
+      },
+      "2": {
+        "airdate": "1999-09-29",
+        "file_size": 0,
+        "location": "",
+        "name": "Killerz",
+        "quality": "720p HDTV",
+        "release_name": "",
+        "status": "Snatched (Best)",
+        "subtitles": ""
+      },
+      "3": {
+        "airdate": "1999-10-06",
+        "file_size": 0,
+        "location": "",
+        "name": "DNR",
+        "quality": "720p HDTV",
+        "release_name": "",
+        "status": "Snatched (Best)",
+        "subtitles": ""
+      },
+      "4": {
+        "airdate": "1999-10-13",
+        "file_size": 0,
+        "location": "",
+        "name": "Merger",
+        "quality": "720p HDTV",
+        "release_name": "",
+        "status": "Snatched (Best)",
+        "subtitles": ""
+      },
+      "5": {
+        "airdate": "2099-01-01",
+        "file_size": 0,
+        "location": "",
+        "name": "Future Ep",
+        "quality": "N/A",
+        "release_name": "",
+        "status": "Unaired",
+        "subtitles": ""
+      }
+    }
+  },
+  "message": "",
+  "result": "success"
+}

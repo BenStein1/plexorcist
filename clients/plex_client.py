@@ -181,20 +181,86 @@ class PlexClient:
     def _extract_tvdb_id(self, item: dict[str, Any]) -> int | None:
         return self._extract_guid_id(item, "thetvdb", "tvdb")
 
+    def _search_variants(self, title: str) -> list[str]:
+        """Spellings to ask Plex for, best first.
+
+        Plex's `title=` filter matches on the stored string, so "Law and Order"
+        returns nothing at all against a library holding "Law & Order" -- the
+        ranking below never gets a chance because there is nothing to rank.
+        Ask for the obvious respellings too and pool whatever comes back.
+        """
+        text = str(title or "").strip()
+        variants = [text]
+        # Purely mechanical respellings of the same title, not intent parsing.
+        for candidate in (
+            re.sub(r"\s+and\s+", " & ", text, flags=re.IGNORECASE),
+            text.replace("&", "and"),
+            re.sub(r"[^\w\s]+", " ", text),
+        ):
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+            if candidate and candidate.lower() not in {v.lower() for v in variants}:
+                variants.append(candidate)
+        return variants
+
+    def _loose_search_variants(self, title: str) -> list[str]:
+        """Leading-word searches, tried only when the exact spellings found nothing.
+
+        Finds "Law & Order: Special Victims Unit" for "Law and Order SVU". These
+        results are deliberately not trusted on their own -- see
+        `_is_plausibly_the_same_title`, without which "Some Show That Does Not
+        Exist" happily matches "Make Some Noise".
+        """
+        words = re.sub(r"[^\w\s]+", " ", str(title or "")).split()
+        return [" ".join(words[:stop]) for stop in (2, 1) if len(words) > stop]
+
+    def _is_plausibly_the_same_title(self, query: str, title: Any) -> bool:
+        """Guard on loose matches: claiming a show is absent sends a repair down
+        the request path, but inventing a match is worse -- it breaks the
+        "not in Plex means request it" rule for genuinely missing media.
+        """
+        left, right = self._normalize(query), self._normalize(title)
+        if not left or not right:
+            return False
+        shared = 0
+        for left_char, right_char in zip(left, right):
+            if left_char != right_char:
+                break
+            shared += 1
+        if shared >= 8:
+            return True
+        return shared == min(len(left), len(right)) >= 4
+
     async def search(self, title: str, section_types: set[str] | None = None) -> list[dict[str, Any]]:
         sections = await self.list_sections()
-        title_matches: list[dict[str, Any]] = []
-        for section in sections:
-            if section_types and section.get("type") not in section_types:
-                continue
-            section_matches = await self._search_section(section["key"], title)
-            for item in section_matches:
-                item = dict(item)
-                item["library"] = section.get("title")
-                item["library_type"] = section.get("type")
-                item["library_key"] = section.get("key")
-                title_matches.append(item)
-        return self._rank_matches(title_matches, title)
+        wanted = [section for section in sections if not section_types or section.get("type") in section_types]
+        by_rating_key: dict[str, dict[str, Any]] = {}
+        for variant in self._search_variants(title):
+            for section in wanted:
+                for item in await self._search_section(section["key"], variant):
+                    item = dict(item)
+                    item["library"] = section.get("title")
+                    item["library_type"] = section.get("type")
+                    item["library_key"] = section.get("key")
+                    by_rating_key.setdefault(str(item.get("ratingKey")), item)
+            if by_rating_key:
+                # An earlier variant is a closer spelling of what was asked for;
+                # later ones are only worth trying when it found nothing.
+                break
+        if not by_rating_key:
+            for variant in self._loose_search_variants(title):
+                for section in wanted:
+                    for item in await self._search_section(section["key"], variant):
+                        if not self._is_plausibly_the_same_title(title, item.get("title")):
+                            continue
+                        item = dict(item)
+                        item["library"] = section.get("title")
+                        item["library_type"] = section.get("type")
+                        item["library_key"] = section.get("key")
+                        by_rating_key.setdefault(str(item.get("ratingKey")), item)
+                if by_rating_key:
+                    break
+        # Rank against what the user actually typed, not the variant that hit.
+        return self._rank_matches(list(by_rating_key.values()), title)
 
     async def search_catalog(self, query: str, section_types: set[str] | None = None) -> list[dict[str, Any]]:
         matches = await self.search(query, section_types=section_types)
@@ -575,9 +641,10 @@ class PlexClient:
 
         def score(item: dict[str, Any]) -> tuple[int, int, str]:
             title = self._normalize(item.get("title"))
-            if title == normalized_query and normalized_query:
+            forms = [title, *self._acronym_forms(item.get("title"))]
+            if normalized_query and normalized_query in forms:
                 rank = 300
-            elif normalized_query and title.startswith(normalized_query):
+            elif normalized_query and any(form.startswith(normalized_query) for form in forms):
                 rank = 220
             elif normalized_query and normalized_query in title:
                 rank = 180
@@ -610,6 +677,25 @@ class PlexClient:
             return (rank, year_rank, title)
 
         return sorted(matches, key=score, reverse=True)
+
+    def _acronym_forms(self, title: Any) -> list[str]:
+        """Spellings where a multi-word subtitle is written as its initials.
+
+        People say "Law and Order SVU", never "Law and Order Special Victims
+        Unit". Without this the base show outranks the spinoff -- it is a
+        substring of the query, and the spinoff matches nothing -- so asking to
+        fix SVU quietly repairs the wrong series. Purely mechanical, and it
+        generalizes to "NCIS LA", "CSI NY" and friends.
+        """
+        text = str(title or "")
+        main, separator, subtitle = text.partition(":")
+        if not separator:
+            return []
+        words = re.sub(r"[^\w\s]+", " ", subtitle).split()
+        if len(words) < 2:
+            return []
+        initials = "".join(word[0] for word in words)
+        return [self._normalize(f"{main} {initials}")]
 
     def _matches_catalog_query(self, item: dict[str, Any], query: str) -> bool:
         normalized_query = self._normalize(query)

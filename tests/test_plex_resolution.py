@@ -40,6 +40,87 @@ def _client_returning(matches: list[dict[str, Any]]) -> PlexClient:
     return client
 
 
+def _client_with_library(titles: list[dict[str, Any]]) -> tuple[PlexClient, list[str]]:
+    """Client stubbed at the HTTP layer, so search() itself really runs.
+
+    Plex's `title=` filter matches the stored string, so this fake matches
+    case-insensitive substrings the way the server does -- which is what makes
+    "Law and Order" find nothing against a library holding "Law & Order".
+    """
+    client = PlexClient(base_url="http://plex.invalid:32400", token="token")
+    asked: list[str] = []
+
+    async def fake_list_sections() -> list[dict[str, Any]]:
+        return [{"key": "2", "title": "TV Shows", "type": "show"}]
+
+    async def fake_search_section(section_key: str, title: str) -> list[dict[str, Any]]:
+        asked.append(title)
+        return [item for item in titles if title.lower() in str(item.get("title", "")).lower()]
+
+    client.list_sections = fake_list_sections  # type: ignore[method-assign]
+    client._search_section = fake_search_section  # type: ignore[method-assign]
+    return client, asked
+
+
+@pytest.mark.asyncio
+async def test_search_asks_plex_for_the_ampersand_spelling_too():
+    """The production bug. Normalization ranks rows Plex already returned, so it
+    could never fix this: `title=Law and Order` matched nothing server-side and
+    there was nothing to rank. Verified against the real server before/after.
+    """
+    client, asked = _client_with_library([_show("Law & Order", 1990, tvdb_id=72368)])
+
+    result = await client.resolve_show("Law and Order")
+
+    assert result["ok"] is True
+    assert result["show"] == "Law & Order"
+    assert result["tvdb_id"] == 72368
+    assert "Law & Order" in asked, "the ampersand spelling has to actually be asked for"
+
+
+@pytest.mark.asyncio
+async def test_search_finds_a_spinoff_by_its_leading_words():
+    """"Law and Order SVU" is not a substring of the stored title in any spelling,
+    so the exact variants all miss and the leading-word fallback has to carry it.
+    """
+    client, _ = _client_with_library(
+        [
+            _show("Law & Order", 1990, tvdb_id=72368),
+            _show("Law & Order: Special Victims Unit", 1999, tvdb_id=75692),
+        ]
+    )
+
+    result = await client.resolve_show("Law and Order SVU")
+
+    assert result["ok"] is True
+    assert result["show"] == "Law & Order: Special Victims Unit"
+
+
+@pytest.mark.asyncio
+async def test_loose_fallback_does_not_invent_a_match_for_an_absent_show():
+    """The regression this guard exists for: searching leading words alone made
+    "Some Show That Does Not Exist" match "Make Some Noise". A false positive is
+    worse than the original bug -- it breaks "not in Plex means request it", so
+    genuinely missing media would get repaired instead of requested.
+    """
+    client, _ = _client_with_library([_show("Make Some Noise", 2011), _show("Law & Order", 1990)])
+
+    result = await client.resolve_show("Some Show That Does Not Exist At All")
+
+    assert result["ok"] is False
+    assert result["reason"] == "show_not_in_plex"
+
+
+@pytest.mark.asyncio
+async def test_the_typed_spelling_is_tried_first_and_alone_when_it_works():
+    """A title that already matches must not fan out into extra library calls."""
+    client, asked = _client_with_library([_show("Heat", 1995)])
+
+    await client.resolve_show("Heat")
+
+    assert asked == ["Heat"]
+
+
 def test_ampersand_and_and_normalize_to_the_same_string():
     """Libraries store "Law & Order"; people type "Law and Order". Stripping
     punctuation alone yields laworder vs lawandorder, which never match.
