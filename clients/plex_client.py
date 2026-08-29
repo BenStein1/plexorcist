@@ -123,12 +123,50 @@ class PlexClient:
             ],
         }
 
-    def _extract_tvdb_id(self, item: dict[str, Any]) -> int | None:
+    async def resolve_movie(self, title: str) -> dict[str, Any]:
+        """Resolve a movie title against what is actually in the Plex library.
+
+        Same reasoning as resolve_show: Plex is what exists on the server, so a
+        reported problem with a movie is identified here rather than against a
+        request catalogue.
+        """
+        matches = await self.search(title, section_types={"movie"})
+        if not matches:
+            return {"ok": False, "reason": "movie_not_in_plex", "candidates": []}
+
+        normalized = self._normalize(title)
+        exact = [item for item in matches if self._normalize(item.get("title")) == normalized]
+        chosen = exact[0] if exact else matches[0]
+        return {
+            "ok": True,
+            "reason": "exact_title_match" if exact else "best_ranked_match",
+            "movie": chosen.get("title"),
+            "tmdb_id": self._extract_guid_id(chosen, "themoviedb", "tmdb"),
+            "rating_key": chosen.get("ratingKey"),
+            "year": self._safe_int(chosen.get("year")),
+            "library": chosen.get("library"),
+            "candidates": [
+                {
+                    "title": item.get("title"),
+                    "year": self._safe_int(item.get("year")),
+                    "tmdb_id": self._extract_guid_id(item, "themoviedb", "tmdb"),
+                    "library": item.get("library"),
+                }
+                for item in matches[:5]
+            ],
+        }
+
+    def _extract_guid_id(self, item: dict[str, Any], *agents: str) -> int | None:
+        """Pull an external id out of a Plex guid, e.g. themoviedb://12345."""
+        pattern = r"(?:" + "|".join(agents) + r")(?:://|-)(\d+)"
         for key in ("guid", "Guid", "originalGuid"):
-            match = re.search(r"thetvdb(?:://|-)(\d+)", str(item.get(key) or ""))
+            match = re.search(pattern, str(item.get(key) or ""))
             if match:
                 return int(match.group(1))
         return None
+
+    def _extract_tvdb_id(self, item: dict[str, Any]) -> int | None:
+        return self._extract_guid_id(item, "thetvdb", "tvdb")
 
     async def search(self, title: str, section_types: set[str] | None = None) -> list[dict[str, Any]]:
         sections = await self.list_sections()

@@ -5,14 +5,30 @@ from typing import Any
 import httpx
 
 from clients.ombi_client import OmbiClient
+from clients.plex_client import PlexClient
 from clients.radarr_client import RadarrClient
 from tools.error_helpers import classify_http_error, service_action, user_error_summary
 
 
 class MovieRepairTools:
-    def __init__(self, ombi: OmbiClient, radarr: RadarrClient) -> None:
+    def __init__(
+        self,
+        ombi: OmbiClient,
+        radarr: RadarrClient,
+        plex: PlexClient | None = None,
+    ) -> None:
         self.ombi = ombi
         self.radarr = radarr
+        self.plex = plex
+
+    async def _resolve_movie_in_library(self, query: str) -> dict[str, Any]:
+        """Ask Plex whether this movie is actually on the server. Never raises."""
+        if self.plex is None:
+            return {"ok": False, "reason": "plex_client_unavailable", "candidates": []}
+        try:
+            return await self.plex.resolve_movie(query)
+        except httpx.HTTPError as exc:
+            return {"ok": False, "reason": "plex_unreachable", "error_message": str(exc), "candidates": []}
 
     async def repair_requested_movie(
         self,
@@ -35,6 +51,24 @@ class MovieRepairTools:
                 "reason": "movie_repair_requires_title_or_query",
                 "user_summary": "I need the movie title before I can run a repair.",
             }
+        # Plex is the server's own record of what exists. A movie the user is
+        # complaining about is already on the server, so identity comes from
+        # there and the repair goes to Radarr -- Ombi is a request path and has
+        # no say in whether a broken copy can be refetched.
+        library_match = await self._resolve_movie_in_library(lookup_query)
+        if library_match.get("ok"):
+            return await self._repair_via_radarr(
+                query=query,
+                lookup_query=lookup_query,
+                title=str(library_match.get("movie") or lookup_query),
+                matched_year=self._safe_int(library_match.get("year")) or year,
+                issue=issue,
+                tmdb_id=self._safe_int(library_match.get("tmdb_id")),
+                requested=None,
+                available=True,
+                library_match=library_match,
+            )
+
         try:
             existing = await self.ombi.check_existing_media_status(query=lookup_query)
         except httpx.HTTPError as exc:
@@ -75,7 +109,6 @@ class MovieRepairTools:
 
         title = str(best_match.get("title"))
         matched_year = self._safe_int(best_match.get("year")) or year
-        display_title = self._display_title(title, matched_year)
         tmdb_id = self._safe_int(best_match.get("tmdb_id"))
         requested = bool(best_match.get("requested"))
         available = bool(best_match.get("available"))
@@ -92,9 +125,69 @@ class MovieRepairTools:
                 "tmdb_id": tmdb_id,
                 "requested": False,
                 "available": available,
+                "in_plex": False,
+                "plex_match": library_match,
                 "action": "not_requested",
                 "reason": "movie_not_requested_in_ombi",
+                "user_summary": (
+                    f"{self._display_title(title, matched_year)} isn't on the server and was never "
+                    "requested, so there's nothing to repair yet -- it needs to be requested first."
+                ),
             }
+
+        return await self._repair_via_radarr(
+            query=query,
+            lookup_query=lookup_query,
+            title=title,
+            matched_year=matched_year,
+            issue=issue,
+            tmdb_id=tmdb_id,
+            requested=requested,
+            available=available,
+            library_match=library_match,
+        )
+
+    async def _repair_via_radarr(
+        self,
+        *,
+        query: str | None,
+        lookup_query: str,
+        title: str,
+        matched_year: int | None,
+        issue: str | None,
+        tmdb_id: int | None,
+        requested: bool | None,
+        available: bool,
+        library_match: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Radarr owns the actual movie repair, whichever way identity was resolved."""
+        result = await self._run_radarr_repair(
+            query=query,
+            lookup_query=lookup_query,
+            title=title,
+            matched_year=matched_year,
+            issue=issue,
+            tmdb_id=tmdb_id,
+            requested=requested,
+            available=available,
+        )
+        if library_match is not None:
+            result["plex_match"] = library_match
+        return result
+
+    async def _run_radarr_repair(
+        self,
+        *,
+        query: str | None,
+        lookup_query: str,
+        title: str,
+        matched_year: int | None,
+        issue: str | None,
+        tmdb_id: int | None,
+        requested: bool | None,
+        available: bool,
+    ) -> dict[str, Any]:
+        display_title = self._display_title(title, matched_year)
 
         try:
             movies = await self.radarr.get_managed_movies()

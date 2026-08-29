@@ -315,7 +315,7 @@ def build_toolkit(settings: Settings, store: ConversationStore, user: UserContex
         media=MediaSearchTools(ombi, plex),
         requests=RequestTools(ombi, store=store, user_id=user.user_id if user else None),
         episodes=EpisodeTools(plex, sickchill),
-        movie_repairs=MovieRepairTools(ombi, radarr),
+        movie_repairs=MovieRepairTools(ombi, radarr, plex),
         repairs=RepairTools(ombi, sickchill, plex),
         recs=RecommendationTools(tautulli),
         escalation=EscalationTools(jackett, transmission, prowl, user_label=_user_label(user)),
