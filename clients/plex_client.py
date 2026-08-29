@@ -157,12 +157,25 @@ class PlexClient:
         }
 
     def _extract_guid_id(self, item: dict[str, Any], *agents: str) -> int | None:
-        """Pull an external id out of a Plex guid, e.g. themoviedb://12345."""
+        """Pull an external id out of a Plex guid, e.g. themoviedb://12345.
+
+        Modern Plex puts an opaque ``plex://show/...`` in ``guid`` and keeps the
+        external ids in a ``Guid`` list of ``{"id": "tvdb://75692"}`` entries, so
+        both shapes have to be read.
+        """
         pattern = r"(?:" + "|".join(agents) + r")(?:://|-)(\d+)"
         for key in ("guid", "Guid", "originalGuid"):
-            match = re.search(pattern, str(item.get(key) or ""))
-            if match:
-                return int(match.group(1))
+            value = item.get(key)
+            if not value:
+                continue
+            if isinstance(value, list):
+                texts = [str(entry.get("id") or "") if isinstance(entry, dict) else str(entry) for entry in value]
+            else:
+                texts = [str(value)]
+            for text in texts:
+                match = re.search(pattern, text)
+                if match:
+                    return int(match.group(1))
         return None
 
     def _extract_tvdb_id(self, item: dict[str, Any]) -> int | None:

@@ -46,6 +46,9 @@ class FakeSickChill:
     async def episode_numbers_for_season(self, *, show: str, season: int, expected_indexer_id: int | None) -> dict[str, Any]:
         return {"ok": True, "show": show, "episodes": [1, 2, 3]}
 
+    async def all_episode_numbers(self, *, show: str, expected_indexer_id: int | None) -> dict[str, Any]:
+        return {"ok": True, "show": show, "seasons": {1: [1, 2], 2: [1]}, "episode_count": 3}
+
 
 @pytest.mark.asyncio
 async def test_repair_requested_show_proceeds_for_library_present_show_with_no_ombi_request():
@@ -80,11 +83,11 @@ async def test_repair_requested_show_proceeds_for_library_present_show_with_no_o
 
 
 @pytest.mark.asyncio
-async def test_repair_requested_show_whole_show_scope_with_no_request_is_a_structured_refusal():
-    """The soft gate has nothing concrete to enumerate for a whole-show scope (no season
-    or episode target), so this one case still can't proceed -- but it must fail with a
-    structured, actionable result rather than a bare refusal, and it must not name a
-    backend service to the user.
+async def test_repair_requested_show_whole_show_scope_with_no_request_repairs_anyway():
+    """Whole-show scope with no request record: the soft gate enumerates the show's
+    seasons directly and repairs. A missing request record is not evidence that a
+    broken copy can't be refetched, and "it's broken" with no season is the way
+    people actually report problems.
     """
     ombi = FakeOmbi(
         {
@@ -100,12 +103,8 @@ async def test_repair_requested_show_whole_show_scope_with_no_request_is_a_struc
 
     result = await tools.repair_requested_show(query="Law and Order")
 
-    assert result["ok"] is False
-    assert result["reason"] == "show_not_requested_in_ombi"
-    assert result["candidates"] == [ombi._best_match]
-    assert sickchill.repair_calls == []
-    assert "ombi" not in result["user_summary"].lower()
-    assert "sickchill" not in result["user_summary"].lower()
+    assert result["ok"] is True
+    assert [(call["season"], call["episodes"]) for call in sickchill.repair_calls] == [(1, [1, 2]), (2, [1])]
 
 
 @pytest.mark.asyncio
@@ -202,10 +201,10 @@ async def test_explicit_tvdb_id_still_wins_over_the_plex_guid():
 
 
 @pytest.mark.asyncio
-async def test_whole_show_scope_on_a_plex_show_asks_for_a_narrower_target():
-    """A whole-show refetch is a big operation, so it still asks for a season or
-    episode -- but it now does so knowing the show exists, instead of refusing on a
-    missing request record.
+async def test_whole_show_scope_on_a_plex_show_repairs_every_season():
+    """"It's broken" with no season is the common case, so whole-show scope has to
+    actually repair rather than bounce the user for a season number. Every season
+    the show has is swept; already-downloaded episodes are no-ops downstream.
     """
     ombi = TrackingOmbi()
     plex = FakePlex([{"show": "Law & Order", "tvdb_id": 79590}])
@@ -214,14 +213,12 @@ async def test_whole_show_scope_on_a_plex_show_asks_for_a_narrower_target():
 
     result = await tools.repair_requested_show(query="Law and Order")
 
-    assert result["ok"] is False
-    assert result["action"] == "scope_too_broad"
-    assert result["in_plex"] is True
+    assert result["ok"] is True
     assert result["show"] == "Law & Order"
     assert ombi.searches == []
-    assert sickchill.repair_calls == []
-    assert "ombi" not in result["user_summary"].lower()
-    assert "sickchill" not in result["user_summary"].lower()
+    # One repair call per season, carrying the Plex-derived tvdb id.
+    assert [(call["season"], call["episodes"]) for call in sickchill.repair_calls] == [(1, [1, 2]), (2, [1])]
+    assert {call["expected_indexer_id"] for call in sickchill.repair_calls} == {79590}
 
 
 @pytest.mark.asyncio

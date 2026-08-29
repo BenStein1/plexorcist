@@ -246,14 +246,16 @@ class RepairTools:
                 "episode": effective_episode,
                 "tvdb_id": expected_tvdb_id,
                 "in_plex": True,
-                "action": "scope_too_broad",
-                "reason": "whole_show_repair_needs_season_or_episode",
+                # Defensive only: show/season/episode all resolve to a target
+                # above, so an unrecognised scope is the sole way to land here.
+                "action": "repair_target_unclear",
+                "reason": "unrecognized_repair_scope",
                 "plex_match": library_match,
                 "candidates": library_match.get("candidates") or [],
                 "user_summary": (
                     f"{title} is already on the server, so this is a repair rather than a new "
-                    "request. Refetching an entire show is a big operation though, so tell me "
-                    "which season or episode is broken and I'll target that."
+                    "request, but I couldn't work out what to target. Tell me which season or "
+                    "episode is broken and I'll go after that."
                 ),
             }
 
@@ -573,6 +575,58 @@ class RepairTools:
                     "air_date": None,
                 }
                 for episode_number in episode_list.get("episodes") or []
+            )
+        elif effective_scope == "show":
+            # A vague "it's broken" is the common case, so whole-show repair has to
+            # work rather than bounce the user for a season number. Sweeping every
+            # episode is cheap in effect: episodes already downloaded are left
+            # alone, so only genuinely broken ones get touched.
+            show_episodes = await self.sickchill.all_episode_numbers(
+                show=title,
+                expected_indexer_id=expected_tvdb_id,
+            )
+            if not show_episodes.get("ok"):
+                gate_error = soft_error or {
+                    "service": "sickchill",
+                    "operation": "all_episode_numbers",
+                    "failure_type": "unavailable",
+                    "reason": show_episodes.get("reason") or "show_episode_list_unavailable",
+                    "error_message": f"Could not list episodes for {title}",
+                }
+                return {
+                    "ok": False,
+                    "tool_name": "repair_requested_show",
+                    "query": query,
+                    "show": title,
+                    "scope": effective_scope,
+                    "season": effective_season,
+                    "episode": effective_episode,
+                    "tvdb_id": expected_tvdb_id,
+                    "action": service_action(gate_error),
+                    "reason": gate_error.get("reason") or "soft_gate_failed",
+                    **gate_error,
+                    "sickchill_probe": show_episodes,
+                    "plex_match": library_match,
+                    "user_summary": user_error_summary(
+                        tool_family="TV repair",
+                        error=gate_error,
+                        title=title,
+                        change_status="The repair could not work out which episodes to target; nothing was changed.",
+                    ),
+                }
+            title = str(show_episodes.get("show") or title)
+            targeted_rows.extend(
+                {
+                    "season": season_number,
+                    "episode": episode_number,
+                    "title": None,
+                    "status": "unknown",
+                    "requested": None,
+                    "available": None,
+                    "air_date": None,
+                }
+                for season_number, episode_numbers in (show_episodes.get("seasons") or {}).items()
+                for episode_number in episode_numbers
             )
         else:
             return None
