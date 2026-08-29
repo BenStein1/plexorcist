@@ -90,6 +90,46 @@ class PlexClient:
             return exact_matches[0]
         return matches[0]
 
+    async def resolve_show(self, title: str) -> dict[str, Any]:
+        """Resolve a show title against what is actually in the Plex library.
+
+        Plex is the server's own truth about what exists, so it -- not a
+        request catalogue -- is what a title should be identified against
+        when someone reports a problem with something they watched.
+        """
+        matches = await self.search(title, section_types={"show"})
+        if not matches:
+            return {"ok": False, "reason": "show_not_in_plex", "candidates": []}
+
+        normalized = self._normalize(title)
+        exact = [item for item in matches if self._normalize(item.get("title")) == normalized]
+        chosen = exact[0] if exact else matches[0]
+        return {
+            "ok": True,
+            "reason": "exact_title_match" if exact else "best_ranked_match",
+            "show": chosen.get("title"),
+            "tvdb_id": self._extract_tvdb_id(chosen),
+            "rating_key": chosen.get("ratingKey"),
+            "year": chosen.get("year"),
+            "library": chosen.get("library"),
+            "candidates": [
+                {
+                    "title": item.get("title"),
+                    "year": item.get("year"),
+                    "tvdb_id": self._extract_tvdb_id(item),
+                    "library": item.get("library"),
+                }
+                for item in matches[:5]
+            ],
+        }
+
+    def _extract_tvdb_id(self, item: dict[str, Any]) -> int | None:
+        for key in ("guid", "Guid", "originalGuid"):
+            match = re.search(r"thetvdb(?:://|-)(\d+)", str(item.get(key) or ""))
+            if match:
+                return int(match.group(1))
+        return None
+
     async def search(self, title: str, section_types: set[str] | None = None) -> list[dict[str, Any]]:
         sections = await self.list_sections()
         title_matches: list[dict[str, Any]] = []
@@ -555,4 +595,8 @@ class PlexClient:
 
     def _normalize(self, value: Any) -> str:
         text = str(value or "").lower()
+        # Libraries store "Law & Order" while people type "Law and Order".
+        # Stripping punctuation alone turns those into laworder/lawandorder,
+        # which never match, so fold the ampersand first.
+        text = text.replace("&", " and ")
         return re.sub(r"[^a-z0-9]+", "", text)

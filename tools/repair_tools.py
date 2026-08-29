@@ -6,14 +6,21 @@ from typing import Any
 import httpx
 
 from clients.ombi_client import OmbiClient
+from clients.plex_client import PlexClient
 from clients.sickchill_client import SickChillClient
 from tools.error_helpers import classify_http_error, classify_service_result, service_action, user_error_summary
 
 
 class RepairTools:
-    def __init__(self, ombi: OmbiClient, sickchill: SickChillClient) -> None:
+    def __init__(
+        self,
+        ombi: OmbiClient,
+        sickchill: SickChillClient,
+        plex: PlexClient | None = None,
+    ) -> None:
         self.ombi = ombi
         self.sickchill = sickchill
+        self.plex = plex
 
     async def add_requested_show_to_sickchill(
         self,
@@ -208,6 +215,48 @@ class RepairTools:
             effective_season = None
             effective_episode = None
 
+        # Plex is the server's own record of what exists, and plenty of media
+        # reaches it without ever passing through Ombi. So identity and
+        # existence are resolved here first: if someone reports a problem with
+        # something they watched, it is already on the server, and the job is a
+        # repair (SickChill), not a request (Ombi).
+        library_match = await self._resolve_show_in_library(query)
+        if library_match.get("ok"):
+            title = str(library_match.get("show") or query)
+            expected_tvdb_id = tvdb_id or self._safe_int(library_match.get("tvdb_id"))
+            repaired = await self._repair_with_sickchill_soft_gate(
+                query=query,
+                title=title,
+                effective_scope=effective_scope,
+                effective_season=effective_season,
+                effective_episode=effective_episode,
+                expected_tvdb_id=expected_tvdb_id,
+                soft_error=None,
+                library_match=library_match,
+            )
+            if repaired is not None:
+                return repaired
+            return {
+                "ok": False,
+                "tool_name": "repair_requested_show",
+                "query": query,
+                "show": title,
+                "scope": effective_scope,
+                "season": effective_season,
+                "episode": effective_episode,
+                "tvdb_id": expected_tvdb_id,
+                "in_plex": True,
+                "action": "scope_too_broad",
+                "reason": "whole_show_repair_needs_season_or_episode",
+                "plex_match": library_match,
+                "candidates": library_match.get("candidates") or [],
+                "user_summary": (
+                    f"{title} is already on the server, so this is a repair rather than a new "
+                    "request. Refetching an entire show is a big operation though, so tell me "
+                    "which season or episode is broken and I'll target that."
+                ),
+            }
+
         try:
             existing = await self.ombi.check_existing_media_status(query)
         except httpx.HTTPError as exc:
@@ -253,7 +302,14 @@ class RepairTools:
                 "episode": effective_episode,
                 "action": "show_not_found",
                 "reason": "show_not_found",
+                "in_plex": False,
+                "plex_match": library_match,
                 "match": best_match,
+                "user_summary": (
+                    f"I couldn't find anything matching \"{query}\" on the server, and it doesn't "
+                    "match a known show either. There's nothing to repair yet -- if it should "
+                    "exist, it needs to be requested first."
+                ),
             }
 
         title = str(best_match.get("title"))
@@ -294,12 +350,14 @@ class RepairTools:
                 "requested": False,
                 "available": bool(best_match.get("available")),
                 "reason": "show_not_requested_in_ombi",
+                "in_plex": False,
+                "plex_match": library_match,
                 "match": best_match,
                 "candidates": [best_match],
                 "user_summary": (
-                    f"{title} was never requested, and this is a whole-show repair with no "
-                    "specific season or episode to target yet. Say which season or episode is missing "
-                    "(and include that scope explicitly) and I can repair it directly."
+                    f"{title} isn't on the server and was never requested, and this is a whole-show "
+                    "repair with no specific season or episode to target yet. Say which season or "
+                    "episode you mean (and include that scope explicitly) and I can work it directly."
                 ),
             }
 
@@ -452,7 +510,8 @@ class RepairTools:
         effective_season: int | None,
         effective_episode: int | None,
         expected_tvdb_id: int | None,
-        soft_error: dict[str, Any],
+        soft_error: dict[str, Any] | None,
+        library_match: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         targeted_rows: list[dict[str, Any]] = []
         if effective_scope == "episode" and effective_season is not None and effective_episode is not None:
@@ -474,6 +533,13 @@ class RepairTools:
                 expected_indexer_id=expected_tvdb_id,
             )
             if not episode_list.get("ok"):
+                gate_error = soft_error or {
+                    "service": "sickchill",
+                    "operation": "episode_numbers_for_season",
+                    "failure_type": "unavailable",
+                    "reason": "season_episode_list_unavailable",
+                    "error_message": f"Could not list season {effective_season} episodes for {title}",
+                }
                 return {
                     "ok": False,
                     "tool_name": "repair_requested_show",
@@ -483,13 +549,14 @@ class RepairTools:
                     "season": effective_season,
                     "episode": effective_episode,
                     "tvdb_id": expected_tvdb_id,
-                    "action": service_action(soft_error),
-                    "reason": soft_error.get("reason") or "ombi_soft_gate_failed",
-                    **soft_error,
+                    "action": service_action(gate_error),
+                    "reason": gate_error.get("reason") or "soft_gate_failed",
+                    **gate_error,
                     "sickchill_probe": episode_list,
+                    "plex_match": library_match,
                     "user_summary": user_error_summary(
                         tool_family="TV repair",
-                        error=soft_error,
+                        error=gate_error,
                         title=title,
                         change_status="The season repair could not work out which episodes to target; nothing was changed.",
                     ),
@@ -522,6 +589,7 @@ class RepairTools:
             skipped_rows=[],
             requested=None,
             ombi_soft_error=soft_error,
+            library_match=library_match,
         )
 
     async def _run_sickchill_repair(
@@ -538,6 +606,7 @@ class RepairTools:
         skipped_rows: list[dict[str, Any]],
         requested: bool | None,
         ombi_soft_error: dict[str, Any] | None,
+        library_match: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         season_targets: dict[int, list[int]] = {}
         for row in targeted_rows:
@@ -628,6 +697,8 @@ class RepairTools:
             "season_results": season_results,
             "search_results": flattened_results,
         }
+        if library_match is not None:
+            repair_result["plex_match"] = library_match
         if ombi_soft_error is not None:
             repair_result["ombi_soft_error"] = ombi_soft_error
             repair_result["request_gate_soft_failed"] = True
@@ -835,6 +906,24 @@ class RepairTools:
             seen.add(key)
             candidates.append(item)
         return candidates
+
+    async def _resolve_show_in_library(self, query: str) -> dict[str, Any]:
+        """Ask Plex whether this show is actually on the server, and what it is called there.
+
+        Never raises: a Plex outage must not block a repair, it just means the
+        caller falls back to the Ombi request lookup.
+        """
+        if self.plex is None:
+            return {"ok": False, "reason": "plex_client_unavailable", "candidates": []}
+        try:
+            return await self.plex.resolve_show(query)
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "reason": "plex_unreachable",
+                "error_message": str(exc),
+                "candidates": [],
+            }
 
     def _select_show_candidate(self, candidates: list[dict[str, Any]], tvdb_id: int | None) -> dict[str, Any] | None:
         if tvdb_id is not None:

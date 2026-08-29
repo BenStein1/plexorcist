@@ -914,7 +914,11 @@ class SickChillClient(BaseHttpClient):
             return value
 
     def _normalize(self, value: Any) -> str:
-        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+        # SickChill stores "Law & Order" while people type "Law and Order".
+        # Fold the ampersand before stripping punctuation so the two forms
+        # normalize to the same string instead of laworder/lawandorder.
+        text = str(value or "").lower().replace("&", " and ")
+        return "".join(ch for ch in text if ch.isalnum())
 
     def _is_show_resolution_error(self, value: Any) -> bool:
         return isinstance(value, dict) and bool(value.get("resolution_error"))

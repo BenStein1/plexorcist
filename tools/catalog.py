@@ -316,7 +316,7 @@ def build_toolkit(settings: Settings, store: ConversationStore, user: UserContex
         requests=RequestTools(ombi, store=store, user_id=user.user_id if user else None),
         episodes=EpisodeTools(plex, sickchill),
         movie_repairs=MovieRepairTools(ombi, radarr),
-        repairs=RepairTools(ombi, sickchill),
+        repairs=RepairTools(ombi, sickchill, plex),
         recs=RecommendationTools(tautulli),
         escalation=EscalationTools(jackett, transmission, prowl, user_label=_user_label(user)),
         admin_tools=AdminTools(
@@ -509,11 +509,13 @@ CATALOG: list[ToolSpec] = [
     ToolSpec(
         name="repair_requested_show",
         description=(
-            "PRIMARY TV troubleshooting tool for shows already present in SickChill. Call it in the same turn you identify a confident requested-show match — do not ask permission to inspect first. "
+            "PRIMARY TV troubleshooting tool for a show that is ON the server. Call it in the same turn the user reports a problem with a show — do not ask permission to inspect first. "
+            "Resolves the show against Plex first, because Plex is what actually exists: plenty of media is on the server without ever having gone through a request. "
+            "If the user is complaining about anything other than the show being absent, it is on the server, and this tool is the right call. "
             "Runs the SickChill repair loop episode-by-episode: ignored → set wanted; wanted/missing/processing → trigger manual search; not aired → reported plainly. "
-            "Ombi lookup is a soft gate: if it fails but a concrete season/episode target exists, SickChill is still checked (request_gate_soft_failed — not a full failure). "
+            "A missing request record does NOT block the repair — being requested is irrelevant to whether a broken copy can be refetched. "
             "Use scope='show' with only query for vague complaints; narrow scope only when the user did. "
-            "NOT for shows missing from SickChill entirely — that Ombi→SickChill handoff failure is add_requested_show_to_sickchill's job."
+            "If the show turns out not to be on the server at all, it is not a repair — it has to be requested (see request tools); a show requested but missing from SickChill is add_requested_show_to_sickchill's job."
         ),
         input_model=schemas.RepairShowInput,
         resolve=lambda tk: tk.repairs.repair_requested_show,
