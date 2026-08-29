@@ -1222,3 +1222,53 @@ NALA, ask before any SSH).
   construction) — not started, not asked for yet.
 
 NEXT STEP: none from me. Waiting on Ben to review/deploy.
+
+## Session checkpoint (auto: session (5-hour) usage at 97.0%) — 2026-08-29 12:58 MST
+The session (5-hour) usage cap is at 97.0% and resets in ~3h 41m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+IN FLIGHT: Ben said "Push to the server and restart" for the Plex-presence fix.
+Branch `fix/admin-task-fix-it-failure`, commits `42eada5` (the fix) and
+`b6dae34` (comment naming the fold-guard assumption). 297 tests pass. Branch is
+43 commits ahead of `main`; the rsync deploys the working tree, not git, so the
+branch checkout is what goes live — Ben has not been asked whether he wants it
+merged to main first.
+
+WHAT WAS DECIDED: Ben's correction — "if plex says theyre there, then they are,
+and Sickchill renamed them that way on purpose" — is now the rule in code. Plex
+is the presence oracle (`PlexClient.episode_index` via `allLeaves`, one call,
+0.25s). `classify_show_episodes(..., plex_present=)` marks an episode healthy if
+Plex holds its number OR holds `season*100+number` and that folded number is not
+itself a real aired episode. `plex_present=None` (Plex unreachable) falls back to
+the old SickChill-only read; `{}` would wrongly mark a whole show missing, so the
+None/{} distinction is load-bearing. The "269 episodes need renaming" story is
+gone from code and from user-facing summaries. A snatch Plex cannot play is now
+a repair target rather than an ambiguous "stalled" row.
+
+VERIFIED LIVE (no searches queued): Law & Order 512 healthy / 32 missing in
+seasons 9,12,18,19,20 — the dead snatches. Season 1 alone: 22 healthy / 0
+missing, summary "Law & Order season 1 looks complete...". Season 18: 5 / 13.
+Breaking Bad: complete.
+
+NEXT STEP: deploy. `pyproject.toml` is UNCHANGED vs main, so NO pip install is
+needed — sync then restart only.
+1. `./deploy.local.sh` (rsync to the NFS-mounted webroot; safe, restarts
+   nothing). May already have been run this turn — re-running is harmless.
+2. Restart: prod is a FreeBSD jail with no sshd. Reach it as
+   NALA (10.0.0.12) -> `jexec 5` -> `supervisorctl restart plexorcist` as root.
+   THIS SESSION CANNOT DO IT: `net_ssh` is gated to the home-root Overlord cwd
+   and refuses from a project folder. It needs the Overlord session or Ben.
+   Ben's "restart" instruction IS the approval to connect — no need to re-ask
+   him for permission, only for a session that can actually run net_ssh.
+3. Confirm the restart really happened (a status line is not proof) and tell Ben.
+
+STILL OPEN, Ben's call, not started: "Law and Order Criminal Intent" still
+resolves to the base show with ok=True when CI is genuinely absent (weak rank-160
+"title in query" evidence). NVIDIA NIM adapter (~100 lines; the OpenAI adapter
+uses the Responses API and NIM is Chat Completions, so it is not a config flip) —
+recommended as an A/B after the tools are honest, Ben has not answered.
+Transmission has 3370 torrents, many at percentDone 0 — flagged only. SickChill
+flapped twice during this session (its box, not the code).
+AUTO-RESUME ARMED: overlord-resume-autoresume-a43dbb7e.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-a43dbb7e.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
