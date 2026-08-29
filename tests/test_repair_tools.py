@@ -43,10 +43,14 @@ class FakeSickChill:
             ],
         }
 
-    async def episode_numbers_for_season(self, *, show: str, season: int, expected_indexer_id: int | None) -> dict[str, Any]:
+    async def episode_numbers_for_season(
+        self, *, show: str, season: int, expected_indexer_id: int | None, plex_present: dict[int, set[int]] | None = None
+    ) -> dict[str, Any]:
         return {"ok": True, "show": show, "episodes": [1, 2, 3]}
 
-    async def all_episode_numbers(self, *, show: str, expected_indexer_id: int | None) -> dict[str, Any]:
+    async def all_episode_numbers(
+        self, *, show: str, expected_indexer_id: int | None, plex_present: dict[int, set[int]] | None = None
+    ) -> dict[str, Any]:
         return {"ok": True, "show": show, "seasons": {1: [1, 2], 2: [1]}, "episode_count": 3}
 
 
@@ -265,15 +269,15 @@ async def test_plex_outage_does_not_block_a_repair():
 
 @pytest.mark.asyncio
 async def test_a_season_with_nothing_to_refetch_reports_the_diagnosis():
-    """"Season 1 is broken" is a normal way to ask, and for a season whose files
-    are all on disk under wrong episode numbers it is the only way the user would
-    ever hear why. Without this the season path ran a repair over zero targets and
-    said nothing useful -- the same dead end whole-show repair used to hit.
+    """"Season 1 is broken" is a normal way to ask, and a season Plex plays end to
+    end needs an answer saying so. Without this the season path ran a repair over
+    zero targets and said nothing useful -- the same dead end whole-show repair
+    used to hit -- and it must not queue a search for media already present.
     """
 
-    class MisfiledSeasonSickChill(FakeSickChill):
+    class CompleteSeasonSickChill(FakeSickChill):
         async def episode_numbers_for_season(
-            self, *, show: str, season: int, expected_indexer_id: int | None
+            self, *, show: str, season: int, expected_indexer_id: int | None, plex_present: dict[int, set[int]] | None = None
         ) -> dict[str, Any]:
             return {
                 "ok": True,
@@ -281,8 +285,8 @@ async def test_a_season_with_nothing_to_refetch_reports_the_diagnosis():
                 "season": season,
                 "episodes": [],
                 "diagnosis": {
-                    "healthy": [],
-                    "misfiled_on_disk": [{"season": 1, "episode": number} for number in range(1, 25)],
+                    "healthy": [(1, number) for number in range(1, 23)],
+                    "misfiled_on_disk": [],
                     "needs_refetch": [],
                     "stalled": [],
                     "duplicate_files": 0,
@@ -292,7 +296,7 @@ async def test_a_season_with_nothing_to_refetch_reports_the_diagnosis():
     ombi = FakeOmbi(
         {"type": "show", "title": "Law and Order", "tvdb_id": 79590, "requested": False, "available": True}
     )
-    sickchill = MisfiledSeasonSickChill()
+    sickchill = CompleteSeasonSickChill()
     tools = RepairTools(ombi=ombi, sickchill=sickchill)
 
     result = await tools.repair_requested_show(query="Law and Order", scope="season", season=1)
@@ -301,6 +305,7 @@ async def test_a_season_with_nothing_to_refetch_reports_the_diagnosis():
     assert result["reason"] == "no_refetchable_episodes"
     assert result["scope"] == "season"
     assert result["season"] == 1
-    assert result["misfiled_count"] == 24
-    assert sickchill.repair_calls == [], "nothing is on disk twice; re-fetching would duplicate it"
+    assert result["healthy_count"] == 22
+    assert sickchill.repair_calls == [], "nothing is missing; re-fetching would duplicate it"
     assert "season 1" in result["user_summary"]
+    assert "renam" not in result["user_summary"], "odd episode numbering is not a defect the user has to hear about"

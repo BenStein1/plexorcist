@@ -771,15 +771,26 @@ class SickChillClient(BaseHttpClient):
         seasons: dict[int, dict[int, dict[str, Any]]],
         *,
         include_specials: bool = False,
+        plex_present: dict[int, set[int]] | None = None,
     ) -> dict[str, Any]:
         """Sort a show's episodes into what is actually wrong with each one.
 
-        Status alone cannot tell "we never got this" from "we have it, filed
-        under the wrong episode number" -- both read as Snatched with no file.
-        Joining the fileless episodes against the phantom rows separates them,
-        and the difference matters: on Law & Order 269 of 304 fileless episodes
-        are already on disk, so treating fileless as missing would re-download
-        most of a 20-season show the server already has.
+        Plex decides whether an episode exists. That is the whole rule: if Plex
+        can play it, it is healthy, whatever SickChill's status column says and
+        whatever number the file is under. SickChill status is metadata we report
+        alongside a gap, never the thing that defines one.
+
+        This matters because SickChill's own view is badly misleading here. On
+        Law & Order it reports 304 episodes as fileless, of which Plex holds 269
+        under a folded `season*100 + episode` number -- files SickChill renamed
+        that way on purpose. Diagnosing from SickChill alone turned a show that
+        is 512-of-544 complete into a 269-episode repair job. Against Plex the
+        same show yields the 32 episodes that are genuinely gone.
+
+        Without `plex_present` (Plex unreachable, or the show never matched) the
+        fold is applied to SickChill's own phantom rows instead. That is the
+        conservative fallback: it still refuses to re-download a file that looks
+        present, it just cannot confirm playability.
         """
         healthy: list[tuple[int, int]] = []
         misfiled: list[dict[str, Any]] = []
@@ -799,8 +810,29 @@ class SickChillClient(BaseHttpClient):
                 for number, info in rows.items()
                 if self._is_phantom_row(info) and self._episode_has_file(info) and number > 100
             }
+            in_plex: set[int] | None = None
+            if plex_present is not None:
+                in_plex = plex_present.get(season) or set()
             for number in sorted(real):
                 info = real[number]
+                if in_plex is not None:
+                    folded = season * 100 + number
+                    # The folded number only stands in for `number` when it is
+                    # not itself a real aired episode -- a daytime or anime
+                    # season that genuinely reaches 101 must not have its
+                    # episode 1 covered by its episode 101.
+                    if number in in_plex or (folded in in_plex and folded not in real):
+                        healthy.append((season, number))
+                        continue
+                    status = self._normalize_episode_status(info.get("status"))
+                    if not self._episode_has_aired(info.get("airdate")) or status in {"skipped", "ignored"}:
+                        pending.append((season, number))
+                    else:
+                        # Plex cannot play it, so it is missing. A snatch that
+                        # never landed is no longer held back: it is exactly the
+                        # gap the user is complaining about.
+                        refetch.append((season, number))
+                    continue
                 if self._episode_has_file(info):
                     healthy.append((season, number))
                     if number in phantom_files:
@@ -845,6 +877,7 @@ class SickChillClient(BaseHttpClient):
         self,
         show: str,
         expected_indexer_id: int | None = None,
+        plex_present: dict[int, set[int]] | None = None,
     ) -> dict[str, Any]:
         """List every episode across a show's real seasons, with a diagnosis.
 
@@ -863,7 +896,7 @@ class SickChillClient(BaseHttpClient):
         assert indexer_id is not None
 
         raw_seasons = await self._show_seasons(indexer_id)
-        diagnosis = self.classify_show_episodes(raw_seasons)
+        diagnosis = self.classify_show_episodes(raw_seasons, plex_present=plex_present)
         seasons: dict[int, list[int]] = {}
         for season, episode in diagnosis["needs_refetch"]:
             seasons.setdefault(season, []).append(episode)
@@ -891,6 +924,7 @@ class SickChillClient(BaseHttpClient):
         show: str,
         season: int,
         expected_indexer_id: int | None = None,
+        plex_present: dict[int, set[int]] | None = None,
     ) -> dict[str, Any]:
         original_expected_indexer_id = expected_indexer_id
         failure, show_info, indexer_id = await self._resolve_show_for_listing(
@@ -904,7 +938,11 @@ class SickChillClient(BaseHttpClient):
 
         raw_seasons = await self._show_seasons(indexer_id)
         season_rows = raw_seasons.get(season) or {}
-        diagnosis = self.classify_show_episodes({season: season_rows} if season_rows else {}, include_specials=True)
+        diagnosis = self.classify_show_episodes(
+            {season: season_rows} if season_rows else {},
+            include_specials=True,
+            plex_present=plex_present,
+        )
         episodes = [episode for _, episode in diagnosis["needs_refetch"]]
 
         return {

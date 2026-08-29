@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +10,8 @@ from clients.ombi_client import OmbiClient
 from clients.plex_client import PlexClient
 from clients.sickchill_client import SickChillClient
 from tools.error_helpers import classify_http_error, classify_service_result, service_action, user_error_summary
+
+logger = logging.getLogger("plexorcist.repair")
 
 
 class RepairTools:
@@ -533,6 +536,7 @@ class RepairTools:
                 show=title,
                 season=effective_season,
                 expected_indexer_id=expected_tvdb_id,
+                plex_present=await self._plex_episode_index(library_match),
             )
             if not episode_list.get("ok"):
                 gate_error = soft_error or {
@@ -600,6 +604,7 @@ class RepairTools:
             show_episodes = await self.sickchill.all_episode_numbers(
                 show=title,
                 expected_indexer_id=expected_tvdb_id,
+                plex_present=await self._plex_episode_index(library_match),
             )
             if not show_episodes.get("ok"):
                 gate_error = soft_error or {
@@ -684,15 +689,16 @@ class RepairTools:
         scope: str = "show",
         season: int | None = None,
     ) -> dict[str, Any]:
-        """Answer for a show with nothing to re-search but something still wrong.
+        """Answer for a show Plex can already play all the way through.
 
-        Two cases end up here and they need opposite handling. Episodes whose
-        file is on the server under a wrong episode number are not missing at
-        all -- re-fetching them would download a second copy of media that is
-        already there -- so they are reported for a rename, never queued. A
-        snatch that never landed is a genuine candidate to grab again, but it
-        is indistinguishable from one still downloading, so it is surfaced for
-        a decision rather than fired off automatically.
+        When Plex answers, reaching here means there is nothing wrong: every
+        aired episode plays, so the honest report is "complete". The odd episode
+        numbering some files carry is not a defect -- Plex resolves it and the
+        user never sees it -- so it is deliberately not mentioned.
+
+        The remaining counts only appear when Plex could not be consulted and the
+        diagnosis fell back to SickChill's records, where "on disk but not under
+        this number" is the best it can say.
         """
         misfiled = diagnosis.get("misfiled_on_disk") or []
         stalled = diagnosis.get("stalled") or []
@@ -701,17 +707,17 @@ class RepairTools:
         subject = f"{title} season {season}" if scope == "season" and season is not None else title
         parts: list[str] = []
         if misfiled:
-            parts.append(
-                f"{len(misfiled)} episodes are on the server but filed under the wrong episode "
-                "numbers, so they look missing even though the files are there -- those need "
-                "renaming rather than downloading again"
-            )
+            parts.append(f"{len(misfiled)} more are on the server already")
         if stalled:
             parts.append(f"{len(stalled)} were grabbed at some point but never finished arriving")
         if not parts:
             summary = f"{subject} looks complete -- all {len(healthy)} episodes are present, so nothing needed fixing."
         else:
-            summary = f"{subject}: " + "; ".join(parts) + "."
+            summary = (
+                f"{subject} looks complete -- {len(healthy)} episodes are present and "
+                + "; ".join(parts)
+                + ", so nothing needed fixing."
+            )
 
         return {
             "ok": True,
@@ -729,7 +735,6 @@ class RepairTools:
             "healthy_count": len(healthy),
             "misfiled_count": len(misfiled),
             "stalled_count": len(stalled),
-            "duplicate_file_count": diagnosis.get("duplicate_files", 0),
             "misfiled_examples": misfiled[:5],
             "stalled_examples": stalled[:5],
             "requested": None,
@@ -1052,6 +1057,25 @@ class RepairTools:
             seen.add(key)
             candidates.append(item)
         return candidates
+
+    async def _plex_episode_index(self, library_match: dict[str, Any] | None) -> dict[int, set[int]] | None:
+        """What Plex actually holds for this show, or None if it cannot say.
+
+        None is meaningfully different from an empty index: it means "unknown",
+        and the diagnosis falls back to reading SickChill's own file records. An
+        empty index would mean "Plex holds nothing", which would mark the entire
+        show as missing and queue a re-download of all of it.
+        """
+        if self.plex is None or not library_match or not library_match.get("ok"):
+            return None
+        rating_key = library_match.get("rating_key")
+        if not rating_key:
+            return None
+        try:
+            return await self.plex.episode_index(str(rating_key))
+        except Exception:
+            logger.warning("plex episode index unavailable for %s", library_match.get("show"), exc_info=True)
+            return None
 
     async def _resolve_show_in_library(self, query: str) -> dict[str, Any]:
         """Ask Plex whether this show is actually on the server, and what it is called there.

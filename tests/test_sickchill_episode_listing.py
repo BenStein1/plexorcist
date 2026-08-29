@@ -63,10 +63,11 @@ def test_phantom_rows_are_detected_by_missing_title_and_airdate():
 
 
 def test_an_episode_whose_file_is_filed_under_a_phantom_is_not_missing():
-    """The core of the Law & Order diagnosis. S01E01 has no file of its own, but
-    the phantom S01E101 holds it -- the file is on the server under the wrong
-    number. Re-fetching it would download a second copy of media already there,
-    so it must be classified for renaming and never queued for search.
+    """The SickChill-only fallback, used when Plex cannot be reached. S01E01 has
+    no file of its own, but the phantom S01E101 holds it. Re-fetching would
+    download a second copy of media already there, so it must never be queued.
+    Ben's correction applies to how this is *reported*, not to the guard itself:
+    the file is real, so the one thing that must not happen is a re-download.
     """
     client = _client()
     seasons = {
@@ -88,11 +89,11 @@ def test_an_episode_whose_file_is_filed_under_a_phantom_is_not_missing():
     assert [(row["season"], row["episode"]) for row in result["misfiled_on_disk"]] == [(1, 1)]
 
 
-def test_a_snatch_that_never_landed_is_reported_not_re_searched():
-    """A snatch with nothing on disk is a re-get candidate, but from here it is
-    indistinguishable from one still downloading -- so it is surfaced for a
-    decision rather than fired off, which would grab a second copy of something
-    already on its way in.
+def test_a_snatch_that_never_landed_is_only_held_back_when_plex_cannot_answer():
+    """Without Plex, a snatch is ambiguous -- dead or still downloading looks the
+    same -- so it is surfaced rather than fired off. Once Plex confirms it cannot
+    play the episode, the ambiguity is gone: it is a gap, and it is exactly the
+    gap the user is complaining about, so it becomes a target.
     """
     client = _client()
     seasons = {
@@ -101,10 +102,13 @@ def test_a_snatch_that_never_landed_is_reported_not_re_searched():
         }
     }
 
-    result = client.classify_show_episodes(seasons)
+    assert client.classify_show_episodes(seasons)["needs_refetch"] == []
+    assert [(row["season"], row["episode"]) for row in client.classify_show_episodes(seasons)["stalled"]] == [(1, 1)]
 
-    assert result["needs_refetch"] == []
-    assert [(row["season"], row["episode"]) for row in result["stalled"]] == [(1, 1)]
+    with_plex = client.classify_show_episodes(seasons, plex_present={1: set()})
+
+    assert with_plex["needs_refetch"] == [(1, 1)]
+    assert with_plex["stalled"] == []
 
 
 def test_wanted_and_failed_episodes_are_the_ones_worth_searching():
@@ -193,3 +197,43 @@ async def test_a_healthy_show_lists_fine_with_nothing_to_repair():
     assert result["seasons"] == {}
     assert result["reason"] is None
     assert len(result["diagnosis"]["healthy"]) == 1
+
+
+def test_plex_decides_presence_not_sickchill_status():
+    """Ben's correction, encoded. SickChill calls S01E01 a fileless snatch, but
+    Plex plays it under the folded S01E101 number that SickChill renamed it to on
+    purpose. Diagnosing from SickChill alone reported 269 Law & Order episodes as
+    needing a rename; against Plex the show is simply complete.
+    """
+    client = _client()
+    seasons = {
+        1: {
+            1: {"name": "Pilot", "airdate": "1990-09-13", "status": "Snatched", "location": "", "file_size": 0},
+            2: {"name": "Subterranean", "airdate": "1990-09-20", "status": "Wanted", "location": "", "file_size": 0},
+        }
+    }
+
+    result = client.classify_show_episodes(seasons, plex_present={1: {101, 2}})
+
+    assert result["needs_refetch"] == []
+    assert result["healthy"] == [(1, 1), (1, 2)]
+    assert result["misfiled_on_disk"] == [], "an episode Plex can play is not a filing problem"
+
+
+def test_the_fold_never_covers_a_season_that_really_reaches_101():
+    """Most shows run 24 episodes a season; daytime and anime do not. If episode
+    101 genuinely aired, it is its own episode and cannot also stand in for
+    episode 1 -- folding it would hide a real gap behind a real episode.
+    """
+    client = _client()
+    seasons = {
+        1: {
+            1: {"name": "Ep 1", "airdate": "2014-01-02", "status": "Wanted", "location": "", "file_size": 0},
+            101: {"name": "Ep 101", "airdate": "2014-06-02", "status": "Downloaded", "location": "/m/x.mkv", "file_size": 9},
+        }
+    }
+
+    result = client.classify_show_episodes(seasons, plex_present={1: {101}})
+
+    assert result["needs_refetch"] == [(1, 1)]
+    assert result["healthy"] == [(1, 101)]

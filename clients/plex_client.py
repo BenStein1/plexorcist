@@ -79,6 +79,28 @@ class PlexClient:
             "matches": episodes,
         }
 
+    async def episode_index(self, rating_key: str) -> dict[int, set[int]]:
+        """Every episode Plex holds for a show, as {season: {episode numbers}}.
+
+        `allLeaves` returns the whole show in one request -- 644 rows for Law &
+        Order in 0.25s, against 0.55s for walking the seasons one call each. This
+        is the presence oracle the diagnosis runs on, so it is on the hot path of
+        every repair and worth the single call.
+        """
+        payload = await self._request_json(f"/library/metadata/{rating_key}/allLeaves")
+        container = payload.get("MediaContainer", payload)
+        index: dict[int, set[int]] = {}
+        for item in self._collect_items(container):
+            season = item.get("parentIndex", item.get("parentindex"))
+            episode = item.get("index", item.get("episode"))
+            if season is None or episode is None:
+                continue
+            try:
+                index.setdefault(int(season), set()).add(int(episode))
+            except (TypeError, ValueError):
+                continue
+        return index
+
     async def find_show(self, title: str) -> dict[str, Any] | None:
         matches = await self.search(title, section_types={"show"})
         if not matches:
