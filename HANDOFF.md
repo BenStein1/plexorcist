@@ -1249,17 +1249,26 @@ seasons 9,12,18,19,20 — the dead snatches. Season 1 alone: 22 healthy / 0
 missing, summary "Law & Order season 1 looks complete...". Season 18: 5 / 13.
 Breaking Bad: complete.
 
-NEXT STEP: deploy. `pyproject.toml` is UNCHANGED vs main, so NO pip install is
-needed — sync then restart only.
-1. `./deploy.local.sh` (rsync to the NFS-mounted webroot; safe, restarts
-   nothing). May already have been run this turn — re-running is harmless.
-2. Restart: prod is a FreeBSD jail with no sshd. Reach it as
-   NALA (10.0.0.12) -> `jexec 5` -> `supervisorctl restart plexorcist` as root.
-   THIS SESSION CANNOT DO IT: `net_ssh` is gated to the home-root Overlord cwd
-   and refuses from a project folder. It needs the Overlord session or Ben.
-   Ben's "restart" instruction IS the approval to connect — no need to re-ask
-   him for permission, only for a session that can actually run net_ssh.
-3. Confirm the restart really happened (a status line is not proof) and tell Ben.
+DEPLOY STATUS: sync DONE this turn. `./deploy.local.sh` ran clean (1.45 MB to
+the NFS webroot) and the new code was verified present on the mount
+(`plex_present` in sickchill_client.py + repair_tools.py, `episode_index` in
+plex_client.py). `pyproject.toml` is UNCHANGED vs main, so NO pip install is
+needed — restart only.
+
+NEXT STEP: the restart, which is the ONLY thing left. Prod (10.0.0.93) is a
+FreeBSD jail with no sshd; reach it via NALA. THIS SESSION CANNOT DO IT —
+`net_ssh` is an Overlord MCP tool and is not present in a project-rooted
+session (confirmed by ToolSearch, not assumed). Do not route around that with a
+raw `ssh` from Bash; the cwd gate is deliberate. It needs the home-root Overlord
+session, or Ben running it himself:
+
+    ssh root@10.0.0.12 'jexec 5 supervisorctl restart plexorcist'
+
+Then confirm it actually restarted (a status line is not proof — check the pid
+changed, and `curl http://127.0.0.1:5500/` from inside the jail should give 200).
+Ben's "Push to the server and restart" IS the approval to connect for this
+request; a session with net_ssh does not need to re-ask. That clearance is spent
+afterwards — close the session and say so.
 
 STILL OPEN, Ben's call, not started: "Law and Order Criminal Intent" still
 resolves to the base show with ok=True when CI is genuinely absent (weak rank-160
