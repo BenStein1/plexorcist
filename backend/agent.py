@@ -35,12 +35,6 @@ _NILBOG_REDACTED_TEXT = (
 
 _DEFAULT_MAX_TURNS = 6
 _MIN_MAX_TURNS = 2
-_ADMIN_TASK_GATE_TOOLS = {
-    "get_admin_task_summary",
-    "resolve_admin_task",
-    "send_admin_message",
-    "exit_admin_task_mode",
-}
 
 
 class ConciergeAgent:
@@ -96,7 +90,6 @@ class ConciergeAgent:
         tool_calls: list[ToolCallRecord] = []
         alerted_keys: set[str] = set()
         last_failure_reason: str | None = None
-        task_gate_pending = user.is_admin and self._admin_task_mode_active(state)
 
         for _ in range(self.max_turns):
             try:
@@ -112,11 +105,6 @@ class ConciergeAgent:
                         "source": "chat",
                     },
                 }
-                if task_gate_pending:
-                    generation_kwargs["tools"] = [
-                        tool for tool in available_tools if tool.name in _ADMIN_TASK_GATE_TOOLS
-                    ]
-                    generation_kwargs["tool_choice"] = "required"
                 response = await self.client.generate_response(
                     **generation_kwargs,
                 )
@@ -153,11 +141,6 @@ class ConciergeAgent:
                         continue
                     tool_record = self._tool_call_record(tool_call, result)
                     tool_calls.append(tool_record)
-                    if tool_record.name in _ADMIN_TASK_GATE_TOOLS:
-                        task_gate_pending = False
-                        state.support_context["admin_task_mode"] = (
-                            tool_record.name != "exit_admin_task_mode"
-                        )
                     self._refresh_active_media_context(state, tool_record.result)
                     alert = self._build_admin_alert(user, tool_record)
                     if alert:
@@ -175,19 +158,6 @@ class ConciergeAgent:
                                 # this alert, which is the opposite of being notified.
                                 self._clear_admin_alert_cooldown(alert_key)
                 conversation.append(ToolResultsTurn(results))
-                continue
-
-            if task_gate_pending:
-                last_failure_reason = "admin_task_gate_returned_text_without_tool"
-                conversation.append(
-                    ChatTurn(
-                        role="system",
-                        text=(
-                            "Task mode is active. Do not answer in free text yet. Call exactly one of the available "
-                            "task routing tools for the user's latest request."
-                        ),
-                    )
-                )
                 continue
 
             reply = response.text
@@ -217,20 +187,6 @@ class ConciergeAgent:
         state.last_tool_actions.extend([call.model_dump(mode="json") for call in tool_calls])
         self._refresh_active_media_from_tool_calls(state, tool_calls)
         return reply, tool_calls
-
-    @staticmethod
-    def _admin_task_mode_active(state: ConversationState) -> bool:
-        if "admin_task_mode" in state.support_context:
-            return bool(state.support_context.get("admin_task_mode"))
-        for action in reversed(state.last_tool_actions):
-            if not isinstance(action, dict):
-                continue
-            name = str(action.get("name") or "")
-            if name == "exit_admin_task_mode":
-                return False
-            if name in {"get_admin_task_summary", "resolve_admin_task"}:
-                return True
-        return False
 
     def _tool_call_record(self, tool_call: ToolCall, result: ToolResult) -> ToolCallRecord:
         arguments, _ = tool_call.parse_arguments()
@@ -1629,7 +1585,6 @@ Admin messaging:
 - If a `send_admin_message` or `set_user_friendly_name` lookup comes back not-found or ambiguous, call `find_users` with just the distinctive part of the name before telling {self.admin_label} you found nobody. Do not ask him to supply a username you could have looked up yourself.
 - When the admin asks to list, show, check, or re-check open tasks, you MUST call `get_admin_task_summary` in that same turn and answer from its fresh result. A prior list, conversation memory, or `resolve_admin_task` result is never a substitute. Never say there are no open tasks unless that fresh call returns `task_count: 0`.
 - `resolve_all_matches` closes every task matching the supplied query, not the entire board. After a close, treat `remaining_open_task_count` as authoritative; do not infer that the board is empty merely because the requested match was cleared.
-- While admin workflow mode is active, a request to tell, message, ask, or notify another user must call `send_admin_message`; never call `exit_admin_task_mode` for that request. A message was not sent unless that tool returns `ok: true`, and the exact same-turn receipt must come from its `delivery_receipt`.
 - When {self.admin_label} asks what names or friendly names you have on file for someone, that is `find_users` — answer from its result. Never answer a "who do I have on file" question from memory or from prior chat prose.
 - `find_users` covers everyone in the friendly-names ledger, including people who have never logged in. Those are marked "[no account yet]": they are real people {self.admin_label} knows, but there is no account to attach an admin message to, so say that plainly rather than reporting them as unknown.
 - If the conversation already has injected media context, treat it as the current subject and answer from it before asking for more detail.

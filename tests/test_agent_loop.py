@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -78,8 +79,20 @@ class FakeToolkit:
             },
         }
 
-    async def exit_task_mode(self) -> dict:
-        return {"ok": True, "action": "admin_task_mode_exited"}
+    async def repair_show(
+        self,
+        query: str,
+        scope: Any = None,
+        season: int | None = None,
+        episode: int | None = None,
+        tvdb_id: int | None = None,
+    ) -> dict:
+        return {
+            "ok": True,
+            "tool_name": "repair_requested_show",
+            "show": query,
+            "action": "repair_started",
+        }
 
     async def admin_message(
         self,
@@ -93,6 +106,9 @@ class FakeToolkit:
             "sent_message": message,
             "delivery_receipt": f"To {user_query}: “{message}”",
         }
+
+    async def resolve_task(self, **kwargs: Any) -> dict:
+        return {"ok": True, "verified_closed": True, "resolved_note_ids": [], "closed_task_lines": []}
 
 
 FAKE_SPECS = [
@@ -115,16 +131,22 @@ FAKE_SPECS = [
         resolve=lambda tk: tk.notice,
     ),
     ToolSpec(
-        name="exit_admin_task_mode",
-        description="fake task-mode exit",
-        input_model=schemas.EmptyInput,
-        resolve=lambda tk: tk.exit_task_mode,
+        name="repair_requested_show",
+        description="fake repair tool",
+        input_model=schemas.RepairShowInput,
+        resolve=lambda tk: tk.repair_show,
     ),
     ToolSpec(
         name="send_admin_message",
         description="fake admin message",
         input_model=schemas.SendAdminMessageInput,
         resolve=lambda tk: tk.admin_message,
+    ),
+    ToolSpec(
+        name="resolve_admin_task",
+        description="fake task resolve",
+        input_model=schemas.ResolveAdminTaskInput,
+        resolve=lambda tk: tk.resolve_task,
     ),
 ]
 
@@ -343,14 +365,19 @@ def test_task_close_confirmation_lists_exact_tasks_and_remaining_count():
 
 
 @pytest.mark.asyncio
-async def test_active_admin_task_mode_forces_a_structured_routing_tool_before_text():
+async def test_stale_admin_task_mode_flag_does_not_force_tool_choice_or_restrict_tools():
+    """Regression guard for the removed admin-task gate (formerly _ADMIN_TASK_GATE_TOOLS /
+    task_gate_pending / exit_admin_task_mode). That gate used to force tool_choice="required"
+    and narrow the model to four routing tools, which is exactly what made "fix it" during an
+    admin task unreachable -- a repair tool was never in the forced subset. The gate is gone;
+    a conversation loaded from the database may still carry a stale `admin_task_mode` key in
+    support_context from before this fix, and it must now be inert: the admin can change
+    subjects freely, with the full tool list available and no forced tool_choice. Grounding
+    now comes from tool descriptions (see resolve_admin_task's description) rather than
+    runtime forcing.
+    """
     client = FakeLlmClient(
         [
-            LlmResponse(
-                text="",
-                tool_calls=[ToolCall(call_id="exit-1", name="exit_admin_task_mode", arguments_json="{}")],
-                native_turn=[],
-            ),
             LlmResponse(text="Changed subjects normally.", tool_calls=[], native_turn=[]),
         ]
     )
@@ -361,18 +388,53 @@ async def test_active_admin_task_mode_forces_a_structured_routing_tool_before_te
     reply, tool_calls = await agent.respond(_user(is_admin=True), state, "Actually, tell me about a movie")
 
     assert reply == "Changed subjects normally."
-    assert tool_calls[0].name == "exit_admin_task_mode"
-    assert client.calls[0]["tool_choice"] == "required"
-    assert {tool.name for tool in client.calls[0]["tools"]} == {
-        "exit_admin_task_mode",
-        "send_admin_message",
-    }
-    assert client.calls[1]["tool_choice"] is None
-    assert state.support_context["admin_task_mode"] is False
+    assert tool_calls == []
+    assert client.calls[0]["tool_choice"] is None
+    assert {tool.name for tool in client.calls[0]["tools"]} == {spec.name for spec in FAKE_SPECS}
 
 
 @pytest.mark.asyncio
-async def test_active_admin_workflow_forces_send_tool_and_uses_its_receipt():
+async def test_fix_it_during_admin_task_reaches_repair_tool_not_forced_toward_resolve():
+    """"fix it" during an admin task must be able to reach a repair tool. A scripted
+    FakeLlmClient can't prove a real model *chooses* the repair tool over resolve_admin_task
+    on its own reasoning -- that's a prompt-quality question, not something this harness can
+    exercise. What this test does verify at the mechanism level: repair_requested_show is
+    present, unrestricted, and callable in the same turn as resolve_admin_task -- the former
+    gate would have excluded it from the forced subset entirely, making this reply
+    structurally impossible regardless of what the model wanted to do.
+    """
+    client = FakeLlmClient(
+        [
+            LlmResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="repair-1",
+                        name="repair_requested_show",
+                        arguments_json=json.dumps({"query": "Law and Order", "scope": "episode", "season": 10, "episode": 1}),
+                    )
+                ],
+                native_turn=[],
+            ),
+            LlmResponse(text="Repair started.", tool_calls=[], native_turn=[]),
+        ]
+    )
+    state = _state()
+    state.support_context["admin_task_mode"] = True
+    agent = _agent(client, _bridge())
+
+    reply, tool_calls = await agent.respond(_user(is_admin=True), state, "fix it")
+
+    assert reply == "Repair started."
+    assert tool_calls[0].name == "repair_requested_show"
+    assert tool_calls[0].result.get("ok") is True
+    assert client.calls[0]["tool_choice"] is None
+    available_tool_names = {tool.name for tool in client.calls[0]["tools"]}
+    assert {"repair_requested_show", "resolve_admin_task"} <= available_tool_names
+
+
+@pytest.mark.asyncio
+async def test_admin_message_tool_choice_is_not_forced_and_receipt_still_appends():
     message = "I fixed most of the open issues. I need more information about Gogol. Is it a movie or show, and what year?"
     client = FakeLlmClient(
         [
@@ -397,9 +459,9 @@ async def test_active_admin_workflow_forces_send_tool_and_uses_its_receipt():
     reply, tool_calls = await agent.respond(_user(is_admin=True), state, "Tell Nathan that and ask about Gogol")
 
     assert tool_calls[0].name == "send_admin_message"
-    assert client.calls[0]["tool_choice"] == "required"
+    assert client.calls[0]["tool_choice"] is None
+    assert client.calls[1]["tool_choice"] is None
     assert reply == f"Done — I sent it.\n\nTo Nathan: “{message}”"
-    assert state.support_context["admin_task_mode"] is True
 
 
 # --- (e) max-turns exhaustion -> fallback reply, no crash/hang --------------

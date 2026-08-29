@@ -760,6 +760,47 @@ class ConversationStore:
             )
         return messages
 
+    def list_open_user_memory_notes(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Notes actually visible on the admin task board for this user.
+
+        Mirrors AdminTools._query_open_tasks's status filter (open/unresolved,
+        any note_type) rather than the unused `task_id` column that
+        get_user_memory_context's open_tasks filters on -- nothing ever sets
+        task_id on insert, so that query is always empty for these notes.
+        """
+        import json
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, note_type, content, status, metadata_json, created_at, updated_at
+                FROM user_memory_notes
+                WHERE user_id = ? AND status IN ('open', 'unresolved')
+                ORDER BY datetime(updated_at) DESC
+                LIMIT ?
+                """,
+                (user_id, max(1, int(limit))),
+            ).fetchall()
+
+        notes = []
+        for row in rows:
+            try:
+                metadata = json.loads(row[4] or "{}")
+            except Exception:
+                metadata = {}
+            notes.append(
+                {
+                    "note_id": row[0],
+                    "note_type": row[1],
+                    "content": row[2],
+                    "status": row[3],
+                    "metadata": metadata,
+                    "created_at": row[5],
+                    "updated_at": row[6],
+                }
+            )
+        return notes
+
     def resolve_user_memory_note(self, note_id: int) -> bool:
         now = datetime.utcnow().isoformat()
         with self._connect() as conn:

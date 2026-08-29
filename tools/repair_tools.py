@@ -71,6 +71,12 @@ class RepairTools:
             }
 
         if not selected.get("requested"):
+            # This tool's job is specifically the Ombi-requested-but-missing-from-SickChill
+            # handoff, so it needs a request record to hand off from. A show with no Ombi
+            # request is either not repairable at all, or -- if it's already available (in
+            # Plex/SickChill) -- a job for repair_requested_show instead, which works without
+            # an Ombi request. Either way the caller needs a concrete next step, not a refusal.
+            available = bool(selected.get("available"))
             return {
                 "ok": False,
                 "query": query,
@@ -78,10 +84,18 @@ class RepairTools:
                 "tvdb_id": selected_tvdb_id,
                 "season": target_season,
                 "requested": False,
-                "available": bool(selected.get("available")),
+                "available": available,
                 "action": "not_requested",
                 "reason": "show_not_requested_in_ombi",
                 "match": selected,
+                "user_summary": (
+                    f"{title} was never requested, so there's nothing to hand off yet. "
+                    + (
+                        "It's already available, so I can repair it directly instead."
+                        if available
+                        else "It also isn't available yet, so it needs to be requested before it can be fixed."
+                    )
+                ),
             }
 
         add_result = await self.sickchill.add_show(
@@ -245,8 +259,31 @@ class RepairTools:
         title = str(best_match.get("title"))
         expected_tvdb_id = self._safe_int(best_match.get("tvdb_id")) or tvdb_id
         if not best_match.get("requested"):
+            # No Ombi request record is not proof the show is unrepairable -- it's
+            # frequently a show that's already in SickChill/Plex and was simply
+            # never routed through an Ombi request. Try the same direct-SickChill
+            # path used when Ombi itself is unreachable before giving up.
+            soft_error = {
+                "service": "ombi",
+                "operation": "tv_request_status",
+                "failure_type": "not_requested",
+                "reason": "show_not_requested_in_ombi",
+                "error_message": f"{title} has no Ombi request record",
+            }
+            fallback = await self._repair_with_sickchill_soft_gate(
+                query=query,
+                title=title,
+                effective_scope=effective_scope,
+                effective_season=effective_season,
+                effective_episode=effective_episode,
+                expected_tvdb_id=expected_tvdb_id,
+                soft_error=soft_error,
+            )
+            if fallback is not None:
+                return fallback
             return {
                 "ok": False,
+                "tool_name": "repair_requested_show",
                 "query": query,
                 "show": title,
                 "scope": effective_scope,
@@ -258,6 +295,12 @@ class RepairTools:
                 "available": bool(best_match.get("available")),
                 "reason": "show_not_requested_in_ombi",
                 "match": best_match,
+                "candidates": [best_match],
+                "user_summary": (
+                    f"{title} was never requested, and this is a whole-show repair with no "
+                    "specific season or episode to target yet. Say which season or episode is missing "
+                    "(and include that scope explicitly) and I can repair it directly."
+                ),
             }
 
         try:

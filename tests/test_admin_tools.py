@@ -66,6 +66,38 @@ async def test_resolve_by_note_id_closes_task(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_display_label_round_trips_back_into_summary_query(tmp_path):
+    """The label get_admin_task_summary itself prints (display_label, e.g.
+    "Geoff (Harmsway13)") must be usable as the user_query for a follow-up
+    scope="specific_user" call -- an admin who reads a name off one summary and
+    pastes it back in should never draw a blank. Regression test for note [652]:
+    punctuation in the rendered label (parens, the ", <user_id>" suffix on
+    user_label) previously broke the raw substring match this filter used.
+    """
+    store = _store(tmp_path)
+    db_path = str(tmp_path / "admin_tools.db")
+    PlexAuthSessionStore(f"sqlite:///{db_path}").save(
+        PlexAuthSession(session_id="s1", user_id="u1", username="Harmsway13", display_name="Harmsway13", is_admin=False)
+    )
+    names_path = tmp_path / "friendlynames.json"
+    names_path.write_text(
+        json.dumps({"EXCLUDED_USERS": [], "USER_FRIENDLY_NAMES": {"Harmsway13": "Geoff"}}), encoding="utf-8"
+    )
+    tools = AdminTools(transmission=None, store=store, friendly_names=FriendlyNameDirectory(str(names_path)))
+    _add_note(store, user_id="u1", content="Law and Order stutters on playback")
+
+    all_users_summary = await tools.get_admin_task_summary(scope="all_users")
+    assert all_users_summary["task_count"] == 1
+    label = all_users_summary["tasks"][0]["display_label"]
+    assert label
+
+    round_trip_summary = await tools.get_admin_task_summary(scope="specific_user", user_query=label)
+
+    assert round_trip_summary["task_count"] == 1
+    assert round_trip_summary["tasks"][0]["content"] == "Law and Order stutters on playback"
+
+
+@pytest.mark.asyncio
 async def test_resolve_by_unknown_note_id_reports_not_found(tmp_path):
     store = _store(tmp_path)
     tools = _admin_tools(tmp_path, store)

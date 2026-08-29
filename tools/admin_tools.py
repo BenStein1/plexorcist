@@ -163,22 +163,32 @@ class AdminTools:
         users = self._load_user_labels()
         snapshots = self._load_latest_tier2_snapshots({str(row["user_id"]) for row in rows})
 
+        query_normalized = self._normalize_task_text(query) if query else ""
         tasks: list[dict[str, Any]] = []
         for row in rows:
             user_id = str(row["user_id"])
-            user_label = self._format_user_label(user_id, users.get(user_id))
-            display_label = self._format_user_label("", users.get(user_id)) or user_label
+            user_record = users.get(user_id)
+            user_label = self._format_user_label(user_id, user_record)
+            display_label = self._format_user_label("", user_record) or user_label
+            # Normalized (alnum + single space, casefolded) rather than a raw
+            # substring test on rendered labels: a label this tool itself
+            # printed -- display_label ("Geoff (Harmsway13)") -- must always
+            # resolve, and punctuation differences between the rendered forms
+            # (parens, the ", <user_id>" suffix on user_label) must not break
+            # that round-trip. Matches structured fields, not exact rendering.
             searchable = " ".join(
-                str(item or "")
+                self._normalize_task_text(item)
                 for item in (
                     user_id,
                     user_label,
-                    users.get(user_id, {}).get("username") if users.get(user_id) else "",
-                    users.get(user_id, {}).get("display_name") if users.get(user_id) else "",
-                    users.get(user_id, {}).get("friendly_name") if users.get(user_id) else "",
+                    display_label,
+                    user_record.get("username") if user_record else "",
+                    user_record.get("display_name") if user_record else "",
+                    user_record.get("friendly_name") if user_record else "",
                 )
-            ).lower()
-            if query and query.lower() not in searchable:
+                if item
+            )
+            if query_normalized and query_normalized not in searchable:
                 continue
             metadata = self._parse_json(row.get("metadata_json"), default={})
             tasks.append(

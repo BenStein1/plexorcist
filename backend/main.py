@@ -4,6 +4,7 @@ import asyncio
 import json
 import contextlib
 import logging
+import unicodedata
 from html import escape
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -589,6 +590,41 @@ async def _maybe_send_login_notice(
     )
 
 
+def _normalize_note_text(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join("".join(char if char.isalnum() else " " for char in normalized).split())
+
+
+def _known_media_from_tool_actions(tool_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Real, tool-verified media identifiers seen during this conversation.
+
+    Grounds the sweeper's notes in facts the conversation's own tool calls
+    already established (title/tvdb_id/tmdb_id), instead of leaving the
+    summarizer to reconstruct or guess a title from prose -- that guesswork
+    is what produced metadata like {"title": "Law and Order playback issue"}
+    (a description, not a show title) with no tvdb_id at all.
+    """
+    seen: dict[tuple[str, Any, Any], dict[str, Any]] = {}
+    for action in tool_actions:
+        result = action.get("result")
+        if not isinstance(result, dict):
+            continue
+        title = result.get("show") or result.get("title") or result.get("movie")
+        if not title:
+            continue
+        tvdb_id = result.get("tvdb_id")
+        tmdb_id = result.get("tmdb_id")
+        key = (str(title).strip().casefold(), tvdb_id, tmdb_id)
+        if key in seen:
+            continue
+        seen[key] = {
+            "title": str(title).strip(),
+            "tvdb_id": tvdb_id,
+            "tmdb_id": tmdb_id,
+        }
+    return list(seen.values())
+
+
 def _parse_json_from_text(text: str) -> dict:
     if not text:
         return {}
@@ -688,16 +724,29 @@ async def _summarize_inactive_conversation(
         user.user_id,
         recent_notes_limit=settings.memory_recent_notes_limit,
     )
+    open_notes = store.list_open_user_memory_notes(user.user_id)
+    known_media = _known_media_from_tool_actions(state.last_tool_actions)
     instructions = (
         "Summarize this completed user interaction into durable memory JSON.\n"
-        "Return strict JSON only with keys: rolling_summary, preferences, familiarity_notes, notes.\n"
+        "Return strict JSON only with keys: rolling_summary, preferences, familiarity_notes, notes, resolved_note_ids.\n"
         "- rolling_summary: 3-6 concise lines about stable user patterns and current unresolved context.\n"
         "- preferences: short list of durable preferences (strings).\n"
         "- familiarity_notes: short conversational familiarity notes (strings), safe and non-sensitive.\n"
-        "- notes: list of objects with keys note_type, content, status, metadata.\n"
+        "- notes: list of admin work-queue items, each an object with keys note_type, content, status, metadata.\n"
+        "  - content is the actionable task itself, phrased as a thing to do (e.g. 'Repair S10E01 of Law and "
+        "Order for Geoff -- stutters on playback'), not a third-person account of what already happened.\n"
+        "  - metadata.title, when the note concerns a specific show or movie, must be that title exactly as it "
+        "appears in 'Known media from this conversation' below -- never a description of the problem. Include "
+        "metadata.tvdb_id / metadata.tmdb_id from that same list when the title has one. If the media isn't in "
+        "that list, omit title/tvdb_id/tmdb_id rather than guessing.\n"
+        "  - Do not create a note whose content is only a reference to another open task below (no tickets "
+        "about tickets). If this conversation doesn't add anything beyond what an existing open task in "
+        "'Currently open tasks for this user' already says, skip it.\n"
+        "- resolved_note_ids: note_id values from 'Currently open tasks for this user' below that this "
+        "transcript shows are now actually done. List them here instead of writing a new note about them.\n"
         "Only include notes that could matter later (open issue, resolution, important correction).\n"
-        "Use only user<->assistant conversational content. Ignore internal/tool execution chatter.\n"
-        "Do not store tool names, API names, IDs, paths, raw payloads, or low-level debugging details.\n"
+        "Use only user<->assistant conversational content for phrasing. Ignore internal/tool execution chatter.\n"
+        "Do not store tool names, API names, paths, raw payloads, or low-level debugging details.\n"
         "Do not preserve unverified assistant diagnostic claims, suspected wrong-show mappings, or speculative root causes.\n"
         "If an earlier assistant message is contradicted later in the transcript, keep only the later resolved state.\n"
         "For unresolved support issues, use neutral wording like 'episode status was unclear' or 'admin was notified'.\n"
@@ -711,7 +760,12 @@ async def _summarize_inactive_conversation(
             "system",
             (
                 "Existing rolling summary:\n"
-                f"{prior_summary}\n"
+                f"{prior_summary}\n\n"
+                "Known media from this conversation (only source for metadata.title/tvdb_id/tmdb_id):\n"
+                f"{json.dumps(known_media, ensure_ascii=False)}\n\n"
+                "Currently open tasks for this user (avoid duplicating or referencing these; "
+                "list note_id here under resolved_note_ids if this transcript shows one is done):\n"
+                f"{json.dumps(open_notes, ensure_ascii=False, default=str)}\n\n"
                 "Now summarize the completed interaction transcript below."
             ),
         ),
@@ -753,6 +807,23 @@ async def _summarize_inactive_conversation(
             source_span_end=state.messages[-1].created_at.isoformat() if state.messages else None,
         )
 
+    # Only resolve note_ids this user's own open_notes actually contains -- the
+    # model's resolved_note_ids is free-text-adjacent output, and resolve_user_memory_note
+    # has no user_id filter, so an unguarded hallucinated id would silently close
+    # a different user's open ticket.
+    resolvable_note_ids = {item.get("note_id") for item in open_notes}
+    resolved_note_ids = payload.get("resolved_note_ids") if isinstance(payload.get("resolved_note_ids"), list) else []
+    for raw_note_id in resolved_note_ids:
+        try:
+            note_id = int(raw_note_id)
+        except (TypeError, ValueError):
+            continue
+        if note_id in resolvable_note_ids:
+            store.resolve_user_memory_note(note_id)
+
+    known_media_by_title = {_normalize_note_text(entry["title"]): entry for entry in known_media}
+    open_note_texts = {_normalize_note_text(item.get("content")) for item in open_notes}
+
     notes = payload.get("notes") if isinstance(payload.get("notes"), list) else []
     notes_added = 0
     for note in notes[:12]:
@@ -761,6 +832,26 @@ async def _summarize_inactive_conversation(
         content = str(note.get("content") or "").strip()
         if not content:
             continue
+        normalized_content = _normalize_note_text(content)
+        if normalized_content and normalized_content in open_note_texts:
+            # Same task, already open -- this is exactly the "ticket about a
+            # ticket" duplication pattern; skip instead of re-minting it.
+            continue
+        metadata = dict(note.get("metadata")) if isinstance(note.get("metadata"), dict) else {}
+        title = str(metadata.get("title") or "").strip()
+        known = known_media_by_title.get(_normalize_note_text(title)) if title else None
+        if known is None:
+            # Title wasn't grounded in a real tool result this conversation
+            # produced -- drop it rather than let a hallucinated show name
+            # or missing tvdb_id/tmdb_id reach the task board.
+            metadata.pop("title", None)
+            metadata.pop("tvdb_id", None)
+            metadata.pop("tmdb_id", None)
+        else:
+            if known.get("tvdb_id") is not None:
+                metadata["tvdb_id"] = known["tvdb_id"]
+            if known.get("tmdb_id") is not None:
+                metadata["tmdb_id"] = known["tmdb_id"]
         store.add_user_memory_note(
             user_id=user.user_id,
             note_type=str(note.get("note_type") or "interaction_note"),
@@ -768,12 +859,13 @@ async def _summarize_inactive_conversation(
             status=str(note.get("status") or "logged"),
             tier=1,
             metadata={
-                **(note.get("metadata") if isinstance(note.get("metadata"), dict) else {}),
+                **metadata,
                 "source": source,
                 "source_conversation_id": state.conversation_id,
             },
         )
         notes_added += 1
+        open_note_texts.add(normalized_content)
     store.compact_user_memory(
         user_id=user.user_id,
         tier1_keep=settings.memory_tier1_keep,

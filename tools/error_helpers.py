@@ -104,6 +104,8 @@ def user_error_summary(
         problem = "took too long to answer"
     elif failure_type == "connection_error":
         problem = "could not be reached"
+    elif failure_type == "not_requested":
+        problem = "has no record of this ever being requested"
     else:
         problem = "returned an error"
     return f"{tool_family} for {title} did not go through — the system that handles it {problem}. {change_status}"

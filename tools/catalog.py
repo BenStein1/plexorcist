@@ -235,15 +235,6 @@ class Toolkit:
             resolve_all_matches=resolve_all_matches,
         )
 
-    async def exit_admin_task_mode(self) -> dict:
-        if not self.is_admin:
-            return self._admin_required()
-        return {
-            "ok": True,
-            "action": "admin_task_mode_exited",
-            "user_summary": "Left admin task mode without changing any tasks.",
-        }
-
     async def set_user_friendly_name(self, user_query: str, friendly_name: str) -> dict:
         if not self.is_admin:
             return self._admin_required()
@@ -669,8 +660,14 @@ CATALOG: list[ToolSpec] = [
     ToolSpec(
         name="resolve_admin_task",
         description=(
-            "Admin-only: mark an open task/issue as resolved so it stops appearing in get_admin_task_summary. "
-            "Use when the admin says a task/issue is fixed, done, resolved, handled, or no longer needed. "
+            "Admin-only bookkeeping: marks an open task/issue as closed on the board so it stops appearing in "
+            "get_admin_task_summary. This tool does not repair, fix, or change anything about the underlying "
+            "media, request, or download — it only records that the admin considers the task done. "
+            "Use it after the admin confirms a problem is actually resolved, or when the admin explicitly says to "
+            "close/dismiss/drop a task without fixing anything. If the admin's request is to fix, repair, replace, "
+            "refetch, retry, or search again for specific media, call the matching repair tool "
+            "(e.g. repair_requested_show, repair_requested_movie) instead — closing the task is a separate, later "
+            "step, not a substitute for doing the repair. "
             "Prefer note_id from a get_admin_task_summary result seen earlier in this conversation — it's unambiguous. "
             "Otherwise pass task_query in the admin's natural wording; backend matching covers user labels, exact task text, metadata, and close paraphrases. "
             "If matching tasks are duplicates for the same person/title, they are closed together automatically. Set resolve_all_matches=true when the admin says all/every/both or supplies a bulk close instruction. "
@@ -680,18 +677,6 @@ CATALOG: list[ToolSpec] = [
         ),
         input_model=schemas.ResolveAdminTaskInput,
         resolve=lambda tk: tk.resolve_admin_task,
-        tags=_tags(ADMIN),
-    ),
-    ToolSpec(
-        name="exit_admin_task_mode",
-        description=(
-            "Admin-only task-mode routing control. Use only when the admin's latest message is NOT asking to list, "
-            "re-check, close, resolve, or otherwise act on admin tasks AND is NOT asking to tell, message, ask, or notify another user. "
-            "Use send_admin_message for any outbound user message. This changes no data and lets the conversation "
-            "continue normally. Never use it for a task request merely to avoid calling the task tool."
-        ),
-        input_model=schemas.EmptyInput,
-        resolve=lambda tk: tk.exit_admin_task_mode,
         tags=_tags(ADMIN),
     ),
     ToolSpec(
