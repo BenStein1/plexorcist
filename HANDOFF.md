@@ -448,18 +448,6 @@ continues the work in /home/ben/Projects/plexorcist from this handoff).
 Cancel with: systemctl --user disable --now overlord-resume-autoresume-d9f484f5.timer
 If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
 
-## Session checkpoint (auto: session (5-hour) usage at 91.0%) — 2026-08-03 19:46 MST
-The session (5-hour) usage cap is at 91.0% and resets in ~3h 43m. When it hits
-100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
-<!-- TODO: model should replace this line with what's actually in flight, -->
-<!-- what was just decided, and the concrete next step, before continuing. -->
-AUTO-RESUME ARMED: overlord-resume-autoresume-6c0eac99.timer (fires ~5 min after the session (5-hour) cap resets,
-continues the work in /home/ben/Projects/plexorcist from this handoff).
-Cancel with: systemctl --user disable --now overlord-resume-autoresume-6c0eac99.timer
-If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
-
----
-
 ## 2026-08-04 — SickChill: DONE & VERIFIED. Ombi->Plexorcist: two new bugs found.
 
 ### SickChill (10.0.0.94) — COMPLETE, verified in Ben's real workflow
@@ -1052,3 +1040,185 @@ Verified, not assumed:
 NEXT STEP: nothing to build or deploy. The residual and the unverified item in
 the section directly above are both still open and both still pre-existing —
 neither was touched by this deploy.
+
+## Session checkpoint (auto: session (5-hour) usage at 99.0%) — 2026-08-28 22:35 MST
+The session (5-hour) usage cap is at 99.0% and resets in ~2h 44m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+### IN FLIGHT: Johnny is fixing the admin-task "fix it" failure — REVIEW HIS DIFF
+
+Ben's ask: say "fix it" (or any English phrasing) about a task and have the
+Concierge act on it. Transcript 2026-08-28T08:3x: he said "Fix the episodes
+dood" about note [652] and the agent **closed the ticket** instead, then gave
+contradictory answers about whether Geoff had open tasks.
+
+**Worker:** Johnny, brain=claude (bridge routed it to `--model sonnet`),
+session `774b75b1-0c2a-40b4-9951-b24a6c141cdc`, branch
+`fix/admin-task-fix-it-failure` in this same folder (NOT a worktree).
+At checkpoint time he was **still running**, tree dirty, **no commit yet**:
+`backend/agent.py backend/main.py backend/state.py tools/admin_tools.py
+tools/catalog.py tools/repair_tools.py tools/error_helpers.py
+tests/test_admin_tools.py tests/test_agent_loop.py` + new
+`tests/test_repair_tools.py`. He will Telegram Ben `[Johnny]` when done.
+
+**Three bugs, all PROVEN from the live DB and plexorcist.log — not theories:**
+
+1. **The board prints a label that fails as input.** `get_admin_task_summary`
+   prints `display_label` = `Geoff (Harmsway13)` but substring-matches against
+   `user_label` = `Geoff (Harmsway13, 3876783)` (admin_tools.py:169-181,
+   `_format_user_label`:1187-1204). Log lines 163431 vs 163434, 3 min apart:
+   `user_query="Geoff (Harmsway13)"` → **task_count=0**;
+   `user_query="Geoff"` → **task_count=1**. That is the whole "no open tasks
+   for Geoff" contradiction. The agent copied the label it was shown.
+2. **The admin task gate.** agent.py:38-43 + :115-119 restrict the first model
+   call of every admin turn to {get_admin_task_summary, resolve_admin_task,
+   send_admin_message, exit_admin_task_mode} with `tool_choice="required"`.
+   No repair action on that menu, so "fix it" can only land on close.
+3. **`repair_requested_show` refuses shows that are in the library.**
+   repair_tools.py:73-83 and :247 hard-fail `show_not_requested_in_ombi` when
+   Ombi has no request record. Log 163434 shows the agent **did route
+   correctly** — `repair_requested_show(query="Law and Order", scope="episode",
+   season=10, episode=1)` — and this gate refused it. Geoff was *watching* the
+   show; it's in Plex/SickChill, just never requested via Ombi.
+
+Also in scope: `resolve_admin_task`'s description (catalog.py:673) lists
+"fixed" as a trigger word on the CLOSE tool; and the background sweeper
+(main.py:660-699) writes `"title": "Law and Order playback issue"` (a
+description in a title field), no tvdb_id, mints tickets about tickets
+([642]/[643] carry `ticket_id` 638/633), and leaves finished work open ([675]).
+
+**Hard design constraint (AGENTS.md:33-34, and Ben restated it forcefully):**
+fix this in the TOOLS, not with prompt rules. No regexes, no keyword lists, no
+"if the user says X". The agent.py instruction block is already **191 bullets**
+and that bloat is part of the disease. Net rule count must go DOWN.
+
+**NEXT STEP — Ben asked me to review Johnny's fixes PERSONALLY, not take his
+report at face value.** When he exits, read the actual diff and check:
+- Bug 1 fix makes any emitted label round-trip, and is not a paren-stripping regex.
+- Whitelist + forced `tool_choice` genuinely gone from agent.py:115-119.
+- `tests/test_agent_loop.py:346` (`test_active_admin_task_mode_forces_a_structured_routing_tool_before_text`)
+  was **rewritten to assert grounding without forcing** — not deleted to make the suite green.
+- Bug 3 proceeds on library presence; the fallback returns a structured
+  ok/action/reason/candidates result, not a reworded refusal.
+- **Net prompt-bullet count in agent.py went DOWN.** If bullets were added, the
+  fix is wrong even if tests pass.
+- Run the suite myself and report pass/fail honestly.
+If the work came back as added prompt rules / keyword matching, re-run Johnny
+on Opus — Sonnet is the likeliest model to half-implement that constraint.
+
+**Open, deliberately deferred:** whether gpt-5-mini is good enough. Ben said
+"fix the functional stuff and we'll address the model after." Note the log
+shows the model routed to the right tool with the right episode, so it looks
+better than the transcript suggested; the bad 1978-BBC narration came *after*
+the bug-3 refusal. Re-test mini once these land. Per-turn model escalation
+would need code: `LlmClient.generate_response` has no `model` param and
+`OpenAIProviderClient` binds `self.model` at construction
+(clients/llm_providers.py) — second client instance or Protocol change.
+
+Commits are NOT live: deploy is a separate step Ben runs (deploy script +
+`supervisorctl restart plexorcist`, via NALA `jexec 5`). Do not push.
+AUTO-RESUME ARMED: overlord-resume-autoresume-408074da.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-408074da.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## Session checkpoint (auto: session (5-hour) usage at 100.0%) — 2026-08-28 22:55 MST
+The session (5-hour) usage cap is at 100.0% and resets in ~2h 24m. When it hits
+100%, the current turn is cut off. cwd: /home/ben/Projects/plexorcist.
+
+Nothing changed since the previous checkpoint above — **read the section
+"IN FLIGHT: Johnny is fixing the admin-task 'fix it' failure — REVIEW HIS DIFF"
+directly above; it is the live handoff.** Ben's last words were "Waiting on
+Johnny."
+
+Still true at this checkpoint: Johnny (session
+`774b75b1-0c2a-40b4-9951-b24a6c141cdc`, branch `fix/admin-task-fix-it-failure`,
+this same folder) is **still running**, **no commit yet**, tree dirty across
+`backend/agent.py backend/main.py backend/state.py tools/admin_tools.py
+tools/catalog.py tools/repair_tools.py tools/error_helpers.py
+tests/test_admin_tools.py tests/test_agent_loop.py` + new
+`tests/test_repair_tools.py`.
+
+NEXT STEP on resume: check whether Johnny exited
+(`pgrep -af "claude -p .*Plexorcist"`). If he committed, **review the diff
+personally against the checklist in the section above** — Ben explicitly asked
+for a personal review, not a relay of Johnny's own report. If he is still
+running, say so plainly and wait; do not start parallel edits in this tree.
+AUTO-RESUME ARMED: overlord-resume-autoresume-87a8ad38.timer (fires ~5 min after the session (5-hour) cap resets,
+continues the work in /home/ben/Projects/plexorcist from this handoff).
+Cancel with: systemctl --user disable --now overlord-resume-autoresume-87a8ad38.timer
+If the work in flight lives somewhere else, add a line:  RESUME-FOLDER: /abs/path
+
+## 2026-08-29 — Johnny's fix reviewed personally and COMMITTED (686eafa)
+
+Johnny's process (session `774b75b1`) had exited by the time this session
+resumed — no longer in `pgrep`, no crash evidence, just no commit. Tree was
+dirty exactly as the last checkpoint described. Reviewed the diff myself,
+file by file, against every item in the checklist from the "IN FLIGHT"
+section above, not by reading Johnny's own report (he left none — no commit
+message to relay).
+
+**Every checklist item checked out:**
+- Bug 1: `_load_user_labels`/`get_admin_task_summary` now match on
+  `_normalize_task_text` (NFKC + casefold + alnum-only), applied to both
+  sides — a general normalizer, not a paren-stripping regex. New test
+  `test_display_label_round_trips_back_into_summary_query` reproduces the
+  exact "Geoff (Harmsway13)" round-trip from note [652].
+- Bug 2: `_ADMIN_TASK_GATE_TOOLS`, `task_gate_pending`, forced
+  `tool_choice="required"`, and `_admin_task_mode_active` are gone entirely
+  from `backend/agent.py`, along with the `exit_admin_task_mode` tool
+  (catalog.py + agent's admin-messaging bullet that referenced it).
+  Grounding now comes from `resolve_admin_task`'s tool description, which
+  was rewritten to explicitly redirect fix/repair language to the repair
+  tools rather than closing the task.
+- `tests/test_agent_loop.py:346`'s test was rewritten (not deleted) into
+  `test_stale_admin_task_mode_flag_does_not_force_tool_choice_or_restrict_tools`
+  — asserts a stale `admin_task_mode` flag from the DB no longer forces
+  anything — plus a new
+  `test_fix_it_during_admin_task_reaches_repair_tool_not_forced_toward_resolve`
+  proving `repair_requested_show` is reachable in the same turn as
+  `resolve_admin_task`, which the old forced subset made structurally
+  impossible.
+- Bug 3: `repair_requested_show` (both the season/episode-scoped path and
+  the whole-show path) now falls through to the existing
+  `_repair_with_sickchill_soft_gate` — the same fallback already used when
+  Ombi itself is unreachable — instead of hard-refusing on
+  `show_not_requested_in_ombi`. New `tests/test_repair_tools.py` reproduces
+  Geoff's exact case: Law and Order, `available=True`, `requested=False`,
+  scope=episode S10E01 -> now proceeds instead of refusing.
+- Net prompt-bullet count in `agent.py`: measured directly,
+  `grep -c "^- "` was 201 before / 200 after. Down, not up, as required.
+  (Tool *descriptions* in catalog.py did grow — that's tool metadata, not
+  the agent.py system-prompt bloat Ben was calling out, and it's where this
+  kind of disambiguation belongs.)
+- Also in scope and fixed: the inactivity sweeper (`backend/main.py`,
+  `_summarize_inactive_conversation`) now grounds note titles/tvdb_id/tmdb_id
+  in this conversation's own tool-call results instead of letting the
+  summarizer guess a title from prose, and reads the user's actually-open
+  tasks (`ConversationStore.list_open_user_memory_notes`, new — the old
+  `open_tasks` filter in `get_user_memory_context` keyed on a `task_id`
+  column nothing ever sets, so it was always empty) to skip duplicate
+  "ticket about a ticket" notes and resolve ones the transcript shows are
+  actually done.
+
+**Verified myself, not assumed:**
+- Full suite: `.venv/bin/python -m pytest -q` -> **267 passed**, clean.
+- Proved the new tests bite: `git stash push` on just the 7 source files
+  (agent.py, main.py, state.py, admin_tools.py, catalog.py, error_helpers.py,
+  repair_tools.py — tests left in place), reran the 7 new/rewritten tests ->
+  **all 7 failed** against pre-fix code. `git stash pop` restored the fix;
+  full suite re-run afterward, still 267 green.
+
+**Committed** as `686eafa` on `fix/admin-task-fix-it-failure`, this same
+folder (not a worktree). Tree is clean apart from this file. **Not pushed,
+not deployed** — deploy is Ben's call, same as every other change in this
+file (`deploy.local.sh` + `jexec 5 supervisorctl restart plexorcist` on
+NALA, ask before any SSH).
+
+**Still open, both Ben's call, unchanged from the original triage:**
+- Whether gpt-5-mini is good enough — deliberately deferred until after this
+  functional fix landed.
+- Per-turn model escalation would need code changes (no `model` param on
+  `LlmClient.generate_response`; `OpenAIProviderClient` binds `self.model` at
+  construction) — not started, not asked for yet.
+
+NEXT STEP: none from me. Waiting on Ben to review/deploy.
