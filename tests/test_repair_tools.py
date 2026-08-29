@@ -261,3 +261,46 @@ async def test_plex_outage_does_not_block_a_repair():
 
     assert result["ok"] is True
     assert ombi.searches == ["Law and Order"]
+
+
+@pytest.mark.asyncio
+async def test_a_season_with_nothing_to_refetch_reports_the_diagnosis():
+    """"Season 1 is broken" is a normal way to ask, and for a season whose files
+    are all on disk under wrong episode numbers it is the only way the user would
+    ever hear why. Without this the season path ran a repair over zero targets and
+    said nothing useful -- the same dead end whole-show repair used to hit.
+    """
+
+    class MisfiledSeasonSickChill(FakeSickChill):
+        async def episode_numbers_for_season(
+            self, *, show: str, season: int, expected_indexer_id: int | None
+        ) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "show": show,
+                "season": season,
+                "episodes": [],
+                "diagnosis": {
+                    "healthy": [],
+                    "misfiled_on_disk": [{"season": 1, "episode": number} for number in range(1, 25)],
+                    "needs_refetch": [],
+                    "stalled": [],
+                    "duplicate_files": 0,
+                },
+            }
+
+    ombi = FakeOmbi(
+        {"type": "show", "title": "Law and Order", "tvdb_id": 79590, "requested": False, "available": True}
+    )
+    sickchill = MisfiledSeasonSickChill()
+    tools = RepairTools(ombi=ombi, sickchill=sickchill)
+
+    result = await tools.repair_requested_show(query="Law and Order", scope="season", season=1)
+
+    assert result["ok"] is True
+    assert result["reason"] == "no_refetchable_episodes"
+    assert result["scope"] == "season"
+    assert result["season"] == 1
+    assert result["misfiled_count"] == 24
+    assert sickchill.repair_calls == [], "nothing is on disk twice; re-fetching would duplicate it"
+    assert "season 1" in result["user_summary"]

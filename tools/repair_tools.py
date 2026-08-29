@@ -564,6 +564,22 @@ class RepairTools:
                     ),
                 }
             title = str(episode_list.get("show") or title)
+            season_diagnosis = episode_list.get("diagnosis") or {}
+            if not (episode_list.get("episodes") or []) and season_diagnosis:
+                # "Season 1 is broken" is a normal way to ask, and for a season
+                # that is entirely misfiled it is the only way the user would
+                # ever hear why. Without this the season path runs a repair over
+                # zero targets and reports nothing useful.
+                return self._nothing_to_refetch_diagnosis(
+                    query=query,
+                    title=title,
+                    expected_tvdb_id=expected_tvdb_id,
+                    diagnosis=season_diagnosis,
+                    library_match=library_match,
+                    soft_error=soft_error,
+                    scope="season",
+                    season=effective_season,
+                )
             targeted_rows.extend(
                 {
                     "season": effective_season,
@@ -617,7 +633,7 @@ class RepairTools:
             title = str(show_episodes.get("show") or title)
             diagnosis = show_episodes.get("diagnosis") or {}
             if not (show_episodes.get("seasons") or {}) and diagnosis:
-                return self._whole_show_diagnosis(
+                return self._nothing_to_refetch_diagnosis(
                     query=query,
                     title=title,
                     expected_tvdb_id=expected_tvdb_id,
@@ -656,7 +672,7 @@ class RepairTools:
             library_match=library_match,
         )
 
-    def _whole_show_diagnosis(
+    def _nothing_to_refetch_diagnosis(
         self,
         *,
         query: str,
@@ -665,6 +681,8 @@ class RepairTools:
         diagnosis: dict[str, Any],
         library_match: dict[str, Any] | None,
         soft_error: dict[str, Any] | None,
+        scope: str = "show",
+        season: int | None = None,
     ) -> dict[str, Any]:
         """Answer for a show with nothing to re-search but something still wrong.
 
@@ -680,6 +698,7 @@ class RepairTools:
         stalled = diagnosis.get("stalled") or []
         healthy = diagnosis.get("healthy") or []
 
+        subject = f"{title} season {season}" if scope == "season" and season is not None else title
         parts: list[str] = []
         if misfiled:
             parts.append(
@@ -690,17 +709,17 @@ class RepairTools:
         if stalled:
             parts.append(f"{len(stalled)} were grabbed at some point but never finished arriving")
         if not parts:
-            summary = f"{title} looks complete -- all {len(healthy)} episodes are present, so nothing needed fixing."
+            summary = f"{subject} looks complete -- all {len(healthy)} episodes are present, so nothing needed fixing."
         else:
-            summary = f"{title}: " + "; ".join(parts) + "."
+            summary = f"{subject}: " + "; ".join(parts) + "."
 
         return {
             "ok": True,
             "tool_name": "repair_requested_show",
             "query": query,
             "show": title,
-            "scope": "show",
-            "season": None,
+            "scope": scope,
+            "season": season,
             "episode": None,
             "tvdb_id": expected_tvdb_id,
             "action": "repair_requested_show",
