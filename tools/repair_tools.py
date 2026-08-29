@@ -615,6 +615,16 @@ class RepairTools:
                     ),
                 }
             title = str(show_episodes.get("show") or title)
+            diagnosis = show_episodes.get("diagnosis") or {}
+            if not (show_episodes.get("seasons") or {}) and diagnosis:
+                return self._whole_show_diagnosis(
+                    query=query,
+                    title=title,
+                    expected_tvdb_id=expected_tvdb_id,
+                    diagnosis=diagnosis,
+                    library_match=library_match,
+                    soft_error=soft_error,
+                )
             targeted_rows.extend(
                 {
                     "season": season_number,
@@ -645,6 +655,69 @@ class RepairTools:
             ombi_soft_error=soft_error,
             library_match=library_match,
         )
+
+    def _whole_show_diagnosis(
+        self,
+        *,
+        query: str,
+        title: str,
+        expected_tvdb_id: int | None,
+        diagnosis: dict[str, Any],
+        library_match: dict[str, Any] | None,
+        soft_error: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Answer for a show with nothing to re-search but something still wrong.
+
+        Two cases end up here and they need opposite handling. Episodes whose
+        file is on the server under a wrong episode number are not missing at
+        all -- re-fetching them would download a second copy of media that is
+        already there -- so they are reported for a rename, never queued. A
+        snatch that never landed is a genuine candidate to grab again, but it
+        is indistinguishable from one still downloading, so it is surfaced for
+        a decision rather than fired off automatically.
+        """
+        misfiled = diagnosis.get("misfiled_on_disk") or []
+        stalled = diagnosis.get("stalled") or []
+        healthy = diagnosis.get("healthy") or []
+
+        parts: list[str] = []
+        if misfiled:
+            parts.append(
+                f"{len(misfiled)} episodes are on the server but filed under the wrong episode "
+                "numbers, so they look missing even though the files are there -- those need "
+                "renaming rather than downloading again"
+            )
+        if stalled:
+            parts.append(f"{len(stalled)} were grabbed at some point but never finished arriving")
+        if not parts:
+            summary = f"{title} looks complete -- all {len(healthy)} episodes are present, so nothing needed fixing."
+        else:
+            summary = f"{title}: " + "; ".join(parts) + "."
+
+        return {
+            "ok": True,
+            "tool_name": "repair_requested_show",
+            "query": query,
+            "show": title,
+            "scope": "show",
+            "season": None,
+            "episode": None,
+            "tvdb_id": expected_tvdb_id,
+            "action": "repair_requested_show",
+            "reason": "no_refetchable_episodes",
+            "queued_count": 0,
+            "failure_count": 0,
+            "healthy_count": len(healthy),
+            "misfiled_count": len(misfiled),
+            "stalled_count": len(stalled),
+            "duplicate_file_count": diagnosis.get("duplicate_files", 0),
+            "misfiled_examples": misfiled[:5],
+            "stalled_examples": stalled[:5],
+            "requested": None,
+            "plex_match": library_match,
+            **({"ombi_soft_error": soft_error} if soft_error else {}),
+            "user_summary": summary,
+        }
 
     async def _run_sickchill_repair(
         self,

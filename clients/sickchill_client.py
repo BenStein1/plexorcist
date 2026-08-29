@@ -427,28 +427,26 @@ class SickChillClient(BaseHttpClient):
                 "reason": "show_missing_indexer_id",
             }
 
-        season_requests = show_info.get("seasonRequests") or []
-        target_seasons: list[dict[str, Any]] = []
-        for season_request in season_requests:
-            season_number = self._maybe_int(season_request.get("seasonNumber"))
-            if season_number is None:
-                continue
-            if season is not None and season_number != season:
-                continue
-            target_seasons.append(season_request)
+        # Episode state comes from show.seasons, not the show row: `seasonRequests`
+        # is an Ombi field and no SickChill show carries it, so this used to find
+        # nothing to clear no matter how many episodes were ignored.
+        raw_seasons = await self._show_seasons(indexer_id)
+        target_seasons = [
+            (season_number, rows)
+            for season_number, rows in sorted(raw_seasons.items())
+            if season is None or season_number == season
+        ]
 
         changed_episodes: list[dict[str, Any]] = []
         skipped_episodes: list[dict[str, Any]] = []
         failed_episodes: list[dict[str, Any]] = []
 
-        for season_request in target_seasons:
-            season_number = self._maybe_int(season_request.get("seasonNumber"))
-            episodes = season_request.get("episodes") or []
-            for episode_info in episodes:
-                episode_number = self._maybe_int(episode_info.get("episodeNumber"))
-                status = str(episode_info.get("status") or "").lower()
-                if episode_number is None:
+        for season_number, rows in target_seasons:
+            for episode_number in sorted(rows):
+                episode_info = rows[episode_number]
+                if self._is_phantom_row(episode_info):
                     continue
+                status = self._normalize_episode_status(episode_info.get("status"))
                 if status != "ignored":
                     skipped_episodes.append(
                         {
@@ -574,7 +572,7 @@ class SickChillClient(BaseHttpClient):
                     row.update({"ok": False, "action": "season_repair_failed", "reason": before["error"]})
                     results.append(row)
                     continue
-                before_status = str(before.get("status") or "unknown").lower()
+                before_status = self._normalize_episode_status(before.get("status")) or "unknown"
                 row["from_status"] = before_status
                 if before_status == "unaired" or not self._episode_has_aired(before.get("airdate")):
                     row.update({"ok": True, "action": "not_aired_yet"})
@@ -601,10 +599,19 @@ class SickChillClient(BaseHttpClient):
                     )
                     if not search_result.get("ok"):
                         row["reason"] = search_result.get("reason", "manual_search_failed")
+                elif before_status == "snatched" and not self._episode_has_file(before):
+                    # Grabbed, but nothing on disk. Reported rather than
+                    # re-searched: a snatch still downloading is indistinguishable
+                    # from an abandoned one here, and re-searching a live one
+                    # grabs a second copy of what is already coming in.
+                    row.update({"ok": True, "action": "awaiting_download"})
                 elif before_status in {"snatched", "downloaded", "archived"}:
                     row.update({"ok": True, "action": "already_in_sickchill"})
                 else:
-                    row.update({"ok": False, "action": "season_repair_failed", "reason": f"unsupported_episode_status:{before_status}"})
+                    # An unrecognized status is not a failed repair -- reporting
+                    # it as one made a whole show look broken when the only
+                    # surprise was a spelling ("Snatched (Best)").
+                    row.update({"ok": True, "action": "no_action_for_status", "reason": f"unrecognized_status:{before_status}"})
             except httpx.ReadTimeout:
                 row.update({"ok": False, "action": "manual_search_unconfirmed", "reason": "manual_search_timed_out_unconfirmed"})
             except httpx.HTTPError as exc:
@@ -699,15 +706,152 @@ class SickChillClient(BaseHttpClient):
             )
         return None, show_info, indexer_id
 
+    async def _show_seasons(self, indexer_id: int) -> dict[int, dict[int, dict[str, Any]]]:
+        """Every season and episode of a show, with status and file info, in one call.
+
+        Asking per episode costs ~0.5s each; Law & Order has 948 rows, so the
+        obvious loop is a nine-minute repair. `show.seasons` with no season
+        param returns the whole show at once. Passing a season instead flips the
+        response from nested to flat, so this always fetches everything and
+        indexes locally rather than dealing with two shapes.
+        """
+        payload = await self._api_get("show.seasons", indexerid=indexer_id, timeout=90.0)
+        data = self._unwrap_data(payload)
+        seasons: dict[int, dict[int, dict[str, Any]]] = {}
+        if not isinstance(data, dict):
+            return seasons
+        for season_key, episodes in data.items():
+            season_number = self._maybe_int(season_key)
+            if not isinstance(season_number, int) or not isinstance(episodes, dict):
+                continue
+            rows: dict[int, dict[str, Any]] = {}
+            for episode_key, info in episodes.items():
+                episode_number = self._maybe_int(episode_key)
+                if isinstance(episode_number, int) and isinstance(info, dict):
+                    rows[episode_number] = info
+            if rows:
+                seasons[season_number] = rows
+        return seasons
+
+    @staticmethod
+    def _episode_has_file(info: dict[str, Any]) -> bool:
+        try:
+            size = int(info.get("file_size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        return bool(str(info.get("location") or "").strip()) and size > 0
+
+    @staticmethod
+    def _is_phantom_row(info: dict[str, Any]) -> bool:
+        """A row invented by a mis-parsed filename rather than a real episode.
+
+        "Law & Order - S01E101.mkv" is season 1 episode 1, but it gets indexed
+        as episode 101, which then looks like an episode the show is missing.
+        Identified by having neither a title nor an airdate -- deliberately not
+        by `episode > 100`, since a daytime or anime season really can run past
+        100 episodes and those rows are genuine.
+        """
+        return not str(info.get("name") or "").strip() and str(info.get("airdate") or "").strip().lower() in {
+            "never",
+            "",
+        }
+
+    def _normalize_episode_status(self, status: Any) -> str:
+        """SickChill reports "Snatched (Best)" as well as "Snatched".
+
+        The parenthetical is quality provenance, not a different state, but the
+        status dispatch matched on the whole string -- so 250 of Law & Order's
+        episodes fell through to `unsupported_episode_status` and the repair
+        reported failure for a show it had understood fine.
+        """
+        return str(status or "").split("(")[0].strip().lower()
+
+    def classify_show_episodes(
+        self,
+        seasons: dict[int, dict[int, dict[str, Any]]],
+        *,
+        include_specials: bool = False,
+    ) -> dict[str, Any]:
+        """Sort a show's episodes into what is actually wrong with each one.
+
+        Status alone cannot tell "we never got this" from "we have it, filed
+        under the wrong episode number" -- both read as Snatched with no file.
+        Joining the fileless episodes against the phantom rows separates them,
+        and the difference matters: on Law & Order 269 of 304 fileless episodes
+        are already on disk, so treating fileless as missing would re-download
+        most of a 20-season show the server already has.
+        """
+        healthy: list[tuple[int, int]] = []
+        misfiled: list[dict[str, Any]] = []
+        refetch: list[tuple[int, int]] = []
+        stalled: list[dict[str, Any]] = []
+        pending: list[tuple[int, int]] = []
+        duplicates = 0
+
+        for season in sorted(seasons):
+            if season <= 0 and not include_specials:
+                continue
+            rows = seasons[season]
+            real = {number: info for number, info in rows.items() if not self._is_phantom_row(info)}
+            # A phantom at S01E101 holds the file that belongs to S01E01.
+            phantom_files = {
+                number % 100: info
+                for number, info in rows.items()
+                if self._is_phantom_row(info) and self._episode_has_file(info) and number > 100
+            }
+            for number in sorted(real):
+                info = real[number]
+                if self._episode_has_file(info):
+                    healthy.append((season, number))
+                    if number in phantom_files:
+                        duplicates += 1
+                    continue
+                status = self._normalize_episode_status(info.get("status"))
+                if number in phantom_files:
+                    misfiled.append(
+                        {
+                            "season": season,
+                            "episode": number,
+                            "status": status,
+                            "location": str(phantom_files[number].get("location") or ""),
+                        }
+                    )
+                elif not self._episode_has_aired(info.get("airdate")):
+                    pending.append((season, number))
+                elif status in {"wanted", "failed"}:
+                    refetch.append((season, number))
+                elif status == "snatched":
+                    # Grabbed at some point but nothing landed. Reported rather
+                    # than re-searched: a snatch that is genuinely mid-download
+                    # looks identical from here, and re-searching it would grab
+                    # a second copy of something already on its way in.
+                    stalled.append({"season": season, "episode": number, "status": status})
+                elif status in {"skipped", "ignored"}:
+                    pending.append((season, number))
+                else:
+                    refetch.append((season, number))
+
+        return {
+            "healthy": healthy,
+            "misfiled_on_disk": misfiled,
+            "needs_refetch": refetch,
+            "stalled": stalled,
+            "not_yet_aired_or_skipped": pending,
+            "duplicate_files": duplicates,
+            "episode_count": len(healthy) + len(misfiled) + len(refetch) + len(stalled) + len(pending),
+        }
+
     async def all_episode_numbers(
         self,
         show: str,
         expected_indexer_id: int | None = None,
     ) -> dict[str, Any]:
-        """List every aired-or-known episode across all real seasons of a show.
+        """List every episode across a show's real seasons, with a diagnosis.
 
-        Whole-show repair needs the full season/episode map. Season 0 is
-        skipped: specials are not what someone means by "the show is broken".
+        Season 0 is skipped: specials are not what someone means by "the show is
+        broken". Previously this read `seasonRequests` off the show row, which
+        is an Ombi field -- no SickChill show has it (0 of 849 on the live
+        server), so whole-show repair enumerated nothing and refused.
         """
         original_expected_indexer_id = expected_indexer_id
         failure, show_info, indexer_id = await self._resolve_show_for_listing(
@@ -716,23 +860,18 @@ class SickChillClient(BaseHttpClient):
         if failure is not None:
             return failure
         assert show_info is not None
+        assert indexer_id is not None
 
+        raw_seasons = await self._show_seasons(indexer_id)
+        diagnosis = self.classify_show_episodes(raw_seasons)
         seasons: dict[int, list[int]] = {}
-        for season_request in show_info.get("seasonRequests") or []:
-            season_number = self._maybe_int(season_request.get("seasonNumber"))
-            if not isinstance(season_number, int) or season_number <= 0:
-                continue
-            episodes = [
-                episode_number
-                for episode_info in season_request.get("episodes") or []
-                if isinstance(episode_number := self._maybe_int(episode_info.get("episodeNumber")), int)
-                and episode_number > 0
-            ]
-            if episodes:
-                seasons[season_number] = sorted(set(episodes))
+        for season, episode in diagnosis["needs_refetch"]:
+            seasons.setdefault(season, []).append(episode)
 
         return {
-            "ok": bool(seasons),
+            # A show with nothing broken listed fine; that is a healthy answer,
+            # not a failure to enumerate. Only an empty payload is a refusal.
+            "ok": bool(raw_seasons),
             "show": str(show_info.get("show_name") or show),
             "backend_connected": True,
             "show_found": True,
@@ -741,9 +880,10 @@ class SickChillClient(BaseHttpClient):
             "expected_indexer_id": original_expected_indexer_id,
             "indexer_id_mismatch": original_expected_indexer_id is not None
             and original_expected_indexer_id != indexer_id,
-            "seasons": {season: seasons[season] for season in sorted(seasons)},
+            "seasons": {season: sorted(seasons[season]) for season in sorted(seasons)},
             "episode_count": sum(len(episodes) for episodes in seasons.values()),
-            "reason": None if seasons else "show_episode_list_unavailable",
+            "diagnosis": diagnosis,
+            "reason": None if raw_seasons else "show_episode_list_unavailable",
         }
 
     async def episode_numbers_for_season(
@@ -759,21 +899,16 @@ class SickChillClient(BaseHttpClient):
         if failure is not None:
             return failure
         assert show_info is not None
+        assert indexer_id is not None
         id_mismatch = original_expected_indexer_id is not None and original_expected_indexer_id != indexer_id
 
-        season_requests = show_info.get("seasonRequests") or []
-        episodes: list[int] = []
-        for season_request in season_requests:
-            season_number = self._maybe_int(season_request.get("seasonNumber"))
-            if season_number != season:
-                continue
-            for episode_info in season_request.get("episodes") or []:
-                episode_number = self._maybe_int(episode_info.get("episodeNumber"))
-                if isinstance(episode_number, int) and episode_number > 0:
-                    episodes.append(episode_number)
+        raw_seasons = await self._show_seasons(indexer_id)
+        season_rows = raw_seasons.get(season) or {}
+        diagnosis = self.classify_show_episodes({season: season_rows} if season_rows else {}, include_specials=True)
+        episodes = [episode for _, episode in diagnosis["needs_refetch"]]
 
         return {
-            "ok": bool(episodes),
+            "ok": bool(season_rows),
             "show": str(show_info.get("show_name") or show),
             "season": season,
             "backend_connected": True,
@@ -783,7 +918,8 @@ class SickChillClient(BaseHttpClient):
             "expected_indexer_id": original_expected_indexer_id,
             "indexer_id_mismatch": id_mismatch,
             "episodes": sorted(set(episodes)),
-            "reason": None if episodes else "season_episode_list_unavailable",
+            "diagnosis": diagnosis,
+            "reason": None if season_rows else "season_episode_list_unavailable",
         }
 
     async def check_episode_file(self, show: str, season: int, episode: int) -> dict:
