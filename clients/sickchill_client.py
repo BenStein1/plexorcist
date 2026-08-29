@@ -820,7 +820,11 @@ class SickChillClient(BaseHttpClient):
                     # The folded number only stands in for `number` when it is
                     # not itself a real aired episode -- a daytime or anime
                     # season that genuinely reaches 101 must not have its
-                    # episode 1 covered by its episode 101.
+                    # episode 1 covered by its episode 101. "Real" is judged by
+                    # SickChill's rows, so a genuine episode 101 whose row
+                    # SickChill has blanked would let the fold fire wrongly. That
+                    # errs toward calling episode 1 present, which under-reports a
+                    # gap rather than queueing a download over a file that exists.
                     if number in in_plex or (folded in in_plex and folded not in real):
                         healthy.append((season, number))
                         continue
