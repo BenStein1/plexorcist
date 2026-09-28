@@ -7,6 +7,7 @@ The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage,
 ## Current Capabilities
 
 - Plex OAuth login with server-side session identity.
+- Successful Plex logins persist for 180 days on the device; reauthentication renews the period.
 - Ombi login gate: users must exist in Ombi before entering Plexorcist.
 - Friendly-name/admin identity handling for better chat responses.
 - Movie and TV search/request flows through Ombi.
@@ -161,13 +162,18 @@ LLM_PROVIDER=openai
 LLM_MODEL=gpt-5-mini
 ```
 
-Supported values are `openai`, `anthropic`, and `ollama`. OpenAI remains the default and uses the native internal tool-call format. Anthropic and Ollama translate between their chat/tool formats and the same internal response shape so the backend tool loop stays unchanged.
+`openai` remains the default configured provider. Supported configured values are `openai`, `anthropic`, and `ollama`. An administrator can save a global engine choice of the configured provider or `nvidia` from the admin controls; the choice is stored in SQLite and applies to new chat turns. The ordinary user UI does not gain provider, model, or cooldown controls.
+
+NVIDIA uses the hosted chat-completions endpoint at `https://integrate.api.nvidia.com/v1/chat/completions`. It tries the approved preferred models in order, then falls back among eligible NVIDIA catalog models only for actual HTTP, transport, or invalid-response failures. A model that fails enters a shared 15-minute cooldown. NVIDIA inference has no read or total inference timeout, while connection and write timeouts remain bounded. It never automatically crosses back to the configured provider or replays executed tools.
+
+Anthropic and Ollama translate between their chat/tool formats and the same internal response shape so the backend tool loop stays unchanged.
 
 Provider-specific settings:
 
 - OpenAI: `OPENAI_API_KEY`, optional `OPENAI_MODEL` fallback when `LLM_MODEL` is unset.
 - Anthropic: `ANTHROPIC_API_KEY`, with `LLM_MODEL` set to a Messages API model.
 - Ollama: `OLLAMA_BASE_URL` or `OLLAMA_HOST`, with `LLM_MODEL` set to a locally available chat/tool-capable model.
+- NVIDIA: `NVIDIA_API_KEY`; optional `NVIDIA_MODEL_CATALOG` points to a local JSON catalog in the same format as the RosterOps catalog. No catalog snapshot is bundled or fetched automatically; if the file is absent or malformed, the approved preferred models remain available.
 
 ## Run Locally
 
@@ -199,6 +205,7 @@ Important groups:
 - OpenAI compatibility: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_REQUEST_TIMEOUT_SECONDS`
 - Anthropic: `ANTHROPIC_API_KEY`
 - Ollama: `OLLAMA_BASE_URL`, `OLLAMA_HOST`
+- NVIDIA: `NVIDIA_API_KEY`, `NVIDIA_MODEL_CATALOG`
 - Memory: `MEMORY_INACTIVITY_MINUTES`, `MEMORY_COMPACTION_TIMEOUT_SECONDS`, `MEMORY_RECENT_NOTES_LIMIT`, `MEMORY_TIER1_KEEP`
 - MCP endpoint: `MCP_AUTH_TOKEN`, `MCP_ADMIN_TOKEN` (see [MCP Endpoint](#mcp-endpoint); unset = `/mcp` disabled)
 
