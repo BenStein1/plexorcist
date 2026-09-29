@@ -3,6 +3,12 @@
 - /.git/
 - /.venv/
 - /.codex/
+- /.worktrees/
+- /.claude/
+- /archive/
+- /PROJECT.md
+- /HANDOFF.md
+- /PLAN-persistent-login-nvidia.md
 - /__pycache__/
 - /.pytest_cache/
 - /*.py[cod]
