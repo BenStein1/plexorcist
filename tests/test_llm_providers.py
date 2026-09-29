@@ -115,6 +115,17 @@ def test_build_llm_client_ollama_needs_no_key():
     assert isinstance(client, OllamaProviderClient)
 
 
+def test_build_litellm_client_uses_openai_compatible_base_url():
+    client = build_llm_client(
+        LlmProviderConfig(
+            provider="litellm", model="team/model", timeout_seconds=30,
+            openai_base_url="https://litellm.example/v1", openai_api_key="test-key",
+        )
+    )
+    assert isinstance(client, OpenAIProviderClient)
+    assert str(client._client.base_url) == "https://litellm.example/v1/"
+
+
 # --- 3. Anthropic adapter message building -----------------------------------
 
 

@@ -146,6 +146,7 @@ class LlmProviderConfig:
     model: str
     timeout_seconds: float
     openai_api_key: str | None = None
+    openai_base_url: str | None = None
     anthropic_api_key: str | None = None
     ollama_base_url: str | None = None
     max_output_tokens: int = 4096
@@ -201,10 +202,11 @@ class OpenAIProviderClient:
         *,
         timeout_seconds: float = 120.0,
         usage_recorder: UsageRecorder | None = None,
+        base_url: str | None = None,
     ) -> None:
         self.model = model
         self.usage_recorder = usage_recorder
-        self._client = AsyncOpenAI(api_key=api_key, timeout=timeout_seconds, max_retries=2)
+        self._client = AsyncOpenAI(api_key=api_key, timeout=timeout_seconds, max_retries=2, base_url=base_url)
 
     async def generate_response(
         self,
@@ -879,6 +881,18 @@ def _build_openai_client(config: LlmProviderConfig, usage_recorder: UsageRecorde
     )
 
 
+def _build_litellm_client(config: LlmProviderConfig, usage_recorder: UsageRecorder | None) -> LlmClient | None:
+    if not config.openai_base_url:
+        return None
+    return OpenAIProviderClient(
+        config.openai_api_key or "unused",
+        config.model,
+        timeout_seconds=config.timeout_seconds,
+        usage_recorder=usage_recorder,
+        base_url=config.openai_base_url,
+    )
+
+
 def _build_anthropic_client(config: LlmProviderConfig, usage_recorder: UsageRecorder | None) -> LlmClient | None:
     if not config.anthropic_api_key:
         return None
@@ -918,6 +932,7 @@ _LLM_PROVIDERS: dict[str, ProviderBuilder] = {
     "nvidia": _build_nvidia_client,
     "ollama": _build_ollama_client,
     "openai": _build_openai_client,
+    "litellm": _build_litellm_client,
 }
 
 
@@ -950,6 +965,7 @@ def build_llm_client(
         model=model,
         timeout_seconds=float(config.timeout_seconds),
         openai_api_key=config.openai_api_key,
+        openai_base_url=config.openai_base_url,
         anthropic_api_key=config.anthropic_api_key,
         ollama_base_url=config.ollama_base_url,
         max_output_tokens=config.max_output_tokens,

@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 import backend.main as main
-from backend.ai_engine import GLOBAL_USER_ID, ENGINE_FLAG, engine_state, selected_engine, set_engine
+from backend.ai_engine import GLOBAL_USER_ID, ENGINE_FLAG, LITELLM_MODEL_FLAG, engine_state, litellm_models, selected_engine, set_engine
 from backend.auth_store import PlexAuthSessionStore
 from backend.config import Settings
 from backend.models import ChatRequest, PlexAuthSession
@@ -49,6 +49,56 @@ def test_unconfigured_nvidia_does_not_replace_saved_engine(tmp_path):
     else:
         raise AssertionError("unconfigured NVIDIA selection should fail")
     assert selected_engine(configured, store) == "configured"
+
+
+def test_litellm_selection_persists_model_without_exposing_key(tmp_path):
+    db = f"sqlite:///{tmp_path / 'engine.db'}"
+    settings = Settings(database_url=db, litellm_base_url="https://llm.example/v1", litellm_api_key="private-key")
+    store = ConversationStore(db)
+
+    result = set_engine(settings, store, "litellm", "team/model")
+
+    assert result["selected"] == "litellm"
+    assert result["litellm"]["selected_model"] == "team/model"
+    assert "private-key" not in str(result)
+    assert store.get_user_flag(GLOBAL_USER_ID, LITELLM_MODEL_FLAG) == "team/model"
+
+
+@pytest.mark.asyncio
+async def test_litellm_model_catalog_uses_server_key_and_sanitizes_errors(monkeypatch):
+    import backend.ai_engine as ai_engine
+
+    seen = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"id": "team/b"}, {"id": "team/a"}, {"id": "team/a"}]}
+
+    class Client:
+        def __init__(self, *, timeout):
+            seen["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, *, headers):
+            seen.update(url=url, headers=headers)
+            return Response()
+
+    monkeypatch.setattr(ai_engine.httpx, "AsyncClient", Client)
+    settings = Settings(litellm_base_url="https://llm.example", litellm_api_key="private-key")
+    models, error = await litellm_models(settings)
+
+    assert models == ["team/a", "team/b"]
+    assert error is None
+    assert seen["url"] == "https://llm.example/v1/models"
+    assert seen["headers"] == {"Authorization": "Bearer private-key"}
 
 
 def test_nvidia_cooldowns_are_shared_in_sqlite_and_sanitized_for_admins(tmp_path):
@@ -141,6 +191,7 @@ async def test_settings_gear_is_admin_only(monkeypatch, tmp_path):
     admin_html = (await main.index(request, settings)).body.decode()
     assert 'id="admin-settings-open"' in admin_html
     assert 'id="admin-settings-dialog"' in admin_html
+    assert 'id="admin-litellm-model"' in admin_html
     assert 'class="panel admin-engine"' not in admin_html
 
     async def render_ordinary(_request, _settings):
@@ -150,6 +201,49 @@ async def test_settings_gear_is_admin_only(monkeypatch, tmp_path):
     ordinary_html = (await main.index(request, settings)).body.decode()
     assert 'id="admin-settings-open"' not in ordinary_html
     assert 'id="admin-settings-dialog"' not in ordinary_html
+    assert 'id="admin-litellm-model"' not in ordinary_html
+
+
+@pytest.mark.asyncio
+async def test_admin_litellm_model_catalog_and_selection_are_admin_only(monkeypatch, tmp_path):
+    db = f"sqlite:///{tmp_path / 'litellm.db'}"
+    settings = Settings(
+        database_url=db, base_url="https://plexorcist.example",
+        litellm_base_url="https://llm.example/v1", litellm_api_key="private-key",
+    )
+    admin = UserContext(user_id="admin", username="admin", display_name="Admin", is_admin=True)
+
+    async def _models():
+        return ["team/model"], None
+
+    monkeypatch.setattr(main, "litellm_models", lambda _settings: _models())
+
+    async def request(method="PUT", headers=None):
+        return Request({
+            "type": "http", "http_version": "1.1", "method": method,
+            "path": "/api/admin/ai-engine", "raw_path": b"/api/admin/ai-engine", "query_string": b"",
+            "headers": [(key.lower().encode(), value.encode()) for key, value in (headers or {}).items()],
+            "server": ("127.0.0.1", 5500), "client": ("127.0.0.1", 1234),
+        })
+
+    state = await main.get_admin_ai_engine(admin, settings)
+    assert state["litellm"]["models"] == ["team/model"]
+    assert "private-key" not in str(state)
+
+    saved = await main.put_admin_ai_engine(
+        main.AiEngineRequest(engine="litellm", model="team/model"),
+        await request(headers={"Content-Type": "application/json", "Origin": "https://plexorcist.example"}),
+        admin, settings,
+    )
+    assert saved["selected"] == "litellm"
+    with pytest.raises(HTTPException) as invalid:
+        await main.put_admin_ai_engine(
+            main.AiEngineRequest(engine="litellm", model="not-listed"),
+            await request(headers={"Content-Type": "application/json", "Origin": "https://plexorcist.example"}),
+            admin, settings,
+        )
+    assert invalid.value.status_code == 400
+    assert selected_engine(settings, ConversationStore(db)) == "litellm"
 
 
 @pytest.mark.asyncio

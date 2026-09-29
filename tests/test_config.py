@@ -27,6 +27,11 @@ def test_effective_ollama_base_url_fallback(monkeypatch):
     assert settings.effective_ollama_base_url == "http://localhost:11434"
 
 
+def test_effective_litellm_base_url_adds_v1():
+    assert Settings(litellm_base_url="https://models.example/llm").effective_litellm_base_url == "https://models.example/llm/v1"
+    assert Settings(litellm_base_url="https://models.example/v1/").effective_litellm_base_url == "https://models.example/v1"
+
+
 def test_blocked_users_path_defaults_to_local_json_file():
     settings = Settings()
     assert settings.blocked_users_path.endswith("blockedusers.json")

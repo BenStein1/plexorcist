@@ -30,7 +30,7 @@ from backend.auth_context import (
     get_user_context_provider,
 )
 from backend.auth_store import PlexAuthSessionStore
-from backend.ai_engine import engine_state, selected_engine, set_engine
+from backend.ai_engine import engine_state, litellm_models, selected_engine, selected_litellm_model, set_engine
 from backend.config import Settings, get_settings
 from backend.logging import AuditLogger, configure_logging
 from backend.models import (
@@ -198,14 +198,20 @@ _NILBOG_PUSHBACK_TERMS = (
 def _build_llm_client(settings: Settings, usage_recorder: UsageRecorder | None, store: ConversationStore | None = None) -> LlmClient | None:
     provider = settings.llm_provider
     model = settings.effective_llm_model
-    if store is not None and selected_engine(settings, store) == "nvidia":
-        provider = "nvidia"
+    if store is not None:
+        engine = selected_engine(settings, store)
+        if engine == "nvidia":
+            provider = "nvidia"
+        elif engine == "litellm":
+            provider = "litellm"
+            model = selected_litellm_model(settings, store)
     return build_llm_client(
         LlmProviderConfig(
             provider=provider,
             model=model,
             timeout_seconds=float(max(30, int(settings.effective_llm_request_timeout_seconds))),
-            openai_api_key=settings.openai_api_key,
+            openai_api_key=settings.litellm_api_key if provider == "litellm" else settings.openai_api_key,
+            openai_base_url=settings.effective_litellm_base_url if provider == "litellm" else None,
             nvidia_api_key=settings.nvidia_api_key,
             nvidia_catalog_path=settings.nvidia_catalog_path,
             nvidia_state_get=(lambda key: store.get_user_flag("__global__", key)) if store is not None else None,
@@ -1228,7 +1234,10 @@ async def index(
         <select id="admin-engine-select">
           <option value="configured">Configured engine</option>
           <option value="nvidia">NVIDIA fallback</option>
+          <option value="litellm">LiteLLM Proxy</option>
         </select>
+        <label for="admin-litellm-model" id="admin-litellm-model-label" hidden>LiteLLM model</label>
+        <select id="admin-litellm-model" hidden></select>
         <p id="admin-engine-status" role="status"></p>
       </dialog>
 """
@@ -1240,6 +1249,8 @@ async def index(
       });
       document.getElementById("admin-settings-close")?.addEventListener("click", () => adminSettingsDialog?.close());
       const adminEngineSelect = document.getElementById("admin-engine-select");
+      const adminLiteLlmModel = document.getElementById("admin-litellm-model");
+      const adminLiteLlmLabel = document.getElementById("admin-litellm-model-label");
       const adminEngineStatus = document.getElementById("admin-engine-status");
       async function loadAdminEngine() {
         const res = await fetch("/api/admin/ai-engine");
@@ -1248,25 +1259,45 @@ async def index(
         if (adminEngineSelect) adminEngineSelect.value = data.selected || "configured";
         const nvidiaOption = adminEngineSelect?.querySelector('option[value="nvidia"]');
         if (nvidiaOption) nvidiaOption.disabled = !data.nvidia?.available;
-        if (!data.nvidia?.available && adminEngineStatus) adminEngineStatus.textContent = "NVIDIA_API_KEY is not configured";
+        const litellmOption = adminEngineSelect?.querySelector('option[value="litellm"]');
+        if (litellmOption) litellmOption.disabled = !data.litellm?.available;
+        if (adminLiteLlmModel) {
+          adminLiteLlmModel.replaceChildren(...(data.litellm?.models || []).map(model => new Option(model, model)));
+          if (data.litellm?.selected_model) adminLiteLlmModel.value = data.litellm.selected_model;
+          if (!adminLiteLlmModel.value && adminLiteLlmModel.options.length) adminLiteLlmModel.selectedIndex = 0;
+          adminLiteLlmModel.hidden = data.selected !== "litellm";
+          adminLiteLlmLabel.hidden = data.selected !== "litellm";
+        }
+        if (adminEngineStatus) {
+          if (data.selected === "nvidia" && !data.nvidia?.available) adminEngineStatus.textContent = "NVIDIA_API_KEY is not configured";
+          else if (data.selected === "litellm" && !data.litellm?.available) adminEngineStatus.textContent = "LITELLM_BASE_URL is not configured";
+          else if (data.selected === "litellm" && data.litellm?.error) adminEngineStatus.textContent = "LiteLLM model list unavailable (" + data.litellm.error + ")";
+          else adminEngineStatus.textContent = "";
+        }
       }
       adminEngineSelect?.addEventListener("change", async () => {
+        if (adminLiteLlmModel) {
+          adminLiteLlmModel.hidden = adminEngineSelect.value !== "litellm";
+          adminLiteLlmLabel.hidden = adminEngineSelect.value !== "litellm";
+        }
         adminEngineSelect.disabled = true;
         try {
           const res = await fetch("/api/admin/ai-engine", {
             method: "PUT",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({engine: adminEngineSelect.value})
+            body: JSON.stringify({engine: adminEngineSelect.value, model: adminLiteLlmModel?.value || null})
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.detail || "Could not save engine");
           adminEngineSelect.value = data.selected;
           if (adminEngineStatus) adminEngineStatus.textContent = "Saved";
         } catch (error) {
-          if (adminEngineStatus) adminEngineStatus.textContent = error.message;
+          const message = error.message;
           await loadAdminEngine();
+          if (adminEngineStatus) adminEngineStatus.textContent = message;
         } finally { adminEngineSelect.disabled = false; }
       });
+      adminLiteLlmModel?.addEventListener("change", () => adminEngineSelect?.dispatchEvent(new Event("change")));
 """
     if dev_mode:
         dev_panel_html = """
@@ -2577,7 +2608,12 @@ async def get_admin_ai_engine(
 ) -> dict[str, Any]:
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
-    return engine_state(settings, ConversationStore(settings.database_url))
+    store = ConversationStore(settings.database_url)
+    state = engine_state(settings, store)
+    models, error = await litellm_models(settings)
+    state["litellm"]["models"] = models
+    state["litellm"]["error"] = error
+    return state
 
 
 @app.put("/api/admin/ai-engine")
@@ -2589,7 +2625,17 @@ async def put_admin_ai_engine(
 ) -> dict[str, Any]:
     _require_admin_same_origin(request, user, settings)
     try:
-        return set_engine(settings, ConversationStore(settings.database_url), payload.engine)
+        store = ConversationStore(settings.database_url)
+        if payload.engine.strip().lower() == "litellm":
+            models, error = await litellm_models(settings)
+            if error:
+                raise HTTPException(status_code=503, detail=f"LiteLLM model list unavailable ({error})")
+            model = (payload.model or selected_litellm_model(settings, store)).strip()
+            if model not in models:
+                raise HTTPException(status_code=400, detail="Select an available LiteLLM model")
+        else:
+            model = payload.model
+        return set_engine(settings, store, payload.engine, model)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

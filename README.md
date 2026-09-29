@@ -162,7 +162,7 @@ LLM_PROVIDER=openai
 LLM_MODEL=gpt-5-mini
 ```
 
-`openai` remains the default configured provider. Supported configured values are `openai`, `anthropic`, and `ollama`. An administrator can save a global engine choice of the configured provider or `nvidia` from the admin controls; the choice is stored in SQLite and applies to new chat turns. The ordinary user UI does not gain provider, model, or cooldown controls.
+`openai` remains the default configured provider. Supported configured values are `openai`, `anthropic`, and `ollama`. An administrator can save a global engine choice of the configured provider, `nvidia`, or `litellm` from the admin settings. LiteLLM models are loaded from its OpenAI-compatible `/v1/models` endpoint and the chosen model applies to new chat turns. The ordinary user UI does not gain provider, model, or cooldown controls.
 
 NVIDIA uses the hosted chat-completions endpoint at `https://integrate.api.nvidia.com/v1/chat/completions`. It tries the approved preferred models in order, then falls back among eligible NVIDIA catalog models only for actual HTTP, transport, or invalid-response failures. A model that fails enters a shared 15-minute cooldown. NVIDIA inference has no read or total inference timeout, while connection and write timeouts remain bounded. It never automatically crosses back to the configured provider or replays executed tools.
 
@@ -174,6 +174,7 @@ Provider-specific settings:
 - Anthropic: `ANTHROPIC_API_KEY`, with `LLM_MODEL` set to a Messages API model.
 - Ollama: `OLLAMA_BASE_URL` or `OLLAMA_HOST`, with `LLM_MODEL` set to a locally available chat/tool-capable model.
 - NVIDIA: `NVIDIA_API_KEY`; optional `NVIDIA_MODEL_CATALOG` points to a local JSON catalog in the same format as the RosterOps catalog. No catalog snapshot is bundled or fetched automatically; if the file is absent or malformed, the approved preferred models remain available.
+- LiteLLM Proxy: `LITELLM_BASE_URL` (proxy root or `/v1` URL), optional `LITELLM_API_KEY` for authenticated access, and optional `LITELLM_MODEL` for the initial model selection. Admin model changes are stored in SQLite; the key stays in server environment configuration.
 
 ## Run Locally
 
@@ -206,6 +207,7 @@ Important groups:
 - Anthropic: `ANTHROPIC_API_KEY`
 - Ollama: `OLLAMA_BASE_URL`, `OLLAMA_HOST`
 - NVIDIA: `NVIDIA_API_KEY`, `NVIDIA_MODEL_CATALOG`
+- LiteLLM: `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `LITELLM_MODEL`
 - Memory: `MEMORY_INACTIVITY_MINUTES`, `MEMORY_COMPACTION_TIMEOUT_SECONDS`, `MEMORY_RECENT_NOTES_LIMIT`, `MEMORY_TIER1_KEEP`
 - MCP endpoint: `MCP_AUTH_TOKEN`, `MCP_ADMIN_TOKEN` (see [MCP Endpoint](#mcp-endpoint); unset = `/mcp` disabled)
 

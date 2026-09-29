@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = env_field(default=None, env="OPENAI_API_KEY")
     nvidia_api_key: str | None = env_field(default=None, env="NVIDIA_API_KEY")
     nvidia_catalog_path: str | None = env_field(default=None, env="NVIDIA_MODEL_CATALOG")
+    litellm_base_url: str | None = env_field(default=None, env="LITELLM_BASE_URL")
+    litellm_api_key: str | None = env_field(default=None, env="LITELLM_API_KEY")
+    litellm_model: str | None = env_field(default=None, env="LITELLM_MODEL")
     login_notify_enabled: bool = env_field(default=True, env="LOGIN_NOTIFY_ENABLED")
     login_notify_scope: Literal["all", "admin_only", "none"] = env_field(default="all", env="LOGIN_NOTIFY_SCOPE")
     login_notify_include_ip: bool = env_field(default=False, env="LOGIN_NOTIFY_INCLUDE_IP")
@@ -153,6 +156,13 @@ class Settings(BaseSettings):
     def effective_ollama_base_url(self) -> str:
         base_url = (self.ollama_base_url or self.ollama_host or "").strip()
         return base_url or "http://localhost:11434"
+
+    @property
+    def effective_litellm_base_url(self) -> str:
+        base_url = (self.litellm_base_url or "").strip().rstrip("/")
+        if base_url and not base_url.rsplit("/", 1)[-1].lower() == "v1":
+            base_url += "/v1"
+        return base_url
 
     if not _PYDANTIC_SETTINGS_V2:
         class Config:

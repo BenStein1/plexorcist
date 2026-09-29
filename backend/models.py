@@ -99,6 +99,7 @@ class DevImpersonationRequest(BaseModel):
 
 class AiEngineRequest(BaseModel):
     engine: str
+    model: str | None = None
 
 
 class ToolCallRecord(BaseModel):
