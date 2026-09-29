@@ -111,3 +111,18 @@ changes. Deployment is a separate owner-approved step using deploy.local.sh.
   keepalives, summary selection, and matching integration tests.
 - Coordinator: save this plan first, agree provider interfaces, integrate local
   commits, review and run isolated checks. Agents commit before reporting done.
+
+## Tool-call continuation repair
+
+- Fix the shared provider-neutral tool-call continuation path used by LiteLLM
+  Responses and NVIDIA Chat Completions. Preserve assistant native tool calls,
+  IDs, JSON arguments, and structured tool results when building the next
+  provider request; do not alter the existing configured-provider path.
+- Reproduce the `TypeError: sequence item 0: expected str instance, NoneType
+  found` from the live LiteLLM movie-request turn, identify and fix its source,
+  and retain enough traceback context for any future unexpected chat failure.
+- Add a focused adapter/agent round-trip regression check for request-tool
+  calls on both LiteLLM and NVIDIA shapes. Do not run a live movie mutation as
+  a test; confirm the prior request state before retrying it.
+- Run focused provider and agent tests plus `git diff --check`. Commit the
+  implementation locally; deployment/push remains a separate explicit action.
