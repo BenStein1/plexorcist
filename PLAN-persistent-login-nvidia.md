@@ -52,6 +52,20 @@ changes. Deployment is a separate owner-approved step using deploy.local.sh.
   behavior. In-flight work retains its provider; new requests see saved changes
   across both application workers without a restart.
 
+## LiteLLM model selection
+
+- Add LiteLLM Proxy as a third admin-selectable engine without changing the
+  configured provider or NVIDIA fallback. Use the existing OpenAI-compatible
+  client path with a configurable LiteLLM base URL and server-side virtual key.
+- Load available model IDs from the configured proxy for admins only; let the
+  admin select and persist one model globally in existing user flags. Keep the
+  key out of SQLite, HTML, API responses, logs, and Git.
+- Require a configured proxy URL before enabling this engine. Treat a missing
+  key as unauthenticated proxy access; never guess the URL or expose model
+  metadata to ordinary users.
+- Validate catalog retrieval, model selection, and client routing with focused
+  tests. Keep Shabbos on its existing no-model path.
+
 ## Waiting and recovery
 
 - User explicitly overrides RosterOps' 900-second attempt deadline: NVIDIA
