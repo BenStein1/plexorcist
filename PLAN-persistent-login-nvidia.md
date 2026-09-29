@@ -118,9 +118,12 @@ changes. Deployment is a separate owner-approved step using deploy.local.sh.
   Responses and NVIDIA Chat Completions. Preserve assistant native tool calls,
   IDs, JSON arguments, and structured tool results when building the next
   provider request; do not alter the existing configured-provider path.
-- Reproduce the `TypeError: sequence item 0: expected str instance, NoneType
-  found` from the live LiteLLM movie-request turn, identify and fix its source,
-  and retain enough traceback context for any future unexpected chat failure.
+- LiteLLM's Responses payload can contain a null text segment beside a valid
+  function call. The OpenAI SDK's lazy `response.output_text` property tries to
+  join those segments and raises before Plexorcist can dispatch the tool. Read
+  text from individual response items and skip non-string segments instead.
+- Preserve completed tool results if a provider fails during post-tool
+  continuation, and log full unexpected chat/provider tracebacks.
 - Add a focused adapter/agent round-trip regression check for request-tool
   calls on both LiteLLM and NVIDIA shapes. Do not run a live movie mutation as
   a test; confirm the prior request state before retrying it.

@@ -281,17 +281,13 @@ class OpenAIProviderClient:
             if (dumped := item.model_dump(exclude_none=True)).get("type") in _OPENAI_ECHOABLE_OUTPUT_TYPES
         ]
         return LlmResponse(
-            text=self._extract_text(response, output),
+            text=self._extract_text(output),
             tool_calls=tool_calls,
             native_turn=native_turn,
             raw=response,
         )
 
-    def _extract_text(self, response: Any, output: list[Any]) -> str:
-        direct = getattr(response, "output_text", None)
-        if direct:
-            return str(direct)
-
+    def _extract_text(self, output: list[Any]) -> str:
         chunks: list[str] = []
         for item in output:
             if getattr(item, "type", None) != "message":
@@ -299,8 +295,8 @@ class OpenAIProviderClient:
             for content in getattr(item, "content", None) or []:
                 content_type = getattr(content, "type", None)
                 content_text = getattr(content, "text", None)
-                if content_type in {"output_text", "text"} and content_text:
-                    chunks.append(str(content_text))
+                if content_type in {"output_text", "text"} and isinstance(content_text, str) and content_text:
+                    chunks.append(content_text)
         return "\n".join(chunk for chunk in chunks if chunk).strip()
 
     def _record_usage(self, response: Any, usage_context: dict[str, Any]) -> None:

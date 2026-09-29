@@ -2818,6 +2818,7 @@ async def _chat_json(
                 logger.exception("Failed to mark admin messages read for user %s", user.user_id)
         return chat_response
     except Exception as exc:
+        logger.exception("Unexpected chat failure for user %s", user.user_id)
         audit.log(
             "chat_error",
             {

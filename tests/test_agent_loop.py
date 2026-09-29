@@ -110,6 +110,14 @@ class FakeToolkit:
     async def resolve_task(self, **kwargs: Any) -> dict:
         return {"ok": True, "verified_closed": True, "resolved_note_ids": [], "closed_task_lines": []}
 
+    async def request_movie(self, tmdb_id: int) -> dict:
+        return {
+            "ok": True,
+            "title": "The King of the Kickboxers",
+            "tmdb_id": tmdb_id,
+            "user_summary": "Added The King of the Kickboxers.",
+        }
+
 
 FAKE_SPECS = [
     ToolSpec(
@@ -301,6 +309,45 @@ async def test_final_text_not_overwritten_when_tool_calls_succeeded():
     )
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "send_admin_prowl_notice"
+
+
+@pytest.mark.asyncio
+async def test_provider_continuation_error_keeps_completed_movie_request():
+    class ContinuationFailureClient:
+        async def generate_response(self, **kwargs):
+            if not hasattr(self, "called"):
+                self.called = True
+                return LlmResponse(
+                    text="",
+                    tool_calls=[
+                        ToolCall(
+                            call_id="movie-1",
+                            name="request_movie_for_user",
+                            arguments_json='{"tmdb_id": 765}',
+                        )
+                    ],
+                    native_turn={"type": "assistant", "tool_calls": []},
+                )
+            raise TypeError("sequence item 0: expected str instance, NoneType found")
+
+    bridge = ToolBridge(
+        FakeToolkit(),
+        [
+            ToolSpec(
+                name="request_movie_for_user",
+                description="request movie",
+                input_model=schemas.RequestMovieInput,
+                resolve=lambda toolkit: toolkit.request_movie,
+            )
+        ],
+    )
+    reply, tool_calls = await _agent(ContinuationFailureClient(), bridge).respond(
+        _user(), _state(), "Add The King of the Kickboxers"
+    )
+
+    assert reply == "Added The King of the Kickboxers."
+    assert len(tool_calls) == 1
+    assert tool_calls[0].result["tmdb_id"] == 765
 
 
 def test_admin_message_confirmation_echoes_exact_multiline_text():

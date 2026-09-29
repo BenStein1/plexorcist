@@ -130,6 +130,13 @@ class ConciergeAgent:
                         else "I hit an upstream API error while generating that reply. Please retry."
                     )
                 return self._finish_with_error(user, state, tool_calls, reason, fallback_text)
+            except Exception:  # noqa: BLE001 - a provider adapter must not erase completed tool actions
+                logger.exception("Unexpected LLM provider failure after %d completed tool call(s)", len(tool_calls))
+                reason = "llm_provider_error_after_tool_calls" if tool_calls else None
+                fallback_text = (
+                    "The chat brain hit an internal error before it could finish. Please retry."
+                )
+                return self._finish_with_error(user, state, tool_calls, reason, fallback_text)
 
             if response.tool_calls:
                 conversation.append(AssistantTurn(response.native_turn))

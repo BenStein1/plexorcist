@@ -22,6 +22,7 @@ from clients.llm_providers import (
     ChatTurn,
     LlmConfigurationError,
     LlmProviderConfig,
+    NvidiaProviderClient,
     OllamaProviderClient,
     OpenAIProviderClient,
     ToolCall,
@@ -124,6 +125,56 @@ def test_build_litellm_client_uses_openai_compatible_base_url():
     )
     assert isinstance(client, OpenAIProviderClient)
     assert str(client._client.base_url) == "https://litellm.example/v1/"
+
+
+def test_litellm_responses_continuation_keeps_movie_tool_call_and_result():
+    client = OpenAIProviderClient(api_key="test-key", model="gpt-6-luna", base_url="https://litellm.example/v1")
+    tool_result = ToolResult(
+        call_id="movie-call",
+        name="request_movie_for_user",
+        content={"ok": True, "title": "The King of the Kickboxers"},
+    )
+
+    items = client._build_input([
+        AssistantTurn([{
+            "type": "function_call",
+            "call_id": "movie-call",
+            "name": "request_movie_for_user",
+            "arguments": '{"tmdb_id":765}',
+        }]),
+        ToolResultsTurn([tool_result]),
+    ])
+
+    assert items[0]["call_id"] == items[1]["call_id"] == "movie-call"
+    assert items[0]["type"] == "function_call"
+    assert items[1]["type"] == "function_call_output"
+    assert json.loads(items[1]["output"]) == {"ok": True, "title": "The King of the Kickboxers"}
+
+
+def test_nvidia_continuation_keeps_movie_tool_call_and_result():
+    client = NvidiaProviderClient(api_key="test-key", model="test-model")
+    tool_result = ToolResult(
+        call_id="movie-call",
+        name="request_movie_for_user",
+        content={"ok": True, "title": "The King of the Kickboxers"},
+    )
+
+    messages = client._build_messages("instructions", [
+        AssistantTurn({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "movie-call",
+                "type": "function",
+                "function": {"name": "request_movie_for_user", "arguments": '{"tmdb_id":765}'},
+            }],
+        }),
+        ToolResultsTurn([tool_result]),
+    ])
+
+    assert messages[1]["tool_calls"][0]["id"] == messages[2]["tool_call_id"] == "movie-call"
+    assert messages[2]["role"] == "tool"
+    assert json.loads(messages[2]["content"]) == {"ok": True, "title": "The King of the Kickboxers"}
 
 
 # --- 3. Anthropic adapter message building -----------------------------------
@@ -272,6 +323,30 @@ def test_openai_build_response_extracts_tool_calls_and_text():
 
     native_types = {item["type"] for item in result.native_turn}
     assert native_types == {"message", "function_call", "reasoning"}
+
+
+def test_openai_build_response_skips_null_text_segment_without_losing_tool_call():
+    class BrokenOutputTextResponse(_Obj):
+        @property
+        def output_text(self):
+            return "".join([None])
+
+    client = OpenAIProviderClient(api_key="test-key", model="gpt-6-luna")
+    response = BrokenOutputTextResponse(
+        output=[
+            _Obj(type="message", role="assistant", content=[_Obj(type="output_text", text=None)]),
+            _Obj(type="function_call", call_id="call_1", name="request_movie_for_user", arguments='{"tmdb_id":765}'),
+        ],
+        model="gpt-6-luna",
+        usage=None,
+    )
+
+    result = client._build_response(response)
+
+    assert result.text == ""
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "request_movie_for_user"
+    assert result.tool_calls[0].call_id == "call_1"
 
 
 @pytest.mark.asyncio
