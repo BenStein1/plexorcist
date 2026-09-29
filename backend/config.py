@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     nvidia_catalog_path: str | None = env_field(default=None, env="NVIDIA_MODEL_CATALOG")
     litellm_base_url: str | None = env_field(default=None, env="LITELLM_BASE_URL")
     litellm_api_key: str | None = env_field(default=None, env="LITELLM_API_KEY")
+    lite_llm_master_key: str | None = env_field(default=None, env="LITE_LLM_MASTER_KEY")
     litellm_model: str | None = env_field(default=None, env="LITELLM_MODEL")
     login_notify_enabled: bool = env_field(default=True, env="LOGIN_NOTIFY_ENABLED")
     login_notify_scope: Literal["all", "admin_only", "none"] = env_field(default="all", env="LOGIN_NOTIFY_SCOPE")
@@ -163,6 +164,10 @@ class Settings(BaseSettings):
         if base_url and not base_url.rsplit("/", 1)[-1].lower() == "v1":
             base_url += "/v1"
         return base_url
+
+    @property
+    def effective_litellm_api_key(self) -> str | None:
+        return (self.lite_llm_master_key or self.litellm_api_key or "").strip() or None
 
     if not _PYDANTIC_SETTINGS_V2:
         class Config:

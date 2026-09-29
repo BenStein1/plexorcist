@@ -174,7 +174,7 @@ Provider-specific settings:
 - Anthropic: `ANTHROPIC_API_KEY`, with `LLM_MODEL` set to a Messages API model.
 - Ollama: `OLLAMA_BASE_URL` or `OLLAMA_HOST`, with `LLM_MODEL` set to a locally available chat/tool-capable model.
 - NVIDIA: `NVIDIA_API_KEY`; optional `NVIDIA_MODEL_CATALOG` points to a local JSON catalog in the same format as the RosterOps catalog. No catalog snapshot is bundled or fetched automatically; if the file is absent or malformed, the approved preferred models remain available.
-- LiteLLM Proxy: `LITELLM_BASE_URL` (proxy root or `/v1` URL), optional `LITELLM_API_KEY` for authenticated access, and optional `LITELLM_MODEL` for the initial model selection. Admin model changes are stored in SQLite; the key stays in server environment configuration.
+- LiteLLM Proxy: `LITELLM_BASE_URL` (proxy root or `/v1` URL), optional `LITE_LLM_MASTER_KEY` for authenticated access (`LITELLM_API_KEY` is also accepted), and optional `LITELLM_MODEL` for the initial model selection. Admin model changes are stored in SQLite; the key stays in server environment configuration.
 
 ## Run Locally
 
@@ -207,7 +207,7 @@ Important groups:
 - Anthropic: `ANTHROPIC_API_KEY`
 - Ollama: `OLLAMA_BASE_URL`, `OLLAMA_HOST`
 - NVIDIA: `NVIDIA_API_KEY`, `NVIDIA_MODEL_CATALOG`
-- LiteLLM: `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `LITELLM_MODEL`
+- LiteLLM: `LITELLM_BASE_URL`, `LITE_LLM_MASTER_KEY`, `LITELLM_API_KEY`, `LITELLM_MODEL`
 - Memory: `MEMORY_INACTIVITY_MINUTES`, `MEMORY_COMPACTION_TIMEOUT_SECONDS`, `MEMORY_RECENT_NOTES_LIMIT`, `MEMORY_TIER1_KEEP`
 - MCP endpoint: `MCP_AUTH_TOKEN`, `MCP_ADMIN_TOKEN` (see [MCP Endpoint](#mcp-endpoint); unset = `/mcp` disabled)
 

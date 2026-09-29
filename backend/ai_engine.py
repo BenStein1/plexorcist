@@ -74,8 +74,9 @@ async def litellm_models(settings: Settings) -> tuple[list[str], str | None]:
     if not base_url:
         return [], "not_configured"
     headers = {}
-    if settings.litellm_api_key and settings.litellm_api_key.strip():
-        headers["Authorization"] = f"Bearer {settings.litellm_api_key.strip()}"
+    api_key = settings.effective_litellm_api_key
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{base_url}/models", headers=headers)

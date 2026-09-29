@@ -30,6 +30,7 @@ def test_effective_ollama_base_url_fallback(monkeypatch):
 def test_effective_litellm_base_url_adds_v1():
     assert Settings(litellm_base_url="https://models.example/llm").effective_litellm_base_url == "https://models.example/llm/v1"
     assert Settings(litellm_base_url="https://models.example/v1/").effective_litellm_base_url == "https://models.example/v1"
+    assert Settings(lite_llm_master_key="master-key").effective_litellm_api_key == "master-key"
 
 
 def test_blocked_users_path_defaults_to_local_json_file():
