@@ -9,6 +9,7 @@ from html import escape
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -1215,16 +1216,29 @@ async def index(
     admin_engine_js = ""
     if current_user and current_user.is_admin:
         admin_engine_html = """
-      <div class="panel admin-engine" id="admin-engine">
+      <button class="admin-settings-button" id="admin-settings-open" type="button" aria-label="Open settings" title="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Zm9 4.55v-1.6l-2.08-.62a7.35 7.35 0 0 0-.64-1.54l1.07-1.9-1.13-1.13-1.9 1.07a7.35 7.35 0 0 0-1.54-.64L14.16 2.4h-1.6l-.62 2.08a7.35 7.35 0 0 0-1.54.64L8.5 4.05 7.37 5.18l1.07 1.9a7.35 7.35 0 0 0-.64 1.54l-2.08.62v1.6l2.08.62c.13.54.35 1.06.64 1.54l-1.07 1.9 1.13 1.13 1.9-1.07c.48.29 1 .51 1.54.64l.62 2.08h1.6l.62-2.08c.54-.13 1.06-.35 1.54-.64l1.9 1.07 1.13-1.13-1.07-1.9c.29-.48.51-1 .64-1.54L21 12.8Z"/></svg>
+      </button>
+      <dialog class="admin-settings-dialog" id="admin-settings-dialog" aria-labelledby="admin-settings-title">
+        <div class="admin-settings-heading">
+          <h2 id="admin-settings-title">Settings</h2>
+          <button class="admin-settings-close" id="admin-settings-close" type="button" aria-label="Close settings">×</button>
+        </div>
         <label for="admin-engine-select">Chat engine</label>
         <select id="admin-engine-select">
           <option value="configured">Configured engine</option>
           <option value="nvidia">NVIDIA fallback</option>
         </select>
-        <span id="admin-engine-status"></span>
-      </div>
+        <p id="admin-engine-status" role="status"></p>
+      </dialog>
 """
         admin_engine_js = """
+      const adminSettingsDialog = document.getElementById("admin-settings-dialog");
+      document.getElementById("admin-settings-open")?.addEventListener("click", async () => {
+        adminSettingsDialog?.showModal();
+        await loadAdminEngine();
+      });
+      document.getElementById("admin-settings-close")?.addEventListener("click", () => adminSettingsDialog?.close());
       const adminEngineSelect = document.getElementById("admin-engine-select");
       const adminEngineStatus = document.getElementById("admin-engine-status");
       async function loadAdminEngine() {
@@ -1232,6 +1246,9 @@ async def index(
         if (!res.ok) return;
         const data = await res.json();
         if (adminEngineSelect) adminEngineSelect.value = data.selected || "configured";
+        const nvidiaOption = adminEngineSelect?.querySelector('option[value="nvidia"]');
+        if (nvidiaOption) nvidiaOption.disabled = !data.nvidia?.available;
+        if (!data.nvidia?.available && adminEngineStatus) adminEngineStatus.textContent = "NVIDIA_API_KEY is not configured";
       }
       adminEngineSelect?.addEventListener("change", async () => {
         adminEngineSelect.disabled = true;
@@ -1250,7 +1267,6 @@ async def index(
           await loadAdminEngine();
         } finally { adminEngineSelect.disabled = false; }
       });
-      loadAdminEngine();
 """
     if dev_mode:
         dev_panel_html = """
@@ -1491,6 +1507,75 @@ async def index(
       .hero {{
         padding: 18px 20px 16px;
         background: linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(17, 24, 39, 0.8));
+      }}
+      .hero.admin-settings-enabled {{
+        padding-right: 72px;
+      }}
+      .admin-settings-button {{
+        position: absolute;
+        z-index: 2;
+        top: 12px;
+        right: 12px;
+        display: grid;
+        place-items: center;
+        width: 42px;
+        height: 42px;
+        padding: 9px;
+        border: 1px solid var(--line);
+        background: rgba(17, 24, 39, 0.75);
+        color: var(--text);
+        box-shadow: none;
+        cursor: pointer;
+      }}
+      .admin-settings-button svg {{
+        width: 22px;
+        height: 22px;
+        fill: currentColor;
+      }}
+      .admin-settings-dialog {{
+        width: min(420px, calc(100vw - 36px));
+        box-sizing: border-box;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: #111827;
+        color: var(--text);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+      }}
+      .admin-settings-dialog::backdrop {{
+        background: rgba(2, 6, 23, 0.72);
+        backdrop-filter: blur(4px);
+      }}
+      .admin-settings-heading {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 18px;
+      }}
+      .admin-settings-heading h2 {{
+        margin: 0;
+        font-size: 1.2rem;
+      }}
+      .admin-settings-dialog label {{
+        display: block;
+        margin-bottom: 8px;
+      }}
+      .admin-settings-dialog select {{
+        width: 100%;
+      }}
+      .admin-settings-dialog p {{
+        min-height: 1.2em;
+        margin: 10px 0 0;
+        color: var(--muted);
+      }}
+      .admin-settings-close {{
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        background: transparent;
+        color: var(--text);
+        box-shadow: none;
+        font-size: 1.5rem;
       }}
       .hero-brand {{
         display: grid;
@@ -1931,7 +2016,7 @@ async def index(
   </head>
   <body>
     <main class="{main_class}">
-      <div class="panel hero">
+      <div class="panel hero {('admin-settings-enabled' if current_user and current_user.is_admin else '')}">
         <div class="hero-brand">
           <img class="hero-logo" src="/static/images/Plexorcist-icon.png?v=3" alt="Plexorcist icon">
           <div class="hero-text">
@@ -1939,9 +2024,9 @@ async def index(
             <p>{hero_copy}</p>
           </div>
         </div>
+{admin_engine_html}
       </div>
 {dev_panel_html}
-{admin_engine_html}
 {auth_panel_html}
       <div id="transcript" class="panel chat"></div>
       <div class="panel composer-panel">
@@ -2461,14 +2546,27 @@ async def set_dev_user(
     }
 
 
-def _require_admin_same_origin(request: Request, user: UserContext) -> None:
+def _require_admin_same_origin(request: Request, user: UserContext, settings: Settings) -> None:
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
         raise HTTPException(status_code=415, detail="JSON required")
     origin = request.headers.get("origin")
-    if not origin or origin.rstrip("/") != str(request.base_url).rstrip("/"):
+    expected = urlsplit(settings.base_url)
+    actual = urlsplit(origin or "")
+    if (
+        not origin
+        or not expected.scheme
+        or not expected.netloc
+        or actual.scheme.lower() != expected.scheme.lower()
+        or actual.netloc.lower() != expected.netloc.lower()
+        or actual.path not in {"", "/"}
+        or actual.query
+        or actual.fragment
+        or actual.username
+        or actual.password
+    ):
         raise HTTPException(status_code=403, detail="Same-origin request required")
 
 
@@ -2489,7 +2587,7 @@ async def put_admin_ai_engine(
     user: UserContext = Depends(get_user_context),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    _require_admin_same_origin(request, user)
+    _require_admin_same_origin(request, user, settings)
     try:
         return set_engine(settings, ConversationStore(settings.database_url), payload.engine)
     except ValueError as exc:

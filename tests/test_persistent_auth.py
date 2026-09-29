@@ -85,7 +85,7 @@ def test_session_cookie_attributes_follow_public_url():
 @pytest.mark.asyncio
 async def test_admin_engine_routes_enforce_admin_and_same_origin(tmp_path):
     db = f"sqlite:///{tmp_path / 'engine.db'}"
-    settings = Settings(database_url=db, base_url="http://testserver", nvidia_api_key="test-key")
+    settings = Settings(database_url=db, base_url="https://plexorcist.example", nvidia_api_key="test-key")
     admin = UserContext(user_id="admin", username="admin", display_name="Admin", is_admin=True)
     ordinary = UserContext(user_id="user", username="user", display_name="User", is_admin=False)
     with pytest.raises(HTTPException) as denied:
@@ -97,21 +97,59 @@ async def test_admin_engine_routes_enforce_admin_and_same_origin(tmp_path):
             "type": "http", "http_version": "1.1", "method": "PUT", "scheme": "http",
             "path": "/api/admin/ai-engine", "raw_path": b"/api/admin/ai-engine", "query_string": b"",
             "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()],
-            "server": ("testserver", 80), "client": ("127.0.0.1", 1234),
+            "server": ("127.0.0.1", 5500), "client": ("127.0.0.1", 1234),
         })
 
     payload = main.AiEngineRequest(engine="nvidia")
     with pytest.raises(HTTPException) as denied:
         await main.put_admin_ai_engine(payload, request({"Content-Type": "application/json"}), admin, settings)
     assert denied.value.status_code == 403
+    with pytest.raises(HTTPException) as denied:
+        await main.put_admin_ai_engine(
+            payload,
+            request({"Content-Type": "application/json", "Origin": "https://attacker.example"}),
+            admin,
+            settings,
+        )
+    assert denied.value.status_code == 403
     result = await main.put_admin_ai_engine(
         payload,
-        request({"Content-Type": "application/json", "Origin": "http://testserver"}),
+        request({"Content-Type": "application/json", "Origin": "https://plexorcist.example"}),
         admin,
         settings,
     )
     assert result["selected"] == "nvidia"
     assert selected_engine(settings, ConversationStore(db)) == "nvidia"
+
+
+@pytest.mark.asyncio
+async def test_settings_gear_is_admin_only(monkeypatch, tmp_path):
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'ui.db'}", auth_mode="plex_oauth")
+    request = Request({
+        "type": "http", "http_version": "1.1", "method": "GET", "scheme": "https",
+        "path": "/", "raw_path": b"/", "query_string": b"",
+        "headers": [(b"host", b"plexorcist.example")],
+        "server": ("plexorcist.example", 443), "client": ("127.0.0.1", 1234),
+    })
+    admin = UserContext(user_id="admin", username="admin", display_name="Admin", is_admin=True)
+    ordinary = UserContext(user_id="user", username="user", display_name="User", is_admin=False)
+
+    async def render_admin(_request, _settings):
+        return admin
+
+    monkeypatch.setattr(main, "_get_current_user_optional", render_admin)
+    admin_html = (await main.index(request, settings)).body.decode()
+    assert 'id="admin-settings-open"' in admin_html
+    assert 'id="admin-settings-dialog"' in admin_html
+    assert 'class="panel admin-engine"' not in admin_html
+
+    async def render_ordinary(_request, _settings):
+        return ordinary
+
+    monkeypatch.setattr(main, "_get_current_user_optional", render_ordinary)
+    ordinary_html = (await main.index(request, settings)).body.decode()
+    assert 'id="admin-settings-open"' not in ordinary_html
+    assert 'id="admin-settings-dialog"' not in ordinary_html
 
 
 @pytest.mark.asyncio
