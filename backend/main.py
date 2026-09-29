@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from backend.agent import ConciergeAgent
@@ -29,6 +29,7 @@ from backend.auth_context import (
     get_user_context_provider,
 )
 from backend.auth_store import PlexAuthSessionStore
+from backend.ai_engine import engine_state, selected_engine, set_engine
 from backend.config import Settings, get_settings
 from backend.logging import AuditLogger, configure_logging
 from backend.models import (
@@ -36,6 +37,7 @@ from backend.models import (
     ChatRequest,
     ChatResponse,
     DevImpersonationRequest,
+    AiEngineRequest,
     PlexAuthSession,
     UserContext,
 )
@@ -152,6 +154,11 @@ async def _lifespan(app: FastAPI):
         try:
             yield
         finally:
+            chat_tasks = [task for task in _background_tasks if task.get_name() == "chat-turn"]
+            for task in chat_tasks:
+                task.cancel()
+            if chat_tasks:
+                await asyncio.gather(*chat_tasks, return_exceptions=True)
             if _MEMORY_SWEEP_TASK is not None:
                 _MEMORY_SWEEP_TASK.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -187,13 +194,21 @@ _NILBOG_PUSHBACK_TERMS = (
     "hissing tape",
     "hissing tapes",
 )
-def _build_llm_client(settings: Settings, usage_recorder: UsageRecorder | None) -> LlmClient | None:
+def _build_llm_client(settings: Settings, usage_recorder: UsageRecorder | None, store: ConversationStore | None = None) -> LlmClient | None:
+    provider = settings.llm_provider
+    model = settings.effective_llm_model
+    if store is not None and selected_engine(settings, store) == "nvidia":
+        provider = "nvidia"
     return build_llm_client(
         LlmProviderConfig(
-            provider=settings.llm_provider,
-            model=settings.effective_llm_model,
+            provider=provider,
+            model=model,
             timeout_seconds=float(max(30, int(settings.effective_llm_request_timeout_seconds))),
             openai_api_key=settings.openai_api_key,
+            nvidia_api_key=settings.nvidia_api_key,
+            nvidia_catalog_path=settings.nvidia_catalog_path,
+            nvidia_state_get=(lambda key: store.get_user_flag("__global__", key)) if store is not None else None,
+            nvidia_state_set=(lambda key, value: store.set_user_flag("__global__", key, value)) if store is not None else None,
             anthropic_api_key=settings.anthropic_api_key,
             ollama_base_url=settings.effective_ollama_base_url,
         ),
@@ -427,6 +442,13 @@ _shared_users_cache: dict[str, Any] = {"ids": set(), "names": set(), "fetched_at
 _background_tasks: set[asyncio.Task] = set()
 
 
+def _discard_background_task(task: asyncio.Task) -> None:
+    _background_tasks.discard(task)
+    if not task.cancelled():
+        with contextlib.suppress(Exception):
+            task.exception()
+
+
 def _fire_and_forget(coro: Any) -> None:
     task = asyncio.ensure_future(coro)
     _background_tasks.add(task)
@@ -490,7 +512,7 @@ def build_agent(settings: Settings, user: UserContext | None = None) -> tuple[Co
         ConciergeAgent(
             bridge,
             ombi_continue_url=settings.ombi_continue_url,
-            llm_client=_build_llm_client(settings, store.record_openai_token_usage),
+            llm_client=_build_llm_client(settings, store.record_openai_token_usage, store),
             admin_label=admin_label,
             prowl=prowl,
             movie_direct_source_enabled=settings.movie_direct_source_enabled,
@@ -511,6 +533,18 @@ def _render_auth_greeting(user: UserContext | None, settings: Settings) -> str:
 
 def _plex_cookie_provider(settings: Settings) -> PlexOAuthUserContextProvider:
     return PlexOAuthUserContextProvider(settings)
+
+
+def _session_cookie_kwargs(settings: Settings, max_age: int | None = None) -> dict[str, Any]:
+    lifetime = PlexAuthSessionStore.SESSION_MAX_AGE_SECONDS if max_age is None else max(0, max_age)
+    return {
+        "max_age": lifetime,
+        "expires": lifetime,
+        "httponly": True,
+        "samesite": "lax",
+        "path": "/",
+        "secure": settings.base_url.lower().startswith("https://"),
+    }
 
 
 async def _maybe_send_login_notice(
@@ -710,7 +744,7 @@ async def _summarize_inactive_conversation(
             reason="local_summary_only",
             source=source,
         )
-    client = _build_llm_client(settings, store.record_openai_token_usage)
+    client = _build_llm_client(settings, store.record_openai_token_usage, store)
     if client is None:
         return {"status": "skipped_no_api_key", "notes_added": 0}
     transcript = [
@@ -1177,6 +1211,47 @@ async def index(
     )
     dev_panel_html = ""
     dev_panel_js = ""
+    admin_engine_html = ""
+    admin_engine_js = ""
+    if current_user and current_user.is_admin:
+        admin_engine_html = """
+      <div class="panel admin-engine" id="admin-engine">
+        <label for="admin-engine-select">Chat engine</label>
+        <select id="admin-engine-select">
+          <option value="configured">Configured engine</option>
+          <option value="nvidia">NVIDIA fallback</option>
+        </select>
+        <span id="admin-engine-status"></span>
+      </div>
+"""
+        admin_engine_js = """
+      const adminEngineSelect = document.getElementById("admin-engine-select");
+      const adminEngineStatus = document.getElementById("admin-engine-status");
+      async function loadAdminEngine() {
+        const res = await fetch("/api/admin/ai-engine");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (adminEngineSelect) adminEngineSelect.value = data.selected || "configured";
+      }
+      adminEngineSelect?.addEventListener("change", async () => {
+        adminEngineSelect.disabled = true;
+        try {
+          const res = await fetch("/api/admin/ai-engine", {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({engine: adminEngineSelect.value})
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || "Could not save engine");
+          adminEngineSelect.value = data.selected;
+          if (adminEngineStatus) adminEngineStatus.textContent = "Saved";
+        } catch (error) {
+          if (adminEngineStatus) adminEngineStatus.textContent = error.message;
+          await loadAdminEngine();
+        } finally { adminEngineSelect.disabled = false; }
+      });
+      loadAdminEngine();
+"""
     if dev_mode:
         dev_panel_html = """
       <div class="panel dev-switch" id="dev-switch" hidden>
@@ -1319,7 +1394,7 @@ async def index(
     if dev_mode:
         startup_js += "      loadDevUsers();\n      loadDevUser();\n"
     startup_js += load_greeting_js
-    return f"""
+    response = HTMLResponse(f"""
 <!doctype html>
 <html lang="en">
   <head>
@@ -1866,6 +1941,7 @@ async def index(
         </div>
       </div>
 {dev_panel_html}
+{admin_engine_html}
 {auth_panel_html}
       <div id="transcript" class="panel chat"></div>
       <div class="panel composer-panel">
@@ -1893,6 +1969,7 @@ async def index(
       const isShabbos = {shabbos_js};
       if (isShabbos) document.body.classList.add("shabbos");
 {dev_panel_js}
+{admin_engine_js}
 
       function autoResizeComposer() {{
         if (!messageBox) return;
@@ -2009,7 +2086,8 @@ async def index(
           const res = await fetch("/api/chat", {{
             method: "POST",
             headers: {{
-              "Content-Type": "application/json"
+              "Content-Type": "application/json",
+              "Accept": "application/x-ndjson"
             }},
             body: JSON.stringify(payload)
           }});
@@ -2021,7 +2099,25 @@ async def index(
             }} catch (_) {{}}
             throw new Error(`Chat request failed: ${{detail}}`);
           }}
-          const data = await res.json();
+          const reader = res.body?.getReader();
+          if (!reader) throw new Error("Chat response did not provide a stream");
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let data = null;
+          while (true) {{
+            const chunk = await reader.read();
+            buffer += decoder.decode(chunk.value || new Uint8Array(), {{stream: !chunk.done}});
+            const lines = buffer.split("\\n");
+            buffer = lines.pop() || "";
+            for (const line of lines) {{
+              if (!line.trim()) continue;
+              const event = JSON.parse(line);
+              if (event.type === "error") throw new Error(event.detail || "Chat request failed");
+              if (event.type === "result") data = event.data;
+            }}
+            if (chunk.done) break;
+          }}
+          if (!data) throw new Error("Chat response did not complete");
           conversationId = data.conversation_id;
           const messages = data?.state?.messages;
           if (!Array.isArray(messages)) {{
@@ -2058,7 +2154,18 @@ async def index(
     </script>
   </body>
 </html>
-"""
+""")
+    if authenticated and settings.is_plex_oauth_mode():
+        provider = _plex_cookie_provider(settings)
+        session_id = provider._verify_cookie(request.cookies.get("plexorcist_session"))
+        session = PlexAuthSessionStore(settings.database_url).get(session_id) if session_id else None
+        if session and not PlexAuthSessionStore.is_expired(session):
+            response.set_cookie(
+                "plexorcist_session",
+                provider.sign_cookie(session.session_id),
+                **_session_cookie_kwargs(settings, PlexAuthSessionStore.remaining_lifetime(session)),
+            )
+    return response
 
 
 @app.get("/auth/plex/start")
@@ -2076,8 +2183,18 @@ async def plex_auth_start(request: Request, settings: Settings = Depends(get_set
         raise HTTPException(status_code=502, detail="Failed to create Plex auth PIN")
 
     session_id = request.cookies.get("plexorcist_session")
+    session_max_age = PlexAuthSessionStore.SESSION_MAX_AGE_SECONDS
     if session_id:
-        session_id = cookie_provider._verify_cookie(session_id) or str(uuid4())
+        verified = cookie_provider._verify_cookie(session_id)
+        if verified:
+            existing = PlexAuthSessionStore(settings.database_url).get(verified)
+            if existing and not PlexAuthSessionStore.is_expired(existing):
+                session_id = verified
+                session_max_age = PlexAuthSessionStore.remaining_lifetime(existing)
+            else:
+                session_id = str(uuid4())
+        else:
+            session_id = str(uuid4())
     else:
         session_id = str(uuid4())
 
@@ -2089,8 +2206,8 @@ async def plex_auth_start(request: Request, settings: Settings = Depends(get_set
         product_name=settings.plex_auth_product_name,
     )
     response = RedirectResponse(auth_url, status_code=303)
-    response.set_cookie("plexorcist_session", cookie_provider.sign_cookie(session_id), httponly=True, samesite="lax")
-    response.set_cookie("plexorcist_pending_pin", cookie_provider.sign_cookie(pin_id), httponly=True, samesite="lax")
+    response.set_cookie("plexorcist_session", cookie_provider.sign_cookie(session_id), **_session_cookie_kwargs(settings, session_max_age))
+    response.set_cookie("plexorcist_pending_pin", cookie_provider.sign_cookie(pin_id), httponly=True, samesite="lax", path="/", secure=settings.base_url.lower().startswith("https://"))
     return response
 
 
@@ -2206,7 +2323,7 @@ async def plex_auth_callback(request: Request, settings: Settings = Depends(get_
             },
         )
     response = RedirectResponse("/", status_code=303)
-    response.set_cookie("plexorcist_session", cookie_provider.sign_cookie(session_id), httponly=True, samesite="lax")
+    response.set_cookie("plexorcist_session", cookie_provider.sign_cookie(session_id), **_session_cookie_kwargs(settings))
     response.delete_cookie("plexorcist_pending_pin")
     return response
 
@@ -2344,6 +2461,41 @@ async def set_dev_user(
     }
 
 
+def _require_admin_same_origin(request: Request, user: UserContext) -> None:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(status_code=415, detail="JSON required")
+    origin = request.headers.get("origin")
+    if not origin or origin.rstrip("/") != str(request.base_url).rstrip("/"):
+        raise HTTPException(status_code=403, detail="Same-origin request required")
+
+
+@app.get("/api/admin/ai-engine")
+async def get_admin_ai_engine(
+    user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return engine_state(settings, ConversationStore(settings.database_url))
+
+
+@app.put("/api/admin/ai-engine")
+async def put_admin_ai_engine(
+    payload: AiEngineRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    _require_admin_same_origin(request, user)
+    try:
+        return set_engine(settings, ConversationStore(settings.database_url), payload.engine)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 async def _shabbos_chat(payload: ChatRequest, user: UserContext, settings: Settings) -> ChatResponse:
     """The deterministic turn. No agent, no prompt, no model client -- ever.
 
@@ -2397,8 +2549,7 @@ async def _shabbos_chat(payload: ChatRequest, user: UserContext, settings: Setti
     return chat_response
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(
+async def _chat_json(
     payload: ChatRequest,
     user: UserContext = Depends(get_user_context),
     settings: Settings = Depends(get_settings),
@@ -2535,3 +2686,37 @@ async def chat(
             },
         )
         raise HTTPException(status_code=500, detail=f"chat_server_error:{type(exc).__name__}") from exc
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(
+    payload: ChatRequest,
+    request: Request = None,
+    user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
+) -> ChatResponse | StreamingResponse:
+    if request is None or "application/x-ndjson" not in (request.headers.get("accept") or ""):
+        return await _chat_json(payload, user, settings)
+    task = asyncio.create_task(_chat_json(payload, user, settings), name="chat-turn")
+    _background_tasks.add(task)
+    task.add_done_callback(_discard_background_task)
+
+    async def events():
+        try:
+            yield '{"type":"heartbeat"}\n'
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=15)
+                if not done:
+                    yield '{"type":"heartbeat"}\n'
+            try:
+                result = task.result()
+                yield json.dumps({"type": "result", "data": result.model_dump(mode="json")}) + "\n"
+            except HTTPException as exc:
+                yield json.dumps({"type": "error", "detail": exc.detail}) + "\n"
+            except Exception:
+                yield '{"type":"error","detail":"chat_server_error"}\n'
+        except asyncio.CancelledError:
+            # The strongly referenced task continues after a browser disconnect.
+            return
+
+    return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

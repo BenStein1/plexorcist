@@ -78,8 +78,10 @@ def no_ai(monkeypatch):
     monkeypatch.setattr(main, "build_llm_client", spy("main.build_llm_client"))
     monkeypatch.setattr(openai, "AsyncOpenAI", spy("openai.AsyncOpenAI"))
     monkeypatch.setattr(anthropic, "AsyncAnthropic", spy("anthropic.AsyncAnthropic"))
-    for provider in ("OpenAIProviderClient", "AnthropicProviderClient", "OllamaProviderClient"):
-        monkeypatch.setattr(getattr(llm, provider), "generate_response", spy(f"{provider}.generate_response"), raising=False)
+    for provider in ("OpenAIProviderClient", "AnthropicProviderClient", "OllamaProviderClient", "NvidiaProviderClient"):
+        provider_type = getattr(llm, provider, None)
+        if provider_type is not None:
+            monkeypatch.setattr(provider_type, "generate_response", spy(f"{provider}.generate_response"), raising=False)
     return calls
 
 

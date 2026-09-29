@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from backend.models import PlexAuthSession
 
 
 class PlexAuthSessionStore:
+    SESSION_MAX_AGE_SECONDS = 180 * 24 * 60 * 60
     def __init__(self, database_url: str) -> None:
         self.db_path = self._resolve_path(database_url)
         self._init_db()
@@ -88,6 +89,16 @@ class PlexAuthSessionStore:
             created_at=datetime.fromisoformat(row[7]),
             updated_at=datetime.fromisoformat(row[8]),
         )
+
+    @classmethod
+    def remaining_lifetime(cls, session: PlexAuthSession, now: datetime | None = None) -> int:
+        current = now or datetime.utcnow()
+        age = max(0.0, (current - session.updated_at).total_seconds())
+        return max(0, cls.SESSION_MAX_AGE_SECONDS - int(age))
+
+    @classmethod
+    def is_expired(cls, session: PlexAuthSession, now: datetime | None = None) -> bool:
+        return cls.remaining_lifetime(session, now) <= 0
 
     def delete(self, session_id: str) -> None:
         with self._connect() as conn:

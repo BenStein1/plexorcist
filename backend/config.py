@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     )
     prowl_api_key: str | None = env_field(default=None, env="PROWL_API_KEY")
     openai_api_key: str | None = env_field(default=None, env="OPENAI_API_KEY")
+    nvidia_api_key: str | None = env_field(default=None, env="NVIDIA_API_KEY")
+    nvidia_catalog_path: str | None = env_field(default=None, env="NVIDIA_MODEL_CATALOG")
     login_notify_enabled: bool = env_field(default=True, env="LOGIN_NOTIFY_ENABLED")
     login_notify_scope: Literal["all", "admin_only", "none"] = env_field(default="all", env="LOGIN_NOTIFY_SCOPE")
     login_notify_include_ip: bool = env_field(default=False, env="LOGIN_NOTIFY_INCLUDE_IP")

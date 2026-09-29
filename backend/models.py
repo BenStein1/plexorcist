@@ -97,6 +97,10 @@ class DevImpersonationRequest(BaseModel):
     is_admin: bool = False
 
 
+class AiEngineRequest(BaseModel):
+    engine: str
+
+
 class ToolCallRecord(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)

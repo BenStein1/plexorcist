@@ -322,7 +322,7 @@ class PlexOAuthUserContextProvider:
             raise HTTPException(status_code=401, detail="Not signed in with Plex")
 
         session = self.session_store.get(str(session_id))
-        if session is None:
+        if session is None or self.session_store.is_expired(session):
             raise HTTPException(status_code=401, detail="Not signed in with Plex")
 
         return UserContext(

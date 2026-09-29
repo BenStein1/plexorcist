@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import time
+from email.utils import parsedate_to_datetime
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -35,6 +38,15 @@ UsageRecorder = Callable[[dict[str, Any]], None]
 
 class LlmConfigurationError(ValueError):
     pass
+
+
+class NvidiaProviderError(httpx.HTTPError):
+    """Provider failure with a safe status code for the agent's error path."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, reason: str = "provider_error"):
+        super().__init__(message)
+        self.status_code = status_code
+        self.reason = reason
 
 
 # --- Neutral tool shapes ------------------------------------------------------
@@ -137,6 +149,10 @@ class LlmProviderConfig:
     anthropic_api_key: str | None = None
     ollama_base_url: str | None = None
     max_output_tokens: int = 4096
+    nvidia_api_key: str | None = None
+    nvidia_catalog_path: str | None = None
+    nvidia_state_get: Callable[[str], str | None] | None = None
+    nvidia_state_set: Callable[[str, str], None] | None = None
 
 
 ProviderBuilder = Callable[[LlmProviderConfig, UsageRecorder | None], LlmClient | None]
@@ -612,6 +628,243 @@ class OllamaProviderClient:
             logger.exception("Failed to record Ollama token usage")
 
 
+# --- NVIDIA adapter (OpenAI-compatible chat completions) --------------------
+
+
+NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_COOLDOWN_SECONDS = 900.0
+NVIDIA_ENDPOINT_COOLDOWN_MAX = 300.0
+_NVIDIA_PROFILES: dict[str, dict[str, Any]] = {
+    "moonshotai/kimi-k3": {"temperature": 1.0, "max_tokens": 65536, "reasoning_effort": "max"},
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+        "temperature": 1.0, "top_p": 0.95, "max_tokens": 32768,
+        "chat_template_kwargs": {"enable_thinking": True, "force_nonempty_content": True},
+    },
+    "nvidia/nemotron-3-super-120b-a12b": {
+        "temperature": 1.0, "top_p": 0.95, "max_tokens": 32768,
+        "chat_template_kwargs": {"enable_thinking": True, "force_nonempty_content": True},
+    },
+    "z-ai/glm-5.3": {
+        "temperature": 0.5, "max_tokens": 32768, "reasoning_effort": "max",
+        "chat_template_kwargs": {"clear_thinking": True},
+    },
+    "z-ai/glm-5.3-flash": {"temperature": 1.0, "max_tokens": 32768, "reasoning_effort": "max"},
+}
+
+
+def _nvidia_retry_after(value: str | None) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, parsedate_to_datetime(str(value)).timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return 30.0
+
+
+class NvidiaProviderClient:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        catalog_path: str | None = None,
+        state_get: Callable[[str], str | None] | None = None,
+        state_set: Callable[[str, str], None] | None = None,
+        usage_recorder: UsageRecorder | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.catalog_path = catalog_path
+        self.state_get = state_get
+        self.state_set = state_set
+        self.usage_recorder = usage_recorder
+        self._active_model = model
+
+    def _state(self, key: str) -> dict[str, Any]:
+        if self.state_get is None:
+            return {}
+        try:
+            value = json.loads(self.state_get(key) or "{}")
+            if not isinstance(value, dict):
+                return {}
+            until = value.get("until")
+            if until is not None and (not isinstance(until, (int, float)) or not math.isfinite(until)):
+                return {}
+            return value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def _set_state(self, key: str, value: dict[str, Any]) -> None:
+        if self.state_set is not None:
+            self.state_set(key, json.dumps(value, separators=(",", ":"), sort_keys=True))
+
+    def _cooldown_until(self, model: str) -> float:
+        return float(self._state(f"nvidia.cooldown.{model}").get("until") or 0)
+
+    def _mark_failure(self, model: str, status: int | None, reason: str, *, delay: float = NVIDIA_COOLDOWN_SECONDS) -> None:
+        self._set_state(
+            f"nvidia.cooldown.{model}",
+            {"until": time.time() + delay, "status": status, "reason": reason[:80]},
+        )
+
+    def _endpoint_cooldown(self) -> float:
+        return float(self._state("nvidia.endpoint_cooldown").get("until") or 0)
+
+    def _mark_endpoint_cooldown(self, status: int | None, reason: str, delay: float) -> None:
+        self._set_state(
+            "nvidia.endpoint_cooldown",
+            {"until": time.time() + max(0.0, delay), "status": status, "reason": reason[:80]},
+        )
+
+    def _models(self) -> tuple[str, ...]:
+        from clients.nvidia_catalog import nvidia_models
+
+        models = list(nvidia_models(self.catalog_path))
+        return tuple(models)
+
+    def _tool_payload(self, tool: ToolSchema) -> dict[str, Any]:
+        return {"type": "function", "function": {"name": tool.name, "description": tool.description, "parameters": tool.parameters}}
+
+    def _build_messages(self, instructions: str, conversation: list[ConversationItem]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        if instructions.strip():
+            messages.append({"role": "system", "content": instructions})
+        for turn in conversation:
+            if isinstance(turn, ChatTurn):
+                messages.append({"role": turn.role, "content": turn.text})
+            elif isinstance(turn, AssistantTurn):
+                native = turn.native
+                if isinstance(native, dict):
+                    messages.append(native)
+            elif isinstance(turn, ToolResultsTurn):
+                for result in turn.results:
+                    messages.append({"role": "tool", "tool_call_id": result.call_id, "content": _tool_result_payload(result)})
+        return messages
+
+    def _payload(self, model: str, instructions: str, conversation: list[ConversationItem], tools: list[ToolSchema]) -> dict[str, Any]:
+        profile = _NVIDIA_PROFILES.get(model, {"temperature": 0.3, "max_tokens": 32768})
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": self._build_messages(instructions, conversation),
+            "tools": [self._tool_payload(tool) for tool in tools],
+            "stream": False,
+            **profile,
+        }
+        if not tools:
+            payload.pop("tools")
+        return payload
+
+    def _parse_response(self, data: Any, tools: list[ToolSchema], usage_context: dict[str, Any]) -> LlmResponse:
+        if not isinstance(data, dict) or not isinstance(data.get("choices"), list) or not data["choices"]:
+            raise NvidiaProviderError("NVIDIA returned an invalid response", reason="invalid_response")
+        choice = data["choices"][0]
+        if not isinstance(choice, dict):
+            raise NvidiaProviderError("NVIDIA returned an invalid response", reason="invalid_response")
+        message = choice.get("message")
+        finish = choice.get("finish_reason")
+        if not isinstance(message, dict) or message.get("role") != "assistant" or finish not in {"stop", "tool_calls"}:
+            raise NvidiaProviderError("NVIDIA returned an invalid response", reason="invalid_response")
+        content = message.get("content")
+        if content is not None and not isinstance(content, str):
+            raise NvidiaProviderError("NVIDIA returned invalid message content", reason="invalid_response")
+        schemas = {tool.name: tool.parameters for tool in tools}
+        calls: list[ToolCall] = []
+        seen: set[str] = set()
+        raw_calls = message.get("tool_calls") or []
+        if not isinstance(raw_calls, list) or finish == "tool_calls" and not raw_calls:
+            raise NvidiaProviderError("NVIDIA returned invalid tool calls", reason="invalid_response")
+        for index, raw_call in enumerate(raw_calls):
+            function = raw_call.get("function") if isinstance(raw_call, dict) else None
+            call_id = raw_call.get("id") if isinstance(raw_call, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            arguments = function.get("arguments") if isinstance(function, dict) else None
+            if not isinstance(raw_call, dict) or not isinstance(call_id, str) or not call_id or call_id in seen or raw_call.get("type") != "function":
+                raise NvidiaProviderError("NVIDIA returned invalid tool calls", reason="invalid_response")
+            if not isinstance(name, str) or name not in schemas:
+                raise NvidiaProviderError("NVIDIA returned an unknown tool", reason="invalid_response")
+            if arguments is None:
+                arguments_json = "{}"
+            elif isinstance(arguments, (str, dict)):
+                arguments_json = _arguments_to_json(arguments)
+            else:
+                raise NvidiaProviderError("NVIDIA returned invalid tool arguments", reason="invalid_response")
+            try:
+                parsed = json.loads(arguments_json or "{}", parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise NvidiaProviderError("NVIDIA returned invalid tool arguments", reason="invalid_response") from exc
+            if not isinstance(parsed, dict):
+                raise NvidiaProviderError("NVIDIA returned invalid tool arguments", reason="invalid_response")
+            seen.add(call_id)
+            calls.append(ToolCall(call_id=call_id, name=name, arguments_json=arguments_json, raw=raw_call))
+        if not calls and not (content or "").strip():
+            raise NvidiaProviderError("NVIDIA returned an empty response", reason="invalid_response")
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        self._record_usage(data, usage, usage_context)
+        return LlmResponse(text=(content or "").strip(), tool_calls=calls, native_turn=message, raw=data)
+
+    def _record_usage(self, data: dict[str, Any], usage: dict[str, Any], usage_context: dict[str, Any]) -> None:
+        if self.usage_recorder is None or not usage:
+            return
+        input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        try:
+            self.usage_recorder({
+            "provider": "nvidia", "model": self._active_model,
+            "resolved_model": str(data.get("model") or self._active_model),
+            "input_tokens": input_tokens, "cached_input_tokens": 0,
+            "output_tokens": output_tokens, "total_tokens": int(usage.get("total_tokens") or input_tokens + output_tokens),
+            **usage_context,
+            })
+        except Exception:
+            logger.exception("Failed to record NVIDIA token usage")
+
+    async def generate_response(self, *, instructions: str, conversation: list[ConversationItem], tools: list[ToolSchema], usage_context: dict[str, Any] | None = None, tool_choice: str | None = None) -> LlmResponse:
+        if not self.api_key:
+            raise LlmConfigurationError("NVIDIA_API_KEY is required for the NVIDIA provider.")
+        if self._endpoint_cooldown() > time.time():
+            raise NvidiaProviderError("NVIDIA is temporarily unavailable", reason="endpoint_cooldown")
+        last_error: NvidiaProviderError | None = None
+        rate_limited = False
+        alternate_after_rate_limit = False
+        timeout = httpx.Timeout(connect=15.0, write=30.0, read=None, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout, headers={"Authorization": f"Bearer {self.api_key}"}) as client:
+            for model in self._models():
+                if self._cooldown_until(model) > time.time():
+                    continue
+                payload = self._payload(model, instructions, conversation, tools)
+                self._active_model = model
+                if tool_choice:
+                    payload["tool_choice"] = tool_choice
+                status: int | None = None
+                try:
+                    response = await client.post(NVIDIA_CHAT_URL, json=payload)
+                    status = response.status_code
+                    if status in {401, 403}:
+                        raise NvidiaProviderError("NVIDIA authentication rejected", status_code=status, reason="authentication")
+                    if status == 429:
+                        raise NvidiaProviderError("NVIDIA rate limit", status_code=status, reason="rate_limited")
+                    response.raise_for_status()
+                    return self._parse_response(response.json(), tools, usage_context or {})
+                except NvidiaProviderError as exc:
+                    last_error = exc
+                except (httpx.HTTPError, ValueError, TypeError) as exc:
+                    last_error = NvidiaProviderError("NVIDIA request failed", status_code=status, reason="transport_or_response")
+                if last_error.status_code in {401, 403}:
+                    raise last_error
+                self._mark_failure(model, last_error.status_code, last_error.reason)
+                if last_error.status_code == 429:
+                    retry_after = response.headers.get("Retry-After") if "response" in locals() else None
+                    self._mark_endpoint_cooldown(429, "rate_limited", _nvidia_retry_after(retry_after))
+                    if rate_limited:
+                        break
+                    rate_limited = True
+                    alternate_after_rate_limit = True
+                elif alternate_after_rate_limit:
+                    break
+        raise last_error or NvidiaProviderError("No NVIDIA model is currently available", reason="cooldown")
+
+
 # --- Registry / factory --------------------------------------------------------
 
 
@@ -647,8 +900,22 @@ def _build_ollama_client(config: LlmProviderConfig, usage_recorder: UsageRecorde
     )
 
 
+def _build_nvidia_client(config: LlmProviderConfig, usage_recorder: UsageRecorder | None) -> LlmClient | None:
+    if not config.nvidia_api_key:
+        return None
+    return NvidiaProviderClient(
+        config.nvidia_api_key,
+        config.model,
+        catalog_path=config.nvidia_catalog_path,
+        state_get=config.nvidia_state_get,
+        state_set=config.nvidia_state_set,
+        usage_recorder=usage_recorder,
+    )
+
+
 _LLM_PROVIDERS: dict[str, ProviderBuilder] = {
     "anthropic": _build_anthropic_client,
+    "nvidia": _build_nvidia_client,
     "ollama": _build_ollama_client,
     "openai": _build_openai_client,
 }
@@ -686,5 +953,46 @@ def build_llm_client(
         anthropic_api_key=config.anthropic_api_key,
         ollama_base_url=config.ollama_base_url,
         max_output_tokens=config.max_output_tokens,
+        nvidia_api_key=config.nvidia_api_key,
+        nvidia_catalog_path=config.nvidia_catalog_path,
+        nvidia_state_get=config.nvidia_state_get,
+        nvidia_state_set=config.nvidia_state_set,
     )
     return builder(normalized_config, usage_recorder)
+
+
+def nvidia_model_status(config: LlmProviderConfig) -> list[dict[str, Any]]:
+    """Return sanitized ordered model state for an authenticated admin surface."""
+    from clients.nvidia_catalog import nvidia_models
+
+    def cooldown_timestamp(value: Any) -> float:
+        try:
+            timestamp = float(value or 0)
+            return timestamp if math.isfinite(timestamp) else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    now = time.time()
+    endpoint = {}
+    if config.nvidia_state_get is not None:
+        try:
+            endpoint = json.loads(config.nvidia_state_get("nvidia.endpoint_cooldown") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            endpoint = {}
+    endpoint_until = cooldown_timestamp(endpoint.get("until")) if isinstance(endpoint, dict) else 0
+    result: list[dict[str, Any]] = []
+    for model in nvidia_models(config.nvidia_catalog_path):
+        state: dict[str, Any] = {}
+        if config.nvidia_state_get is not None:
+            try:
+                raw = json.loads(config.nvidia_state_get(f"nvidia.cooldown.{model}") or "{}")
+                state = raw if isinstance(raw, dict) else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                state = {}
+        until = cooldown_timestamp(state.get("until"))
+        result.append({
+            "model": model,
+            "status": "cooldown" if until > now or endpoint_until > now else "available",
+            "cooldown_until": max(until, endpoint_until) if max(until, endpoint_until) > now else None,
+        })
+    return result
