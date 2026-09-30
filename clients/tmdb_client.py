@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 
-_IMDB_ID_RE = re.compile(r"^tt\\d{7,10}$", re.IGNORECASE)
+_IMDB_ID_RE = re.compile(r"^tt\d{7,10}$", re.IGNORECASE)
 
 
 class TmdbClient:
