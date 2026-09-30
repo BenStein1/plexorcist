@@ -1,5 +1,6 @@
 import httpx
 import re
+from urllib.parse import quote
 
 from clients.base import BaseHttpClient
 
@@ -412,7 +413,7 @@ class OmbiClient(BaseHttpClient):
         tmdb_id: int | None = None,
     ) -> dict:
         try:
-            payload = await self.get_json(f"/api/v1/Request/movie/search/{query}")
+            payload = await self.get_json(f"/api/v1/Request/movie/search/{self._path_segment(query)}")
         except httpx.HTTPError as exc:
             return {
                 "query": query,
@@ -1177,12 +1178,13 @@ class OmbiClient(BaseHttpClient):
         return request_seasons
 
     async def _search_multi(self, query: str) -> list[dict]:
-        payload = await self.post_json(f"/api/v2/Search/multi/{query}", {})
+        payload = await self.post_json(f"/api/v2/Search/multi/{self._path_segment(query)}", {})
         return payload if isinstance(payload, list) else []
 
     async def _search_fallback(self, query: str) -> list[dict]:
-        movies = await self.get_json(f"/api/v1/Search/movie/{query}")
-        shows = await self.get_json(f"/api/v1/Search/tv/{query}")
+        encoded_query = self._path_segment(query)
+        movies = await self.get_json(f"/api/v1/Search/movie/{encoded_query}")
+        shows = await self.get_json(f"/api/v1/Search/tv/{encoded_query}")
         merged: list[dict] = []
         if isinstance(movies, list):
             merged.extend(movies)
@@ -1235,6 +1237,11 @@ class OmbiClient(BaseHttpClient):
         if not seasons:
             seasons.extend(tv_detail.get("seasonRequests") or [])
         return seasons
+
+    @staticmethod
+    def _path_segment(value: object) -> str:
+        """Percent-encode user/media text before embedding it in an Ombi URL path."""
+        return quote(str(value or ""), safe="")
 
     def _safe_int(self, value: object) -> int | None:
         try:

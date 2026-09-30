@@ -78,6 +78,7 @@ def test_admin_sees_admin_tools():
     settings = Settings()
     names = {spec.name for spec in visible_specs(_user(is_admin=True), settings)}
     assert "get_admin_task_summary" in names
+    assert "create_admin_task" in names
     assert "run_transmission_maintenance" in names
 
 
@@ -154,6 +155,12 @@ def test_admin_summary_specific_user_requires_user_query():
     schemas.AdminTaskSummaryInput.model_validate({"scope": "all_users"})
 
 
+def test_create_admin_task_requires_nonempty_content():
+    with pytest.raises(ValidationError):
+        schemas.CreateAdminTaskInput.model_validate({"content": ""})
+    schemas.CreateAdminTaskInput.model_validate({"content": "Fix F/X lookup"})
+
+
 def test_resolve_admin_task_requires_note_id_or_task_query():
     with pytest.raises(ValidationError):
         schemas.ResolveAdminTaskInput.model_validate({})
@@ -169,11 +176,11 @@ def test_friendly_name_inputs_enforce_length_bounds():
     schemas.SetMyFriendlyNameInput.model_validate({"friendly_name": "Steve"})
 
 
-def test_resolve_admin_task_and_set_user_friendly_name_are_admin_only():
+def test_admin_task_mutations_and_set_user_friendly_name_are_admin_only():
     settings = Settings()
     admin_names = {spec.name for spec in visible_specs(_user(is_admin=True), settings)}
     normal_names = {spec.name for spec in visible_specs(_user(is_admin=False), settings)}
-    for name in ("resolve_admin_task", "set_user_friendly_name"):
+    for name in ("create_admin_task", "resolve_admin_task", "set_user_friendly_name"):
         assert name in admin_names
         assert name not in normal_names
     # self-service rename is not admin-gated

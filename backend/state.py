@@ -845,12 +845,12 @@ class ConversationStore:
         status: str = "logged",
         tier: int = 1,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> int:
         import json
 
         now = datetime.utcnow().isoformat()
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO user_memory_notes (
                     user_id, note_type, content, task_id, status, tier, metadata_json, created_at, updated_at
@@ -868,6 +868,7 @@ class ConversationStore:
                     now,
                 ),
             )
+            return int(cursor.lastrowid)
 
     def add_user_memory_snapshot(
         self,

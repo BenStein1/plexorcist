@@ -196,6 +196,16 @@ class Toolkit:
             return self._admin_required()
         return await self.admin_tools.get_admin_task_summary(user_query=user_query, scope=scope, days=days, limit=limit)
 
+    async def create_admin_task(self, content: str, user_query: str | None = None) -> dict:
+        if not self.is_admin:
+            return self._admin_required()
+        return await self.admin_tools.create_admin_task(
+            content=content,
+            user_query=user_query,
+            sender_user_id=self.user.user_id,
+            sender_name=self.user.display_name or self.user.username or "Ben",
+        )
+
     async def send_admin_message(self, message: str, user_query: str | None = None, task_query: str | None = None) -> dict:
         if not self.is_admin:
             return self._admin_required()
@@ -358,7 +368,8 @@ CATALOG: list[ToolSpec] = [
             "Search for movie or TV show candidates and see whether Plex already has the best match. "
             "Use this FIRST to resolve a vague, fuzzy, or half-remembered title before requesting anything. "
             "If an embellished query fails (e.g. 'M.I.A. 2026 Peacock Shannon'), retry with the plain likely title ('M.I.A.') before saying it cannot be found. "
-            "If multiple plausible candidates return, ask the user which one they mean using title + year — do not guess."
+            "If multiple plausible candidates return, show title + year + TMDB ID when available and ask the user to disambiguate with the TMDB ID — do not guess. "
+            "If title lookup itself keeps failing, ask for a TMDB ID; once the user provides one, use request_movie_for_user directly rather than searching for the numeric ID."
         ),
         input_model=schemas.SearchMediaInput,
         resolve=lambda tk: tk.media.search_media,
@@ -658,6 +669,18 @@ CATALOG: list[ToolSpec] = [
         input_model=schemas.AdminTaskSummaryInput,
         resolve=lambda tk: tk.get_admin_task_summary,
         tags=_tags(ADMIN, READONLY),
+    ),
+    ToolSpec(
+        name="create_admin_task",
+        description=(
+            "Admin-only explicit task creation on the same live board returned by get_admin_task_summary. "
+            "Use whenever the admin asks to create/add/open a task, ticket, issue, or to-do for later work. "
+            "Omit user_query for the admin's own task; set user_query only when the task belongs to a named user. "
+            "This writes the task immediately and returns its numeric note_id. Never claim task creation is unavailable when this tool is visible."
+        ),
+        input_model=schemas.CreateAdminTaskInput,
+        resolve=lambda tk: tk.create_admin_task,
+        tags=_tags(ADMIN),
     ),
     ToolSpec(
         name="resolve_admin_task",
