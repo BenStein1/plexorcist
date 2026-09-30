@@ -11,7 +11,7 @@ The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage,
 - Ombi login gate: users must exist in Ombi before entering Plexorcist.
 - Friendly-name/admin identity handling for better chat responses.
 - Movie and TV search/request flows through Ombi.
-- Movie requests by TMDB ID or exact title plus year.
+- Movie requests by TMDB ID, IMDb ID, or exact title plus year.
 - TV request scope handling for first season, individual seasons, full series, and single episodes.
 - Plex/Ombi side-by-side library inventory checks.
 - SickChill repair tools for missing, ignored, wanted, or stuck requested episodes.
@@ -61,7 +61,7 @@ Normal request flow:
 
 - Check Plex/Ombi state.
 - Request movies/shows through Ombi.
-- Use exact movie title plus year or TMDB ID for movie requests.
+- Use exact movie title plus year, TMDB ID, or IMDb ID for movie requests.
 - Use scoped TV requests to avoid accidentally requesting entire large shows.
 
 Support/repair flow:
