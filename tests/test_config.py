@@ -20,6 +20,12 @@ def test_env_aliases_apply(monkeypatch):
     assert settings.effective_llm_request_timeout_seconds == 45
 
 
+def test_tmdb_api_key_env_alias(monkeypatch):
+    monkeypatch.setenv("TMDB_API_KEY", "tmdb-test-key")
+    settings = Settings()
+    assert settings.tmdb_api_key == "tmdb-test-key"
+
+
 def test_effective_ollama_base_url_fallback(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
