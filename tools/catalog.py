@@ -27,6 +27,7 @@ from clients.prowl_client import ProwlClient
 from clients.radarr_client import RadarrClient
 from clients.sickchill_client import SickChillClient
 from clients.tautulli_client import TautulliClient
+from clients.tmdb_client import TmdbClient
 from clients.transmission_client import TransmissionClient
 from tools import schemas
 from tools.admin_alerts import AdminAlertReporter
@@ -94,11 +95,21 @@ class Toolkit:
     def is_admin(self) -> bool:
         return bool(self.user and self.user.is_admin)
 
-    async def request_movie(self, tmdb_id: int | None = None, title: str | None = None, year: int | None = None) -> dict:
+    async def request_movie(
+        self,
+        tmdb_id: int | None = None,
+        imdb_id: str | None = None,
+        title: str | None = None,
+        year: int | None = None,
+    ) -> dict:
         if not self._username:
             return self._auth_required()
         return await self.requests.request_movie_for_user(
-            username=self._username, tmdb_id=tmdb_id, title=title, year=year
+            username=self._username,
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
+            title=title,
+            year=year,
         )
 
     async def request_show_scope(self, tvdb_id: int, scope: str) -> dict:
@@ -302,6 +313,7 @@ class Toolkit:
 
 def build_toolkit(settings: Settings, store: ConversationStore, user: UserContext | None) -> Toolkit:
     ombi = OmbiClient(settings.ombi_base_url, settings.ombi_api_key)
+    tmdb = TmdbClient(settings.tmdb_api_key)
     plex = PlexClient(settings.plex_base_url, settings.plex_token)
     radarr = RadarrClient(settings.radarr_base_url, settings.radarr_api_key)
     sickchill = SickChillClient(settings.sickchill_base_url, settings.sickchill_api_key, tv_root=settings.sickchill_tv_root)
@@ -323,7 +335,12 @@ def build_toolkit(settings: Settings, store: ConversationStore, user: UserContex
         store=store,
         user=user,
         media=MediaSearchTools(ombi, plex),
-        requests=RequestTools(ombi, store=store, user_id=user.user_id if user else None),
+        requests=RequestTools(
+            ombi,
+            store=store,
+            user_id=user.user_id if user else None,
+            tmdb=tmdb,
+        ),
         episodes=EpisodeTools(plex, sickchill),
         movie_repairs=MovieRepairTools(ombi, radarr, plex),
         repairs=RepairTools(ombi, sickchill, plex),
@@ -445,9 +462,10 @@ CATALOG: list[ToolSpec] = [
         name="request_movie_for_user",
         description=(
             "Submit a movie request through Ombi for the authenticated user. "
-            "Requires either a positive TMDB id (authoritative when the user gives one) or BOTH exact title and release year — title alone is rejected. "
+            "Accept a positive TMDB id, an IMDb title id such as tt0089118, or BOTH exact title and release year — title alone is rejected. "
+            "When the user gives an IMDb id, pass it as imdb_id; the server resolves it to TMDB before sending anything to Ombi. "
             "If you only have a title, ask the user for the year or resolve it via search_media first. "
-            "If Ombi returns ok: false, report the failure plainly; never imply the request succeeded."
+            "If the result returns ok: false, report the failure plainly; never imply the request succeeded."
         ),
         input_model=schemas.RequestMovieInput,
         resolve=lambda tk: tk.request_movie,

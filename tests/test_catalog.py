@@ -120,6 +120,14 @@ def test_request_movie_requires_id_or_title_year():
         schemas.RequestMovieInput.model_validate({"title": "Heat"})
     schemas.RequestMovieInput.model_validate({"title": "Heat", "year": 1995})
     schemas.RequestMovieInput.model_validate({"tmdb_id": 949})
+    imdb = schemas.RequestMovieInput.model_validate({"imdb_id": "imdb:tt0113277"})
+    assert imdb.imdb_id == "tt0113277"
+    imdb_url = schemas.RequestMovieInput.model_validate(
+        {"imdb_id": "https://www.imdb.com/title/tt0113277/?ref_=fn_all_ttl_1"}
+    )
+    assert imdb_url.imdb_id == "tt0113277"
+    with pytest.raises(ValidationError, match="IMDb"):
+        schemas.RequestMovieInput.model_validate({"imdb_id": "0113277"})
 
 
 def test_request_show_scope_requires_positive_id_and_known_scope():

@@ -63,6 +63,7 @@ class Settings(BaseSettings):
 
     ombi_base_url: str = env_field(default="http://localhost:5000", env="OMBI_BASE_URL")
     ombi_api_key: str | None = env_field(default=None, env="OMBI_API_KEY")
+    tmdb_api_key: str | None = env_field(default=None, env="TMDB_API_KEY")
     sickchill_base_url: str = env_field(default="http://localhost:8081", env="SICKCHILL_BASE_URL")
     sickchill_api_key: str | None = env_field(default=None, env="SICKCHILL_API_KEY")
     sickchill_tv_root: str | None = env_field(default=None, env="SICKCHILL_TV_ROOT")
