@@ -65,6 +65,44 @@ def tv_request_record(tvdb_id=ALTERED_CARBON_TVDB, title="Altered Carbon", **chi
 
 
 # --------------------------------------------------------------------------------
+# Search terms are URL path segments. Titles like F/X must not become extra
+# route components inside Ombi.
+# --------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_media_search_percent_encodes_slashes_in_ombi_paths():
+    client = FakeOmbi(
+        get_routes={
+            "/api/v1/Search/movie/F%2FX": [],
+            "/api/v1/Search/tv/F%2FX": [],
+        },
+        post_result=[],
+    )
+
+    result = await client.search_media("F/X")
+
+    assert result["query"] == "F/X"
+    assert client.post_calls == [("/api/v2/Search/multi/F%2FX", {})]
+    assert client.get_calls == [
+        "/api/v1/Search/movie/F%2FX",
+        "/api/v1/Search/tv/F%2FX",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_movie_request_status_percent_encodes_slashes_too():
+    client = FakeOmbi(
+        get_routes={"/api/v1/Request/movie/search/F%2FX": []},
+    )
+
+    result = await client.check_movie_request_status("F/X")
+
+    assert result["status"] == "missing"
+    assert client.get_calls == ["/api/v1/Request/movie/search/F%2FX"]
+
+
+# --------------------------------------------------------------------------------
 # The headline regression: result=false is not a failure.
 # --------------------------------------------------------------------------------
 
