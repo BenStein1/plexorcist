@@ -4,6 +4,7 @@ import httpx
 
 from backend.state import ConversationStore
 from clients.ombi_client import OmbiClient
+from clients.tmdb_client import TmdbClient
 from tools.error_helpers import classify_http_error, classify_service_result, service_action, user_error_summary
 
 
@@ -57,10 +58,12 @@ class RequestTools:
         ombi: OmbiClient,
         store: ConversationStore | None = None,
         user_id: str | None = None,
+        tmdb: TmdbClient | None = None,
     ) -> None:
         self.ombi = ombi
         self.store = store
         self.user_id = user_id
+        self.tmdb = tmdb
 
     def _record_confirmed_request(
         self,
@@ -156,18 +159,76 @@ class RequestTools:
         self,
         username: str,
         tmdb_id: int | None = None,
+        imdb_id: str | None = None,
         title: str | None = None,
         year: int | None = None,
     ) -> dict:
         not_ready = await self._account_not_ready(username)
         if not_ready is not None:
             return not_ready
+
+        resolved_via_imdb = False
+        canonical_imdb_id = imdb_id
+        if tmdb_id is None and imdb_id:
+            if self.tmdb is None:
+                return {
+                    "ok": False,
+                    "status": "not_configured",
+                    "service": "tmdb",
+                    "operation": "imdb_id_lookup",
+                    "failure_type": "configuration",
+                    "imdb_id": imdb_id,
+                    "reason": "TMDB_API_KEY is not configured.",
+                    "action": "admin_attention",
+                    "user_summary": "IMDb lookup is not configured right now, so I did not send a movie request.",
+                }
+            try:
+                resolution = await self.tmdb.resolve_movie_by_imdb_id(imdb_id)
+            except httpx.HTTPError as exc:
+                error = classify_http_error(service="tmdb", operation="imdb_id_lookup", exc=exc)
+                return {
+                    "ok": False,
+                    "status": "imdb_lookup_failed",
+                    "imdb_id": imdb_id,
+                    "action": service_action(error),
+                    "reason": str(exc),
+                    **error,
+                    "user_summary": "I could not resolve that IMDb ID through TMDB right now, so I did not send a movie request.",
+                }
+            if not resolution.get("ok"):
+                status = str(resolution.get("status") or "imdb_lookup_failed")
+                summary = {
+                    "invalid_imdb_id": "That does not look like a valid IMDb title ID, so I did not send a movie request.",
+                    "not_found": "I could not match that IMDb ID to a movie in TMDB, so I did not send a movie request.",
+                    "not_configured": "IMDb lookup is not configured right now, so I did not send a movie request.",
+                }.get(status, "TMDB did not return a usable movie for that IMDb ID, so I did not send a request.")
+                return {
+                    **resolution,
+                    "service": "tmdb",
+                    "operation": "imdb_id_lookup",
+                    "failure_type": "configuration" if status == "not_configured" else "lookup_failed",
+                    "action": "admin_attention" if status == "not_configured" else "retry_or_disambiguate",
+                    "user_summary": summary,
+                }
+            tmdb_id = int(resolution["tmdb_id"])
+            canonical_imdb_id = str(resolution.get("imdb_id") or imdb_id)
+            title = title or resolution.get("title")
+            year = year or resolution.get("year")
+            resolved_via_imdb = True
+
         result = await self.ombi.request_movie_for_user(
             username=username,
             tmdb_id=tmdb_id,
             title=title,
             year=year,
         )
+        if canonical_imdb_id:
+            result = {
+                **result,
+                "imdb_id": canonical_imdb_id,
+                "tmdb_id": result.get("tmdb_id") or tmdb_id,
+                **({"resolved_via": "imdb_id"} if resolved_via_imdb else {}),
+            }
         stamped = _stamp_request_failure(result, operation="movie_request")
         return self._record_confirmed_request(
             stamped,
