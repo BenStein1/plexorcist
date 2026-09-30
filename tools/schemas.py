@@ -8,9 +8,10 @@ returned to the model as structured errors it can correct, never swallowed.
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ToolInput(BaseModel):
@@ -110,14 +111,34 @@ class PlexRecommendationPoolInput(ToolInput):
 
 class RequestMovieInput(ToolInput):
     tmdb_id: int | None = Field(default=None, ge=1, description="Positive TMDB id. Authoritative when the user provides one.")
+    imdb_id: str | None = Field(
+        default=None,
+        description="IMDb title id such as tt0089118. imdb:tt0089118 and IMDb title URLs are normalized too.",
+    )
     title: str | None = Field(default=None, description="Exact movie title. Must be paired with year.")
     year: int | None = Field(default=None, description="Release year. Required when requesting by title.")
 
+    @field_validator("imdb_id", mode="before")
+    @classmethod
+    def _normalize_imdb_id(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        direct = re.fullmatch(r"(?:imdb:)?(tt\d{7,10})", text, flags=re.IGNORECASE)
+        if direct:
+            return direct.group(1).lower()
+        url_match = re.search(r"(?:www\.)?imdb\.com/title/(tt\d{7,10})(?:[/?#]|$)", text, flags=re.IGNORECASE)
+        if url_match:
+            return url_match.group(1).lower()
+        raise ValueError("imdb_id must look like tt0089118, imdb:tt0089118, or an IMDb title URL")
+
     @model_validator(mode="after")
     def _require_id_or_title_year(self) -> "RequestMovieInput":
-        if self.tmdb_id is None and not (self.title and self.year):
+        if self.tmdb_id is None and self.imdb_id is None and not (self.title and self.year):
             raise ValueError(
-                "Provide either a positive tmdb_id, or BOTH title and year. "
+                "Provide either a positive tmdb_id, a valid imdb_id, or BOTH title and year. "
                 "If you only have a title, ask the user for the release year "
                 "or resolve it with search_media first."
             )
