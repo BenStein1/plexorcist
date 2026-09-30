@@ -89,6 +89,8 @@ async def test_imdb_lookup_failure_never_calls_ombi():
 
     assert result["ok"] is False
     assert result["status"] == "not_found"
+    assert "service" not in result
+    assert "failure_type" not in result
     assert ombi.requests == []
 
 
