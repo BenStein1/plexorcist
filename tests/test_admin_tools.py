@@ -43,6 +43,32 @@ def _note_id(store: ConversationStore, user_id: str) -> int:
     return int(row[0])
 
 
+# --- explicit task creation ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_admin_task_is_immediate_and_visible(tmp_path):
+    store = _store(tmp_path)
+    tools = _admin_tools(tmp_path, store)
+
+    created = await tools.create_admin_task(
+        "Escape slashes in media titles and tell users to disambiguate with TMDB ID",
+        sender_user_id="admin-u1",
+        sender_name="Ben",
+    )
+
+    assert created["ok"] is True
+    assert created["status"] == "open"
+    assert created["note_id"] > 0
+    assert created["task_id"]
+    assert created["creation_receipt"].startswith(f"Created task [{created['note_id']}]")
+
+    summary = await tools.get_admin_task_summary(scope="all_users")
+    assert summary["task_count"] == 1
+    assert summary["tasks"][0]["note_id"] == created["note_id"]
+    assert summary["tasks"][0]["content"] == created["content"]
+
+
 # --- resolve by note_id -------------------------------------------------------
 
 
