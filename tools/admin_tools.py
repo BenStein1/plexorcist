@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 import json
 import re
 import unicodedata
+import uuid
 from typing import Any
 
 import httpx
@@ -230,6 +231,79 @@ class AdminTools:
             "task_count": len(tasks),
             "tasks": tasks,
             "user_summary": summary,
+        }
+
+    async def create_admin_task(
+        self,
+        content: str,
+        *,
+        sender_user_id: str,
+        sender_name: str = "Ben",
+        user_query: str | None = None,
+    ) -> dict[str, Any]:
+        if self.store is None:
+            return {
+                "ok": False,
+                "action": "admin_task_create_unavailable",
+                "reason": "store_unavailable",
+                "user_summary": "Task creation is unavailable because the memory store is not configured.",
+            }
+
+        task_content = str(content or "").strip()
+        if not task_content:
+            return {
+                "ok": False,
+                "action": "admin_task_create",
+                "reason": "content_required",
+                "user_summary": "I need task text to create the task.",
+            }
+
+        if user_query:
+            resolved = self._resolve_user_query(user_query)
+            if not resolved.get("ok"):
+                return {**resolved, "action": "admin_task_create"}
+            target = resolved["user"]
+            target_user_id = str(target.get("user_id") or "").strip()
+            target_label = str(target.get("label") or target.get("username") or target_user_id).strip()
+        else:
+            target_user_id = str(sender_user_id or "").strip()
+            target_label = str(sender_name or target_user_id or "Admin").strip()
+
+        if not target_user_id:
+            return {
+                "ok": False,
+                "action": "admin_task_create",
+                "reason": "target_user_required",
+                "user_summary": "I couldn't determine which task board should own this task.",
+            }
+
+        task_id = str(uuid.uuid4())
+        note_id = self.store.add_user_memory_note(
+            user_id=target_user_id,
+            note_type="task",
+            content=task_content,
+            task_id=task_id,
+            status="open",
+            tier=1,
+            metadata={
+                "created_by_tool": "create_admin_task",
+                "created_by_admin_user_id": sender_user_id,
+                "created_by_admin_name": sender_name,
+                "target_label": target_label,
+            },
+        )
+        receipt = f"Created task [{note_id}] for {target_label}: {task_content}"
+        return {
+            "ok": True,
+            "action": "admin_task_create",
+            "note_id": note_id,
+            "task_id": task_id,
+            "user_id": target_user_id,
+            "user_label": target_label,
+            "content": task_content,
+            "status": "open",
+            "creation_receipt": receipt,
+            "user_summary": receipt,
         }
 
     async def resolve_admin_task(
