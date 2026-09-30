@@ -230,6 +230,18 @@ class AdminTaskSummaryInput(ToolInput):
         return self
 
 
+class CreateAdminTaskInput(ToolInput):
+    content: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="The actionable task text to put on the live admin task board.",
+    )
+    user_query: str | None = Field(
+        default=None,
+        description="Optional named user/friendly name/username/user id whose board entry this task belongs to. Omit for the admin's own task.",
+    )
+
+
 class SendAdminMessageInput(ToolInput):
     message: str = Field(description="The complete recipient-facing note. The recipient sees only this text, not the admin conversation: resolve pronouns, implied referents, shorthand, and missing subjects from the full conversation so it makes sense on its own. Preserve the admin's meaning, facts, humor, affection, profanity, and tone; do not sanitize or invent details. Messages may be about any topic and need not be verbatim.")
     user_query: str | None = Field(default=None, description="Recipient when the admin names a user directly.")
