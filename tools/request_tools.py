@@ -202,12 +202,18 @@ class RequestTools:
                     "not_found": "I could not match that IMDb ID to a movie in TMDB, so I did not send a movie request.",
                     "not_configured": "IMDb lookup is not configured right now, so I did not send a movie request.",
                 }.get(status, "TMDB did not return a usable movie for that IMDb ID, so I did not send a request.")
+                if status in {"invalid_imdb_id", "not_found"}:
+                    return {
+                        **resolution,
+                        "action": "retry_or_disambiguate",
+                        "user_summary": summary,
+                    }
                 return {
                     **resolution,
                     "service": "tmdb",
                     "operation": "imdb_id_lookup",
-                    "failure_type": "configuration" if status == "not_configured" else "lookup_failed",
-                    "action": "admin_attention" if status == "not_configured" else "retry_or_disambiguate",
+                    "failure_type": "configuration" if status == "not_configured" else "invalid_response",
+                    "action": "admin_attention",
                     "user_summary": summary,
                 }
             tmdb_id = int(resolution["tmdb_id"])
