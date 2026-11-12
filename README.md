@@ -4,6 +4,23 @@ Plexorcist Concierge is a FastAPI chat front door for a Plex request stack, curr
 
 The assistant talks to real service adapters for Ombi, Plex, SickChill/SickRage, Radarr, Tautulli, Jackett, Transmission, and Prowl. The model cannot make arbitrary API calls; it can only invoke the registered tools exposed by the backend.
 
+## Screenshots
+
+The concierge interface includes quick-start actions, request and availability status, and a deliberately playful personality.
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/screenshots/concierge-welcome.png" alt="Plexorcist Concierge welcome screen with suggested media actions"></td>
+    <td width="33%"><img src="docs/screenshots/concierge-episode-status.png" alt="Plexorcist checking the requested Daria second season and showing acquisition status"></td>
+    <td width="33%"><img src="docs/screenshots/concierge-personality.png" alt="Plexorcist responding to a Troll 2 request with its exaggerated goblin personality"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Welcome</b></td>
+    <td align="center"><b>Episode status</b></td>
+    <td align="center"><b>Personality</b></td>
+  </tr>
+</table>
+
 ## Current Capabilities
 
 - Plex OAuth login with server-side session identity.
