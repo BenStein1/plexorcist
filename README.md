@@ -10,9 +10,9 @@ The concierge interface includes quick-start actions, request and availability s
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/screenshots/concierge-welcome.png" alt="Plexorcist Concierge welcome screen with suggested media actions"></td>
-    <td width="33%"><img src="docs/screenshots/concierge-episode-status.png" alt="Plexorcist checking the requested Daria second season and showing acquisition status"></td>
-    <td width="33%"><img src="docs/screenshots/concierge-personality.png" alt="Plexorcist responding to a Troll 2 request with its exaggerated goblin personality"></td>
+    <td width="33%"><img src="https://raw.githubusercontent.com/BenStein1/plexorcist/43c965f1541b1940e44232ed422c8d34ccf444c8/docs/screenshots/concierge-welcome.png" alt="Plexorcist Concierge welcome screen with suggested media actions"></td>
+    <td width="33%"><img src="https://raw.githubusercontent.com/BenStein1/plexorcist/43c965f1541b1940e44232ed422c8d34ccf444c8/docs/screenshots/concierge-episode-status.png" alt="Plexorcist checking the requested Daria second season and showing acquisition status"></td>
+    <td width="33%"><img src="https://raw.githubusercontent.com/BenStein1/plexorcist/43c965f1541b1940e44232ed422c8d34ccf444c8/docs/screenshots/concierge-personality.png" alt="Plexorcist responding to a Troll 2 request with its exaggerated goblin personality"></td>
   </tr>
   <tr>
     <td align="center"><b>Welcome</b></td>
